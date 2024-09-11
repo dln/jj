@@ -150,7 +150,7 @@ use crate::diff_util::DiffRenderer;
 use crate::formatter::FormatRecorder;
 use crate::formatter::Formatter;
 use crate::formatter::PlainTextFormatter;
-use crate::git_util::is_colocated_git_workspace;
+use crate::git_util::colocated_git_worktree;
 use crate::git_util::print_failed_git_export;
 use crate::git_util::print_git_import_stats;
 use crate::merge_tools::DiffEditor;
@@ -721,7 +721,7 @@ pub struct WorkspaceCommandHelper {
     // TODO: Parsed template can be cached if it doesn't capture 'repo lifetime
     commit_summary_template_text: String,
     may_update_working_copy: bool,
-    working_copy_shared_with_git: bool,
+    colocated_git_worktree: Option<PathBuf>,
 }
 
 impl WorkspaceCommandHelper {
@@ -737,14 +737,15 @@ impl WorkspaceCommandHelper {
             settings.config().get_string("templates.commit_summary")?;
         let may_update_working_copy =
             loaded_at_head && !env.command.global_args().ignore_working_copy;
-        let working_copy_shared_with_git = is_colocated_git_workspace(&workspace, &repo);
+        let colocated_git_worktree =
+            colocated_git_worktree(&workspace, &repo).map(ToOwned::to_owned);
         let helper = Self {
             workspace,
             user_repo: ReadonlyUserRepo::new(repo),
             env,
             commit_summary_template_text,
             may_update_working_copy,
-            working_copy_shared_with_git,
+            colocated_git_worktree,
         };
         // Parse commit_summary template early to report error before starting
         // mutable operation.
@@ -781,7 +782,7 @@ impl WorkspaceCommandHelper {
     #[instrument(skip_all)]
     pub fn maybe_snapshot(&mut self, ui: &Ui) -> Result<(), CommandError> {
         if self.may_update_working_copy {
-            if self.working_copy_shared_with_git {
+            if self.working_copy_shared_with_git() {
                 self.import_git_head(ui)?;
             }
             // Because the Git refs (except HEAD) aren't imported yet, the ref
@@ -790,7 +791,7 @@ impl WorkspaceCommandHelper {
             // failure is okay.
             self.snapshot_working_copy(ui)?;
             // import_git_refs() can rebase the working-copy commit.
-            if self.working_copy_shared_with_git {
+            if self.working_copy_shared_with_git() {
                 self.import_git_refs(ui)?;
             }
         }
@@ -946,7 +947,7 @@ impl WorkspaceCommandHelper {
     }
 
     pub fn working_copy_shared_with_git(&self) -> bool {
-        self.working_copy_shared_with_git
+        self.colocated_git_worktree.is_some()
     }
 
     pub fn format_file_path(&self, file: &RepoPath) -> String {
@@ -1401,6 +1402,7 @@ impl WorkspaceCommandHelper {
         let fsmonitor_settings = self.settings().fsmonitor_settings()?;
         let max_new_file_size = self.settings().max_new_file_size()?;
         let command = self.env.command.clone();
+        let working_copy_shared_with_git = self.working_copy_shared_with_git();
         let mut locked_ws = self.workspace.start_working_copy_mutation()?;
         let old_op_id = locked_ws.locked_wc().old_operation_id().clone();
         let (repo, wc_commit) =
@@ -1478,7 +1480,7 @@ See https://martinvonz.github.io/jj/latest/working-copy/#stale-working-copy \
                 )?;
             }
 
-            if self.working_copy_shared_with_git {
+            if working_copy_shared_with_git {
                 let failed_branches = git::export_refs(mut_repo)?;
                 print_failed_git_export(ui, &failed_branches)?;
             }
@@ -1591,7 +1593,9 @@ See https://martinvonz.github.io/jj/latest/working-copy/#stale-working-copy \
             .map(|commit_id| tx.repo().store().get_commit(commit_id))
             .transpose()?;
 
-        if self.working_copy_shared_with_git {
+        if self.working_copy_shared_with_git() {
+            // FIXME: should have a GIT_DIR pointing to the relevant worktree,
+            // if we're in a workspace in a colocated repo
             let git_repo = self.git_backend().unwrap().open_git_repo()?;
             if let Some(wc_commit) = &maybe_new_wc_commit {
                 git::reset_head(tx.repo_mut(), &git_repo, wc_commit)?;

@@ -51,22 +51,84 @@ pub fn get_git_repo(store: &Store) -> Result<git2::Repository, CommandError> {
     }
 }
 
-pub fn is_colocated_git_workspace(workspace: &Workspace, repo: &ReadonlyRepo) -> bool {
+pub fn colocated_git_worktree<'a>(
+    workspace: &'a Workspace,
+    repo: &'a ReadonlyRepo,
+) -> Option<&'a Path> {
     let Some(git_backend) = repo.store().backend_impl().downcast_ref::<GitBackend>() else {
-        return false;
+        return None;
     };
-    let Some(git_workdir) = git_backend.git_workdir() else {
-        return false; // Bare repository
-    };
-    if git_workdir == workspace.workspace_root() {
-        return true;
+
+    // The git backend may be a bare repository if we created it without --colocate
+    // but then created a workspace using `jj workspace add --colocate ../second`
+    let git_backend_workdir = git_backend.git_workdir();
+
+    // 1. Check if we are in a colocated workspace, specifically _the default_
+    //    colocated workspace.
+    // --------------------------------------------------------------------------------------------
+
+    // Fast path -- the paths are the same, without looking through symlinks.
+    if git_backend_workdir == Some(workspace.workspace_root()) {
+        // We are in a colocated workspace that's home to the real .git directory.
+        // e.g. /repo with /repo/.git
+        return git_backend_workdir;
     }
+
+    // Otherwise, canonicalize both the git backend workdir and the workspace
+    let git_backend_workdir_canonical = git_backend_workdir.and_then(|p| p.canonicalize().ok());
+
     // Colocated workspace should have ".git" directory, file, or symlink. Compare
     // its parent as the git_workdir might be resolved from the real ".git" path.
-    let Ok(dot_git_path) = workspace.workspace_root().join(".git").canonicalize() else {
-        return false;
+    let Ok(workspace_dot_git) = workspace.workspace_root().join(".git").canonicalize() else {
+        return None;
     };
-    git_workdir.canonicalize().ok().as_deref() == dot_git_path.parent()
+
+    // i.e. (/symlink_to_repo -> /repo).canonicalize() == (/repo/.git).parent()
+    if git_backend_workdir_canonical.as_deref() == workspace_dot_git.parent() {
+        // This is the default workspace of a colocated repo
+        return git_backend_workdir;
+    }
+
+    if !workspace_dot_git.exists() {
+        return None;
+    }
+
+    // 2. Check if we are in a secondary colocated workspace
+    // -----------------------------------------------------
+
+    // Get the git directory for the git worktree associated with this workspace
+    // In the case of the default workspace in a colocated repo, this will just be
+    //     /repo/.git
+    // But for a JJ workspace of a colocated repo, this will be
+    //     /repo/.git/worktrees/second
+    // ... or, if the JJ repo was not originally colocated:
+    //     /repo/.jj/repo/store/git/worktrees/second
+    //
+    // ... and the regular file /second/.git will direct libgit2 to that location.
+    //
+    // So try to open the workspace root (/second) as a git repository.
+    let worktree_repo = git2::Repository::open(workspace.workspace_root()).ok()?;
+
+    // This will be /repo/.git/worktrees/second
+    // Make sure we read through any symlinked .git directories
+    let worktree_git_dir_canon = worktree_repo.path().canonicalize().ok()?;
+    let worktree_git_dir_canon = worktree_git_dir_canon.as_path();
+
+    // /repo/.git/worktrees/second should have the git backend's .git directory as a
+    // prefix. Check -- the .git file could somehow be pointing elsewhere, or be
+    // its own .git directory
+    if worktree_git_dir_canon
+        .strip_prefix(git_backend.git_repo_path())
+        .is_err()
+    {
+        tracing::debug!(
+            "This workspace has a .git directory that isn't managed by JJ; it points to a Git \
+             repo at {}",
+            worktree_git_dir_canon.display()
+        );
+        return None;
+    }
+    Some(workspace.workspace_root())
 }
 
 fn terminal_get_username(ui: &Ui, url: &str) -> Option<String> {

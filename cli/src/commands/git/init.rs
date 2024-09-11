@@ -36,8 +36,8 @@ use crate::command_error::CommandError;
 use crate::commands::git::maybe_add_gitignore;
 use crate::config::write_config_value_to_file;
 use crate::config::ConfigNamePathBuf;
+use crate::git_util::colocated_git_worktree;
 use crate::git_util::get_git_repo;
-use crate::git_util::is_colocated_git_workspace;
 use crate::git_util::print_failed_git_export;
 use crate::git_util::print_git_import_stats;
 use crate::ui::Ui;
@@ -167,7 +167,7 @@ pub fn do_init(
                 Workspace::init_external_git(command.settings(), workspace_root, git_repo_path)?;
             // Import refs first so all the reachable commits are indexed in
             // chronological order.
-            let colocated = is_colocated_git_workspace(&workspace, &repo);
+            let colocated = colocated_git_worktree(&workspace, &repo).is_some();
             let repo = init_git_refs(ui, command, repo, colocated)?;
             let mut workspace_command = command.for_workable_repo(ui, workspace, repo)?;
             maybe_add_gitignore(&workspace_command)?;
