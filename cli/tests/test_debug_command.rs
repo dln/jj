@@ -235,9 +235,9 @@ fn test_debug_operation_id() {
     let workspace_path = test_env.env_root().join("repo");
     let stdout =
         test_env.jj_cmd_success(&workspace_path, &["debug", "operation", "--display", "id"]);
-    assert_snapshot!(filter_index_stats(&stdout), @r###"
-    b51416386f2685fd5493f2b20e8eec3c24a1776d9e1a7cb5ed7e30d2d9c88c0c1e1fe71b0b7358cba60de42533d1228ed9878f2f89817d892c803395ccf9fe92
-    "###
+    assert_snapshot!(filter_index_stats(&stdout), @r#"
+    abf67f7f832a282fe7c13bf77be5559cd52af19674b544d9172c3fec49377a1d177974c9600088418a07671f79712ec0507096029a724591047adfdacf430ba4
+    "#
     );
 }
 

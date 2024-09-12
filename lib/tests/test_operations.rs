@@ -426,23 +426,24 @@ fn test_resolve_op_id() {
     let mut operations = Vec::new();
     // The actual value of `i` doesn't matter, we just need to make sure we end
     // up with hashes with ambiguous prefixes.
-    for i in (1..7).chain([16]) {
+    for i in (1..=7).chain([19]) {
         let tx = repo.start_transaction(&settings);
         let repo = tx.commit(format!("transaction {i}"));
         operations.push(repo.operation().clone());
     }
-    // "2" and "0" are ambiguous
-    insta::assert_debug_snapshot!(operations.iter().map(|op| op.id().hex()).collect_vec(), @r###"
+    // "a5" and "0" are ambiguous
+    insta::assert_debug_snapshot!(operations.iter().map(|op| op.id().hex()).collect_vec(), @r#"
     [
-        "5aebb24d08d6f5282d9e06bded4b51febbb4ff4bc822cdd4db9043961339955d6af912e783c3864245867d0cf6d609cb004c5ff0cef5e914c15a415ba92e38a2",
-        "ad1cda629b220f2651d972475fba75e47c30cd57862c51a727e57b7b6e2fbaa937d0bcb881cf6fcff30ba1a088a4ad588cf880765b9d9680b551cdc446f3489e",
-        "2feaf9eb61232582d35f1cb0203b69425f7a7d07140a5f8ff0d0bf98dd9f433b941e4c9e0882f65a007266affee275e235ae1614b159ceadbf9fe6879077a5da",
-        "0b183be5767c3ff9945c8a9e3ac7639d249ff9873985a551f4c2070782aea8b5018ebff906036d1658038708ab9de0d867be385b1181aa7a81669e2ef6852355",
-        "d1c3031dff7b1db4db1bfb592a9aa0ea6faae9300033ef20cb6da488e4b90524c22af8e2541cdb99ca0ee2be3299c213c0f8d48390cd5f11462c4f80c5790f68",
-        "2369ba98e2596715606978a72608970287aaa064ec890f87c29b7e7df64fdf02b7f24b8b03ee845e132f3e19e3929de359b6cfe1328b42946c45ac5ff80705ca",
-        "00271842a189d274a2c97ac28f937584a47b84463d5b408c6f998089131e0e1329a287667b2ac5d63f8c576e95323bcf992c99caa4ef4612a1c3798fe8a3f74f",
+        "a58a75616da2584d2b20b460178f8a81a3580ae83f24a54aee5f0269d6e1c2823c0ef436efed3b36153e9185b1aeb241509357ba54e745181aea6a0966ec4351",
+        "9e07262572459a3b16d3693a85058480a92158fa946919e7b1f18c7b095c6a4c6d1e9d2d7ac8af435f538d7cdddbb7e9d32ddd9b176581e9bf0eec2347ca570c",
+        "5e43cb2936e1e9f4021fb3756eaba62cdb292d13a1fa451ff7796af831e6b8de2e6606aa9ff495b44471c17c208bea3ca3f3a05627989b419a8057127f5b090c",
+        "c2988be0ce9cec11388010b24b44a870dd9336335c6e3c9d99dd03001f497c73748f8eebb028b1f5493b1d31381fa5a2d3ebd9095ddbd0d10405690c5fe721b0",
+        "3f970c1c32005109f2d67c24f8b94aafeb523744e8ad05613c7310ced5c6ecbec8b931883ed64f9c6a1b0577ec67d97518f65125baba65afa505b2309492190b",
+        "82b82ea04e026c91130f84d114c263758a966c35cce30f685d6dc2a87669cf4428f36a4865296e6608a5917a7575c23aae78cb4effe8c2634bdea3d9eece98b8",
+        "a5998078bfd37766a13d32ad8e82f5774e554ad400a4666b77e37c99928af7a12c1a1089d5683a6aef7ad461904cbc91fbed2a4d7dd1b35c403862fc3d6c73ff",
+        "07ce19e393362141f41dfc0024b9a9c715e02c860d3913457d36e2b9d3cd2a8734d817cf2a81c9b6d918f4b4dd198c30ec35354321fc39dca420e3720a12633b",
     ]
-    "###);
+    "#);
 
     let repo_loader = repo.loader();
     let resolve = |op_str: &str| op_walk::resolve_op_for_load(&repo_loader, op_str);
@@ -461,7 +462,7 @@ fn test_resolve_op_id() {
     );
     // Ambiguous id
     assert_matches!(
-        resolve("2"),
+        resolve("a5"),
         Err(OpsetEvaluationError::OpsetResolution(
             OpsetResolutionError::AmbiguousIdPrefix(_)
         ))
@@ -488,7 +489,7 @@ fn test_resolve_op_id() {
     };
     assert_eq!(resolve(&root_operation.id().hex()).unwrap(), root_operation);
     assert_eq!(resolve("000").unwrap(), root_operation);
-    assert_eq!(resolve("002").unwrap(), operations[6]);
+    assert_eq!(resolve("a59").unwrap(), operations[6]);
     assert_matches!(
         resolve("0"),
         Err(OpsetEvaluationError::OpsetResolution(
