@@ -28,6 +28,7 @@ use crate::hex_util;
 use crate::object_id::HexPrefix;
 use crate::object_id::ObjectId;
 use crate::object_id::PrefixResolution;
+use crate::op_store::WorkspaceId;
 use crate::repo::Repo;
 use crate::revset::DefaultSymbolResolver;
 use crate::revset::RevsetExpression;
@@ -52,9 +53,10 @@ impl DisambiguationData {
         &self,
         repo: &dyn Repo,
         extensions: &[impl AsRef<dyn SymbolResolverExtension>],
+        workspace_ctx: Option<&WorkspaceId>,
     ) -> Result<&Indexes, PrefixDisambiguationError> {
         self.indexes.get_or_try_init(|| {
-            let symbol_resolver = DefaultSymbolResolver::new(repo, extensions);
+            let symbol_resolver = DefaultSymbolResolver::new(repo, extensions, workspace_ctx);
             let resolved_expression = self
                 .expression
                 .clone()
@@ -107,13 +109,16 @@ impl IdIndexSourceEntry<ChangeId> for &'_ (CommitId, ChangeId) {
 pub struct IdPrefixContext {
     disambiguation: Option<DisambiguationData>,
     extensions: Arc<RevsetExtensions>,
+    // FIXME: method
+    pub workspace_ctx: Option<WorkspaceId>,
 }
 
 impl IdPrefixContext {
-    pub fn new(extensions: Arc<RevsetExtensions>) -> Self {
+    pub fn new(extensions: Arc<RevsetExtensions>, workspace_ctx: Option<WorkspaceId>) -> Self {
         Self {
             disambiguation: None,
             extensions,
+            workspace_ctx,
         }
     }
 
@@ -129,7 +134,11 @@ impl IdPrefixContext {
         // TODO: propagate errors instead of treating them as if no revset was specified
         self.disambiguation.as_ref().and_then(|disambiguation| {
             disambiguation
-                .indexes(repo, self.extensions.symbol_resolvers())
+                .indexes(
+                    repo,
+                    self.extensions.symbol_resolvers(),
+                    self.workspace_ctx.as_ref(),
+                )
                 .ok()
         })
     }

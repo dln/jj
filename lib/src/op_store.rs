@@ -273,9 +273,8 @@ pub struct View {
     pub remote_views: BTreeMap<String, RemoteView>,
     pub git_refs: BTreeMap<String, RefTarget>,
     /// The commit the Git HEAD points to.
-    // TODO: Support multiple Git worktrees?
     // TODO: Do we want to store the current branch name too?
-    pub git_head: RefTarget,
+    pub git_heads: HashMap<WorkspaceId, RefTarget>,
     // The commit that *should be* checked out in the workspace. Note that the working copy
     // (.jj/working_copy/) has the source of truth about which commit *is* checked out (to be
     // precise: the commit to which we most recently completed an update to).

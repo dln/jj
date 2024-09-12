@@ -627,7 +627,7 @@ impl WorkspaceCommandEnvironment {
         &self.workspace_id
     }
 
-    pub(crate) fn revset_parse_context(&self) -> RevsetParseContext {
+    pub fn revset_parse_context(&self) -> RevsetParseContext {
         let workspace_context = RevsetWorkspaceContext {
             path_converter: &self.path_converter,
             workspace_id: &self.workspace_id,
@@ -651,7 +651,10 @@ impl WorkspaceCommandEnvironment {
     /// Creates fresh new context which manages cache of short commit/change ID
     /// prefixes. New context should be created per repo view (or operation.)
     pub fn new_id_prefix_context(&self) -> IdPrefixContext {
-        let context = IdPrefixContext::new(self.command.revset_extensions().clone());
+        let context = IdPrefixContext::new(
+            self.command.revset_extensions().clone(),
+            Some(self.workspace_id().clone()),
+        );
         match &self.short_prefixes_expression {
             None => context,
             Some(expression) => context.disambiguate_within(expression.clone()),
@@ -808,8 +811,9 @@ impl WorkspaceCommandHelper {
     fn import_git_head(&mut self, ui: &Ui) -> Result<(), CommandError> {
         assert!(self.may_update_working_copy);
         let command = self.env.command.clone();
+        let workspace_id = self.workspace_id().clone();
         let mut tx = self.start_transaction();
-        git::import_head(tx.repo_mut())?;
+        git::import_head(tx.repo_mut(), &workspace_id)?;
         if !tx.repo().has_changes() {
             return Ok(());
         }
@@ -825,8 +829,9 @@ impl WorkspaceCommandHelper {
         //   out yet.
 
         let mut tx = tx.into_inner();
-        let old_git_head = self.repo().view().git_head().clone();
-        let new_git_head = tx.repo().view().git_head().clone();
+        let workspace_id = self.workspace_id();
+        let old_git_head = self.repo().view().git_head(workspace_id).clone();
+        let new_git_head = tx.repo().view().git_head(workspace_id).clone();
         if let Some(new_git_head_id) = new_git_head.as_normal() {
             let workspace_id = self.workspace_id().to_owned();
             let new_git_head_commit = tx.repo().store().get_commit(new_git_head_id)?;
@@ -1342,7 +1347,10 @@ impl WorkspaceCommandHelper {
         // Not using self.id_prefix_context() because the disambiguation data
         // must not be calculated and cached against arbitrary repo. It's also
         // unlikely that the immutable expression contains short hashes.
-        let id_prefix_context = IdPrefixContext::new(self.env.command.revset_extensions().clone());
+        let id_prefix_context = IdPrefixContext::new(
+            self.env.command.revset_extensions().clone(),
+            Some(self.env.workspace_id.clone()),
+        );
         let to_rewrite_revset =
             RevsetExpression::commits(commits.into_iter().cloned().collect_vec());
         let immutable = revset_util::parse_immutable_expression(&self.revset_parse_context())
@@ -1602,7 +1610,7 @@ See https://martinvonz.github.io/jj/latest/working-copy/#stale-working-copy \
 
         if let Some(git_worktree) = self.open_colocated_git_worktree()? {
             if let Some(wc_commit) = &maybe_new_wc_commit {
-                git::reset_head(tx.repo_mut(), &git_worktree, wc_commit)?;
+                git::reset_head(tx.repo_mut(), &git_worktree, self.workspace_id(), wc_commit)?;
             }
             let failed_branches = git::export_refs(tx.repo_mut())?;
             print_failed_git_export(ui, &failed_branches)?;

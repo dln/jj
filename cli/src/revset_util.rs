@@ -195,7 +195,8 @@ pub fn default_symbol_resolver<'a>(
     extensions: &[impl AsRef<dyn SymbolResolverExtension>],
     id_prefix_context: &'a IdPrefixContext,
 ) -> DefaultSymbolResolver<'a> {
-    DefaultSymbolResolver::new(repo, extensions).with_id_prefix_context(id_prefix_context)
+    DefaultSymbolResolver::new(repo, extensions, id_prefix_context.workspace_ctx.as_ref())
+        .with_id_prefix_context(id_prefix_context)
 }
 
 /// Parses user-configured expression defining the heads of the immutable set.

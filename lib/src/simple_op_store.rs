@@ -28,6 +28,7 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use itertools::Itertools as _;
+use maplit::hashmap;
 use prost::Message;
 use tempfile::NamedTempFile;
 use thiserror::Error;
@@ -441,21 +442,43 @@ fn view_to_proto(view: &View) -> crate::protos::op_store::View {
     for (name, target) in &view.tags {
         proto.tags.push(crate::protos::op_store::Tag {
             name: name.clone(),
-            target: ref_target_to_proto(target),
+            target: Some(ref_target_to_proto(target)),
         });
     }
 
     for (git_ref_name, target) in &view.git_refs {
         proto.git_refs.push(crate::protos::op_store::GitRef {
             name: git_ref_name.clone(),
-            target: ref_target_to_proto(target),
+            target: Some(ref_target_to_proto(target)),
             ..Default::default()
         });
     }
 
-    proto.git_head = ref_target_to_proto(&view.git_head);
+    proto.git_heads = git_heads_to_proto(view);
 
     proto
+}
+
+fn git_heads_from_proto(
+    proto: HashMap<String, crate::protos::op_store::RefTarget>,
+) -> HashMap<WorkspaceId, RefTarget> {
+    proto
+        .into_iter()
+        .map(|(id, target)| {
+            let p = ref_target_from_proto(Some(target));
+            (WorkspaceId::new(id), p)
+        })
+        .collect()
+}
+
+fn git_heads_to_proto(view: &View) -> HashMap<String, crate::protos::op_store::RefTarget> {
+    view.git_heads
+        .iter()
+        .map(|(id, target)| {
+            let p = ref_target_to_proto(&target);
+            (id.to_string(), p)
+        })
+        .collect()
 }
 
 fn view_from_proto(proto: crate::protos::op_store::View) -> View {
@@ -495,10 +518,16 @@ fn view_from_proto(proto: crate::protos::op_store::View) -> View {
     }
 
     #[allow(deprecated)]
-    if proto.git_head.is_some() {
-        view.git_head = ref_target_from_proto(proto.git_head);
+    if !proto.git_heads.is_empty() {
+        view.git_heads = git_heads_from_proto(proto.git_heads);
+    } else if proto.git_head.is_some() {
+        view.git_heads = hashmap! {
+            WorkspaceId::default() => ref_target_from_proto(proto.git_head),
+        };
     } else if !proto.git_head_legacy.is_empty() {
-        view.git_head = RefTarget::normal(CommitId::new(proto.git_head_legacy));
+        view.git_heads = hashmap! {
+            WorkspaceId::default() => RefTarget::normal(CommitId::new(proto.git_head_legacy)),
+        };
     }
 
     if !proto.has_git_refs_migrated_to_remote {
@@ -514,14 +543,14 @@ fn branch_views_to_proto_legacy(
 ) -> Vec<crate::protos::op_store::Branch> {
     op_store::merge_join_branch_views(local_branches, remote_views)
         .map(|(name, branch_target)| {
-            let local_target = ref_target_to_proto(branch_target.local_target);
+            let local_target = Some(ref_target_to_proto(branch_target.local_target));
             let remote_branches = branch_target
                 .remote_refs
                 .iter()
                 .map(
                     |&(remote_name, remote_ref)| crate::protos::op_store::RemoteBranch {
                         remote_name: remote_name.to_owned(),
-                        target: ref_target_to_proto(&remote_ref.target),
+                        target: Some(ref_target_to_proto(&remote_ref.target)),
                         state: remote_ref_state_to_proto(remote_ref.state),
                     },
                 )
@@ -619,7 +648,7 @@ fn migrate_git_refs_to_remote(view: &mut View) {
     }
 }
 
-fn ref_target_to_proto(value: &RefTarget) -> Option<crate::protos::op_store::RefTarget> {
+fn ref_target_to_proto(value: &RefTarget) -> crate::protos::op_store::RefTarget {
     let term_to_proto = |term: &Option<CommitId>| crate::protos::op_store::ref_conflict::Term {
         value: term.as_ref().map(|id| id.to_bytes()),
     };
@@ -633,7 +662,7 @@ fn ref_target_to_proto(value: &RefTarget) -> Option<crate::protos::op_store::Ref
             conflict_proto,
         )),
     };
-    Some(proto)
+    proto
 }
 
 #[allow(deprecated)]
@@ -742,6 +771,7 @@ mod tests {
         );
         let default_wc_commit_id = CommitId::from_hex("abc111");
         let test_wc_commit_id = CommitId::from_hex("abc222");
+        let test_workspace_id = || WorkspaceId::new("test".to_string());
         View {
             head_ids: hashset! {head_id1, head_id2},
             local_branches: btreemap! {
@@ -759,13 +789,16 @@ mod tests {
                 },
             },
             git_refs: btreemap! {
-                "refs/heads/main".to_string() => git_refs_main_target,
-                "refs/heads/feature".to_string() => git_refs_feature_target,
+                "refs/heads/main".to_string() => git_refs_main_target.clone(),
+                "refs/heads/feature".to_string() => git_refs_feature_target.clone(),
             },
-            git_head: RefTarget::normal(CommitId::from_hex("fff111")),
+            git_heads: hashmap! {
+                WorkspaceId::default() => git_refs_main_target,
+                test_workspace_id() => git_refs_feature_target,
+            },
             wc_commit_ids: hashmap! {
                 WorkspaceId::default() => default_wc_commit_id,
-                WorkspaceId::new("test".to_string()) => test_wc_commit_id,
+                test_workspace_id() => test_wc_commit_id,
             },
         }
     }
@@ -906,18 +939,18 @@ mod tests {
         let branch_to_proto =
             |name: &str, local_ref_target, remote_branches| crate::protos::op_store::Branch {
                 name: name.to_owned(),
-                local_target: ref_target_to_proto(local_ref_target),
+                local_target: Some(ref_target_to_proto(local_ref_target)),
                 remote_branches,
             };
         let remote_branch_to_proto =
             |remote_name: &str, ref_target| crate::protos::op_store::RemoteBranch {
                 remote_name: remote_name.to_owned(),
-                target: ref_target_to_proto(ref_target),
+                target: Some(ref_target_to_proto(ref_target)),
                 state: None, // to be generated based on local branch existence
             };
         let git_ref_to_proto = |name: &str, ref_target| crate::protos::op_store::GitRef {
             name: name.to_owned(),
-            target: ref_target_to_proto(ref_target),
+            target: Some(ref_target_to_proto(ref_target)),
             ..Default::default()
         };
 
@@ -994,7 +1027,7 @@ mod tests {
             vec![Some(CommitId::from_hex("222222")), None],
         ));
         let maybe_proto = ref_target_to_proto(&target);
-        assert_eq!(ref_target_from_proto(maybe_proto), target);
+        assert_eq!(ref_target_from_proto(Some(maybe_proto)), target);
 
         // If it were legacy format, order of None entry would be lost.
         let target = RefTarget::from_merge(Merge::from_removes_adds(
@@ -1002,7 +1035,7 @@ mod tests {
             vec![None, Some(CommitId::from_hex("222222"))],
         ));
         let maybe_proto = ref_target_to_proto(&target);
-        assert_eq!(ref_target_from_proto(maybe_proto), target);
+        assert_eq!(ref_target_from_proto(Some(maybe_proto)), target);
     }
 
     #[test]

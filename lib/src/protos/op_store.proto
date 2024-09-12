@@ -85,10 +85,13 @@ message View {
   // Only a subset of the refs. For example, does not include refs/notes/.
   repeated GitRef git_refs = 3;
   // This field is just for historical reasons (before we had the RefTarget
-  // type). New Views have (only) the target field.
+  // type). New Views have (only) the git_head or git_heads fields.
   // TODO: Delete support for the old format.
   bytes git_head_legacy = 7 [deprecated = true];
-  RefTarget git_head = 9;
+  // Equivalent to one value of git_heads with a workspace id of "default"
+  RefTarget git_head = 9 [deprecated = true];
+  // We now track a git head per workspace.
+  map<string, RefTarget> git_heads = 11;
   // Whether "@git" branches have been migrated to remote_targets.
   bool has_git_refs_migrated_to_remote = 10;
 }

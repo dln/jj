@@ -49,6 +49,7 @@ use jj_lib::op_store::BranchTarget;
 use jj_lib::op_store::RefTarget;
 use jj_lib::op_store::RemoteRef;
 use jj_lib::op_store::RemoteRefState;
+use jj_lib::op_store::WorkspaceId;
 use jj_lib::refs::BranchPushUpdate;
 use jj_lib::repo::MutableRepo;
 use jj_lib::repo::ReadonlyRepo;
@@ -120,6 +121,7 @@ fn test_import_refs() {
     let test_repo = TestRepo::init_with_backend(TestRepoBackend::Git);
     let repo = &test_repo.repo;
     let git_repo = get_git_repo(repo);
+    let workspace_id = &WorkspaceId::default();
 
     let commit1 = empty_git_commit(&git_repo, "refs/heads/main", &[]);
     git_ref(&git_repo, "refs/remotes/origin/main", commit1.id());
@@ -135,7 +137,7 @@ fn test_import_refs() {
     git_repo.set_head("refs/heads/main").unwrap();
 
     let mut tx = repo.start_transaction(&settings);
-    git::import_head(tx.repo_mut()).unwrap();
+    git::import_head(tx.repo_mut(), workspace_id).unwrap();
     let stats = git::import_refs(tx.repo_mut(), &git_settings).unwrap();
     tx.repo_mut().rebase_descendants(&settings).unwrap();
     let repo = tx.commit("test");
@@ -233,7 +235,10 @@ fn test_import_refs() {
         view.get_git_ref("refs/tags/v1.0"),
         &RefTarget::normal(jj_id(&commit5))
     );
-    assert_eq!(view.git_head(), &RefTarget::normal(jj_id(&commit2)));
+    assert_eq!(
+        view.git_head(workspace_id),
+        &RefTarget::normal(jj_id(&commit2))
+    );
 }
 
 #[test]
@@ -384,12 +389,13 @@ fn test_import_refs_reimport_git_head_does_not_count() {
     let test_repo = TestRepo::init_with_backend(TestRepoBackend::Git);
     let repo = &test_repo.repo;
     let git_repo = get_git_repo(repo);
+    let workspace_id = &WorkspaceId::default();
 
     let commit = empty_git_commit(&git_repo, "refs/heads/main", &[]);
     git_repo.set_head_detached(commit.id()).unwrap();
 
     let mut tx = repo.start_transaction(&settings);
-    git::import_head(tx.repo_mut()).unwrap();
+    git::import_head(tx.repo_mut(), workspace_id).unwrap();
     git::import_refs(tx.repo_mut(), &git_settings).unwrap();
     tx.repo_mut().rebase_descendants(&settings).unwrap();
 
@@ -400,7 +406,7 @@ fn test_import_refs_reimport_git_head_does_not_count() {
         .unwrap()
         .delete()
         .unwrap();
-    git::import_head(tx.repo_mut()).unwrap();
+    git::import_head(tx.repo_mut(), workspace_id).unwrap();
     git::import_refs(tx.repo_mut(), &git_settings).unwrap();
     tx.repo_mut().rebase_descendants(&settings).unwrap();
     assert!(!tx.repo_mut().view().heads().contains(&jj_id(&commit)));
@@ -414,6 +420,7 @@ fn test_import_refs_reimport_git_head_without_ref() {
     let test_repo = TestRepo::init_with_backend(TestRepoBackend::Git);
     let repo = &test_repo.repo;
     let git_repo = get_git_repo(repo);
+    let workspace_id = &WorkspaceId::default();
 
     // First, HEAD points to commit1.
     let mut tx = repo.start_transaction(&settings);
@@ -422,7 +429,7 @@ fn test_import_refs_reimport_git_head_without_ref() {
     git_repo.set_head_detached(git_id(&commit1)).unwrap();
 
     // Import HEAD.
-    git::import_head(tx.repo_mut()).unwrap();
+    git::import_head(tx.repo_mut(), workspace_id).unwrap();
     git::import_refs(tx.repo_mut(), &git_settings).unwrap();
     tx.repo_mut().rebase_descendants(&settings).unwrap();
     assert!(tx.repo_mut().view().heads().contains(commit1.id()));
@@ -435,7 +442,7 @@ fn test_import_refs_reimport_git_head_without_ref() {
     // would be moved by `git checkout` command. This isn't always true because the
     // detached HEAD commit could be rewritten by e.g. `git commit --amend` command,
     // but it should be safer than abandoning old checkout branch.
-    git::import_head(tx.repo_mut()).unwrap();
+    git::import_head(tx.repo_mut(), workspace_id).unwrap();
     git::import_refs(tx.repo_mut(), &git_settings).unwrap();
     tx.repo_mut().rebase_descendants(&settings).unwrap();
     assert!(tx.repo_mut().view().heads().contains(commit1.id()));
@@ -450,6 +457,7 @@ fn test_import_refs_reimport_git_head_with_moved_ref() {
     let test_repo = TestRepo::init_with_backend(TestRepoBackend::Git);
     let repo = &test_repo.repo;
     let git_repo = get_git_repo(repo);
+    let workspace_id = &WorkspaceId::default();
 
     // First, both HEAD and main point to commit1.
     let mut tx = repo.start_transaction(&settings);
@@ -461,7 +469,7 @@ fn test_import_refs_reimport_git_head_with_moved_ref() {
     git_repo.set_head_detached(git_id(&commit1)).unwrap();
 
     // Import HEAD and main.
-    git::import_head(tx.repo_mut()).unwrap();
+    git::import_head(tx.repo_mut(), workspace_id).unwrap();
     git::import_refs(tx.repo_mut(), &git_settings).unwrap();
     tx.repo_mut().rebase_descendants(&settings).unwrap();
     assert!(tx.repo_mut().view().heads().contains(commit1.id()));
@@ -474,7 +482,7 @@ fn test_import_refs_reimport_git_head_with_moved_ref() {
     git_repo.set_head_detached(git_id(&commit2)).unwrap();
 
     // Reimport HEAD and main, which abandons the old main branch.
-    git::import_head(tx.repo_mut()).unwrap();
+    git::import_head(tx.repo_mut(), workspace_id).unwrap();
     git::import_refs(tx.repo_mut(), &git_settings).unwrap();
     tx.repo_mut().rebase_descendants(&settings).unwrap();
     assert!(!tx.repo_mut().view().heads().contains(commit1.id()));
@@ -958,6 +966,7 @@ fn test_import_refs_reimport_git_head_with_fixed_ref() {
     let test_repo = TestRepo::init_with_backend(TestRepoBackend::Git);
     let repo = &test_repo.repo;
     let git_repo = get_git_repo(repo);
+    let workspace_id = &WorkspaceId::default();
 
     // First, both HEAD and main point to commit1.
     let mut tx = repo.start_transaction(&settings);
@@ -969,7 +978,7 @@ fn test_import_refs_reimport_git_head_with_fixed_ref() {
     git_repo.set_head_detached(git_id(&commit1)).unwrap();
 
     // Import HEAD and main.
-    git::import_head(tx.repo_mut()).unwrap();
+    git::import_head(tx.repo_mut(), workspace_id).unwrap();
     git::import_refs(tx.repo_mut(), &git_settings).unwrap();
     tx.repo_mut().rebase_descendants(&settings).unwrap();
     assert!(tx.repo_mut().view().heads().contains(commit1.id()));
@@ -979,7 +988,7 @@ fn test_import_refs_reimport_git_head_with_fixed_ref() {
     git_repo.set_head_detached(git_id(&commit2)).unwrap();
 
     // Reimport HEAD, which shouldn't abandon the old HEAD branch.
-    git::import_head(tx.repo_mut()).unwrap();
+    git::import_head(tx.repo_mut(), workspace_id).unwrap();
     git::import_refs(tx.repo_mut(), &git_settings).unwrap();
     tx.repo_mut().rebase_descendants(&settings).unwrap();
     assert!(tx.repo_mut().view().heads().contains(commit1.id()));
@@ -1362,7 +1371,10 @@ fn test_import_refs_empty_git_repo() {
     assert_eq!(repo.view().branches().count(), 0);
     assert_eq!(repo.view().tags().len(), 0);
     assert_eq!(repo.view().git_refs().len(), 0);
-    assert_eq!(repo.view().git_head(), RefTarget::absent_ref());
+    assert_eq!(
+        repo.view().git_head(&WorkspaceId::default()),
+        RefTarget::absent_ref()
+    );
 }
 
 #[test]
@@ -1371,6 +1383,7 @@ fn test_import_refs_missing_git_commit() {
     let git_settings = GitSettings::default();
     let test_workspace = TestRepo::init_with_backend(TestRepoBackend::Git);
     let repo = &test_workspace.repo;
+    let workspace_id = &WorkspaceId::default();
     let git_repo = get_git_repo(repo);
 
     let commit1 = empty_git_commit(&git_repo, "refs/heads/main", &[]);
@@ -1403,7 +1416,7 @@ fn test_import_refs_missing_git_commit() {
         .unwrap();
     git_repo.set_head_detached(commit2.id()).unwrap();
     let mut tx = repo.start_transaction(&settings);
-    let result = git::import_head(tx.repo_mut());
+    let result = git::import_head(tx.repo_mut(), workspace_id);
     assert_matches!(
         result,
         Err(GitImportError::MissingHeadTarget {
@@ -1435,7 +1448,7 @@ fn test_import_refs_missing_git_commit() {
     git_repo.set_head_detached(commit1.id()).unwrap();
     fs::rename(&object_file, &backup_object_file).unwrap();
     let mut tx = repo.start_transaction(&settings);
-    let result = git::import_head(tx.repo_mut());
+    let result = git::import_head(tx.repo_mut(), workspace_id);
     assert!(result.is_ok());
 }
 
@@ -1453,9 +1466,10 @@ fn test_import_refs_detached_head() {
         .delete()
         .unwrap();
     test_data.git_repo.set_head_detached(commit1.id()).unwrap();
+    let workspace_id = &WorkspaceId::default();
 
     let mut tx = test_data.repo.start_transaction(&test_data.settings);
-    git::import_head(tx.repo_mut()).unwrap();
+    git::import_head(tx.repo_mut(), workspace_id).unwrap();
     git::import_refs(tx.repo_mut(), &git_settings).unwrap();
     tx.repo_mut()
         .rebase_descendants(&test_data.settings)
@@ -1465,7 +1479,10 @@ fn test_import_refs_detached_head() {
     let expected_heads = hashset! { jj_id(&commit1) };
     assert_eq!(*repo.view().heads(), expected_heads);
     assert_eq!(repo.view().git_refs().len(), 0);
-    assert_eq!(repo.view().git_head(), &RefTarget::normal(jj_id(&commit1)));
+    assert_eq!(
+        repo.view().git_head(workspace_id),
+        &RefTarget::normal(jj_id(&commit1))
+    );
 }
 
 #[test]
@@ -1475,11 +1492,12 @@ fn test_export_refs_no_detach() {
     let test_data = GitRepoData::create();
     let git_settings = GitSettings::default();
     let git_repo = test_data.git_repo;
+    let workspace_id = &WorkspaceId::default();
     let commit1 = empty_git_commit(&git_repo, "refs/heads/main", &[]);
     git_repo.set_head("refs/heads/main").unwrap();
     let mut tx = test_data.repo.start_transaction(&test_data.settings);
     let mut_repo = tx.repo_mut();
-    git::import_head(mut_repo).unwrap();
+    git::import_head(mut_repo, workspace_id).unwrap();
     git::import_refs(mut_repo, &git_settings).unwrap();
     mut_repo.rebase_descendants(&test_data.settings).unwrap();
 
@@ -1502,6 +1520,7 @@ fn test_export_refs_branch_changed() {
     let test_data = GitRepoData::create();
     let git_settings = GitSettings::default();
     let git_repo = test_data.git_repo;
+    let workspace_id = &WorkspaceId::default();
     let commit = empty_git_commit(&git_repo, "refs/heads/main", &[]);
     git_repo
         .reference("refs/heads/feature", commit.id(), false, "test")
@@ -1510,7 +1529,7 @@ fn test_export_refs_branch_changed() {
 
     let mut tx = test_data.repo.start_transaction(&test_data.settings);
     let mut_repo = tx.repo_mut();
-    git::import_head(mut_repo).unwrap();
+    git::import_head(mut_repo, workspace_id).unwrap();
     git::import_refs(mut_repo, &git_settings).unwrap();
     mut_repo.rebase_descendants(&test_data.settings).unwrap();
     assert!(git::export_refs(mut_repo).unwrap().is_empty());
@@ -1544,11 +1563,12 @@ fn test_export_refs_current_branch_changed() {
     let test_data = GitRepoData::create();
     let git_settings = GitSettings::default();
     let git_repo = test_data.git_repo;
+    let workspace_id = &WorkspaceId::default();
     let commit1 = empty_git_commit(&git_repo, "refs/heads/main", &[]);
     git_repo.set_head("refs/heads/main").unwrap();
     let mut tx = test_data.repo.start_transaction(&test_data.settings);
     let mut_repo = tx.repo_mut();
-    git::import_head(mut_repo).unwrap();
+    git::import_head(mut_repo, workspace_id).unwrap();
     git::import_refs(mut_repo, &git_settings).unwrap();
     mut_repo.rebase_descendants(&test_data.settings).unwrap();
     assert!(git::export_refs(mut_repo).unwrap().is_empty());
@@ -1582,10 +1602,11 @@ fn test_export_refs_unborn_git_branch(move_placeholder_ref: bool) {
     let test_data = GitRepoData::create();
     let git_settings = GitSettings::default();
     let git_repo = test_data.git_repo;
+    let workspace_id = &WorkspaceId::default();
     git_repo.set_head("refs/heads/main").unwrap();
     let mut tx = test_data.repo.start_transaction(&test_data.settings);
     let mut_repo = tx.repo_mut();
-    git::import_head(mut_repo).unwrap();
+    git::import_head(mut_repo, workspace_id).unwrap();
     git::import_refs(mut_repo, &git_settings).unwrap();
     mut_repo.rebase_descendants(&test_data.settings).unwrap();
     assert!(git::export_refs(mut_repo).unwrap().is_empty());
@@ -2107,8 +2128,9 @@ fn test_reset_head_to_root() {
     let settings = testutils::user_settings();
     let temp_dir = testutils::new_temp_dir();
     let workspace_root = temp_dir.path().join("repo");
+    let workspace_id = &WorkspaceId::default();
     let git_repo = git2::Repository::init(&workspace_root).unwrap();
-    let (_workspace, repo) =
+    let (workspace, repo) =
         Workspace::init_external_git(&settings, &workspace_root, &workspace_root.join(".git"))
             .unwrap();
 
@@ -2127,34 +2149,34 @@ fn test_reset_head_to_root() {
         .unwrap();
 
     // Set Git HEAD to commit2's parent (i.e. commit1)
-    git::reset_head(tx.repo_mut(), &git_repo, &commit2).unwrap();
+    git::reset_head(tx.repo_mut(), &git_repo, workspace_id, &commit2).unwrap();
     assert!(git_repo.head().is_ok());
     assert_eq!(
-        tx.repo_mut().git_head(),
+        tx.repo_mut().git_head(workspace.workspace_id()),
         RefTarget::normal(commit1.id().clone())
     );
 
     // Set Git HEAD back to root
-    git::reset_head(tx.repo_mut(), &git_repo, &commit1).unwrap();
+    git::reset_head(tx.repo_mut(), &git_repo, workspace.workspace_id(), &commit1).unwrap();
     assert!(git_repo.head().is_err());
-    assert!(tx.repo_mut().git_head().is_absent());
+    assert!(tx.repo_mut().git_head(workspace.workspace_id()).is_absent());
 
     // Move placeholder ref as if new commit were created by git
     git_repo
         .reference("refs/jj/root", git_id(&commit1), false, "")
         .unwrap();
-    git::reset_head(tx.repo_mut(), &git_repo, &commit2).unwrap();
+    git::reset_head(tx.repo_mut(), &git_repo, workspace.workspace_id(), &commit2).unwrap();
     assert!(git_repo.head().is_ok());
     assert_eq!(
-        tx.repo_mut().git_head(),
+        tx.repo_mut().git_head(workspace.workspace_id()),
         RefTarget::normal(commit1.id().clone())
     );
     assert!(git_repo.find_reference("refs/jj/root").is_ok());
 
     // Set Git HEAD back to root
-    git::reset_head(tx.repo_mut(), &git_repo, &commit1).unwrap();
+    git::reset_head(tx.repo_mut(), &git_repo, workspace.workspace_id(), &commit1).unwrap();
     assert!(git_repo.head().is_err());
-    assert!(tx.repo_mut().git_head().is_absent());
+    assert!(tx.repo_mut().git_head(workspace.workspace_id()).is_absent());
     // The placeholder ref should be deleted
     assert!(git_repo.find_reference("refs/jj/root").is_err());
 }
@@ -2166,7 +2188,7 @@ fn test_reset_head_with_index() {
     let temp_dir = testutils::new_temp_dir();
     let workspace_root = temp_dir.path().join("repo");
     let git_repo = git2::Repository::init(&workspace_root).unwrap();
-    let (_workspace, repo) =
+    let (workspace, repo) =
         Workspace::init_external_git(&settings, &workspace_root, &workspace_root.join(".git"))
             .unwrap();
 
@@ -2185,7 +2207,7 @@ fn test_reset_head_with_index() {
         .unwrap();
 
     // Set Git HEAD to commit2's parent (i.e. commit1)
-    git::reset_head(tx.repo_mut(), &git_repo, &commit2).unwrap();
+    git::reset_head(tx.repo_mut(), &git_repo, workspace.workspace_id(), &commit2).unwrap();
     assert!(git_repo.index().unwrap().is_empty());
 
     // Add "staged changes" to the Git index
@@ -2199,7 +2221,7 @@ fn test_reset_head_with_index() {
     assert!(!git_repo.index().unwrap().is_empty());
 
     // Reset head to and the Git index
-    git::reset_head(tx.repo_mut(), &git_repo, &commit2).unwrap();
+    git::reset_head(tx.repo_mut(), &git_repo, workspace.workspace_id(), &commit2).unwrap();
     assert!(git_repo.index().unwrap().is_empty());
 }
 

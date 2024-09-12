@@ -29,13 +29,15 @@ pub mod ref_conflict {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RefTarget {
-    /// New `RefConflict` type represents both `commit_id` and `conflict_legacy`.
+    /// New `RefConflict` type represents both `commit_id` and
+    /// `conflict_legacy`.
     #[prost(oneof = "ref_target::Value", tags = "1, 2, 3")]
     pub value: ::core::option::Option<ref_target::Value>,
 }
 /// Nested message and enum types in `RefTarget`.
 pub mod ref_target {
-    /// New `RefConflict` type represents both `commit_id` and `conflict_legacy`.
+    /// New `RefConflict` type represents both `commit_id` and
+    /// `conflict_legacy`.
     #[allow(clippy::derive_partial_eq_without_eq)]
     #[derive(Clone, PartialEq, ::prost::Oneof)]
     pub enum Value {
@@ -103,10 +105,8 @@ pub struct View {
     #[prost(bytes = "vec", tag = "2")]
     pub wc_commit_id: ::prost::alloc::vec::Vec<u8>,
     #[prost(map = "string, bytes", tag = "8")]
-    pub wc_commit_ids: ::std::collections::HashMap<
-        ::prost::alloc::string::String,
-        ::prost::alloc::vec::Vec<u8>,
-    >,
+    pub wc_commit_ids:
+        ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::vec::Vec<u8>>,
     #[prost(message, repeated, tag = "5")]
     pub branches: ::prost::alloc::vec::Vec<Branch>,
     #[prost(message, repeated, tag = "6")]
@@ -115,13 +115,18 @@ pub struct View {
     #[prost(message, repeated, tag = "3")]
     pub git_refs: ::prost::alloc::vec::Vec<GitRef>,
     /// This field is just for historical reasons (before we had the RefTarget
-    /// type). New Views have (only) the target field.
+    /// type). New Views have (only) the git_head or git_heads fields.
     /// TODO: Delete support for the old format.
     #[deprecated]
     #[prost(bytes = "vec", tag = "7")]
     pub git_head_legacy: ::prost::alloc::vec::Vec<u8>,
+    /// Equivalent to one value of git_heads with a workspace id of "default"
+    #[deprecated]
     #[prost(message, optional, tag = "9")]
     pub git_head: ::core::option::Option<RefTarget>,
+    /// We now track a git head per workspace.
+    #[prost(map = "string, message", tag = "11")]
+    pub git_heads: ::std::collections::HashMap<::prost::alloc::string::String, RefTarget>,
     /// Whether "@git" branches have been migrated to remote_targets.
     #[prost(bool, tag = "10")]
     pub has_git_refs_migrated_to_remote: bool,
@@ -161,10 +166,8 @@ pub struct OperationMetadata {
     #[prost(bool, tag = "7")]
     pub is_snapshot: bool,
     #[prost(map = "string, string", tag = "6")]
-    pub tags: ::std::collections::HashMap<
-        ::prost::alloc::string::String,
-        ::prost::alloc::string::String,
-    >,
+    pub tags:
+        ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
@@ -176,7 +179,8 @@ impl RemoteRefState {
     /// String value of the enum field names used in the ProtoBuf definition.
     ///
     /// The values are not transformed in any way and thus are considered stable
-    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    /// (if the ProtoBuf definition does not change) and safe for programmatic
+    /// use.
     pub fn as_str_name(&self) -> &'static str {
         match self {
             RemoteRefState::New => "New",
