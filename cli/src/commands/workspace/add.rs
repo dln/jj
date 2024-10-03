@@ -73,6 +73,26 @@ pub struct WorkspaceAddArgs {
     /// How to handle sparse patterns when creating a new workspace.
     #[arg(long, value_enum, default_value_t = SparseInheritance::Copy)]
     sparse_patterns: SparseInheritance,
+    /*
+     * Sad non-technical note -- collocate is in the dictionary, colocate is not.
+     * These flags follow `jj git init` for consistency.
+     */
+    /// Whether to add a corresponding git worktree and HEAD.
+    ///
+    /// This is enabled by default if you are running the command in a colocated
+    /// repo. But this flag can enable it even for non-colocated repos.
+    ///
+    /// You will be able to run `git worktree list` in the new workspace and see
+    /// it in action.
+    #[arg(long, group = "collocation")]
+    colocate: bool,
+
+    /// Disable creation of a corresponding git worktree and HEAD.
+    ///
+    /// `--colocate` is implied if you are in a colocated repo. This flag will
+    /// suppress that behaviour and create a JJ-only workspace.
+    #[arg(long, group = "collocation")]
+    no_colocate: bool,
 }
 
 #[instrument(skip_all)]

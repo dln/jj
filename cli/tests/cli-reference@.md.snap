@@ -2166,6 +2166,14 @@ By default, the new workspace inherits the sparse patterns of the current worksp
   - `empty`:
     Clear all files from the workspace (it will be empty)
 
+* `--colocate` — Whether to add a corresponding git worktree and HEAD.
+
+   This is enabled by default if you are running the command in a colocated repo. But this flag can enable it even for non-colocated repos.
+
+   You will be able to run `git worktree list` in the new workspace and see it in action.
+* `--no-colocate` — Disable creation of a corresponding git worktree and HEAD.
+
+   `--colocate` is implied if you are in a colocated repo. This flag will suppress that behaviour and create a JJ-only workspace.
 
 
 
