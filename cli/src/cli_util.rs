@@ -950,6 +950,13 @@ impl WorkspaceCommandHelper {
         self.colocated_git_worktree.is_some()
     }
 
+    pub fn open_colocated_git_worktree(&self) -> Result<Option<git2::Repository>, git2::Error> {
+        self.colocated_git_worktree
+            .as_deref()
+            .map(|wt| git2::Repository::open(wt))
+            .transpose()
+    }
+
     pub fn format_file_path(&self, file: &RepoPath) -> String {
         self.path_converter().format_file_path(file)
     }
@@ -1593,10 +1600,9 @@ See https://martinvonz.github.io/jj/latest/working-copy/#stale-working-copy \
             .map(|commit_id| tx.repo().store().get_commit(commit_id))
             .transpose()?;
 
-        if let Some(worktree_path) = self.colocated_git_worktree.as_deref() {
-            let git_repo = git2::Repository::open(worktree_path)?;
+        if let Some(git_worktree) = self.open_colocated_git_worktree()? {
             if let Some(wc_commit) = &maybe_new_wc_commit {
-                git::reset_head(tx.repo_mut(), &git_repo, wc_commit)?;
+                git::reset_head(tx.repo_mut(), &git_worktree, wc_commit)?;
             }
             let failed_branches = git::export_refs(tx.repo_mut())?;
             print_failed_git_export(ui, &failed_branches)?;
