@@ -264,6 +264,7 @@ impl CreateWorktreeError {
     }
 }
 
+/// `git worktree add` implementation
 pub fn git_worktree_add(
     git_repo_path: &Path,
     destination_path: &Path,
@@ -332,6 +333,154 @@ pub fn git_worktree_add(
         writeln!(dot_git)?;
     }
 
+    Ok(())
+}
+
+#[derive(Error, Debug)]
+pub enum WorktreeValidationError {
+    #[error("No such git worktree named '{0}'")]
+    NonexistentWorktree(String),
+    #[error(
+        "Worktree was broken, the working directory existed but the .git file was missing: {dotgit}",
+        dotgit = dotgit.display()
+    )]
+    MissingDotGit { dotgit: PathBuf },
+    #[error(
+        "Worktree was broken, the working directory existed but the .git file was broken (not a file, worktree for a different repo): {dotgit}",
+        dotgit = dotgit.display()
+    )]
+    BrokenDotGit { dotgit: PathBuf },
+    #[error("Could not read gitdir in git worktree")]
+    ReadGitdir(io::Error),
+    #[error("Error removing worktree data directory: {0}")]
+    RemoveData(io::Error),
+    #[error("Error removing .git file at {0}: {0}")]
+    RemoveDotGit(PathBuf, io::Error),
+}
+
+pub enum WorktreeWorkingDirectoryState {
+    Present { dotgit: PathBuf },
+    Prunable,
+}
+
+/// The data necessary to remove, rename, move, (etc), a worktree
+pub struct WorktreeStat {
+    pub working_directory_state: WorktreeWorkingDirectoryState,
+    pub worktree_data: PathBuf,
+}
+
+impl WorktreeStat {
+    pub fn name(&self) -> &str {
+        self.worktree_data
+            .file_name()
+            .and_then(|x| x.to_str())
+            .expect("WorkTreeStat.worktree_data should have a UTF8 file name, by construction")
+    }
+}
+
+pub fn git_worktree_validate(
+    git_repo_path: &Path,
+    name: &str,
+) -> Result<WorktreeStat, WorktreeValidationError> {
+    // Not immediately useful, but something that may help in future is that
+    // secondary worktrees have a file called "commondir", but the main .git folder
+    // of a non-bare repo does not have such a file. So you can avoid deleting the
+    // main working directory on this basis. In our case we require a named worktree
+    // and expect to find it in the worktrees subdirectory of the real git repo.
+    // JJ knows where the real git repo is, so it doensn't need to check.
+    //
+    let worktrees_path = git_repo_path.join("worktrees");
+    let worktree_data = worktrees_path.join(&name);
+    if !worktree_data.exists() {
+        return Err(WorktreeValidationError::NonexistentWorktree(
+            name.to_string(),
+        ));
+    }
+    let worktree_data_canon = worktree_data
+        .canonicalize()
+        .map_err(|_| WorktreeValidationError::NonexistentWorktree(name.to_string()))?;
+    let gitdir_file_path = worktree_data_canon.join("gitdir");
+
+    let dotgit = PathBuf::from(
+        fs::read_to_string(&gitdir_file_path)
+            .map_err(WorktreeValidationError::ReadGitdir)?
+            .trim(),
+    );
+
+    let working_directory_state = if dotgit.parent().map_or(false, |p| p.exists()) {
+        // If the working directory exists,  we expect .git to exist and be a file
+        //
+        // git fails in this case with
+        //
+        // > fatal: validation failed, cannot remove working tree: '/private/tmp/fourth/.git' does not exist
+        if !dotgit.exists() {
+            return Err(WorktreeValidationError::MissingDotGit {
+                dotgit: dotgit.to_owned(),
+            });
+        }
+        // Now read the .git file and see if it points back to us
+        //
+        // In all these failure modes, git fails with
+        //
+        // > fatal: validation failed, cannot remove working tree: '/private/tmp/fourth/.git' is not a .git file, error code 7
+        let dotgit_content = fs::read_to_string(&dotgit).map_err(|_io_err| {
+            WorktreeValidationError::BrokenDotGit {
+                dotgit: dotgit.to_owned(),
+            }
+        })?;
+
+        let dotgit_gitdir_canon = dotgit_content
+            .strip_prefix("gitdir: ")
+            .map(|rem| rem.trim())
+            .map(Path::new)
+            .and_then(|p| p.canonicalize().ok())
+            .ok_or_else(|| WorktreeValidationError::BrokenDotGit {
+                dotgit: dotgit.to_owned(),
+            })?;
+
+        if worktree_data_canon != dotgit_gitdir_canon {
+            return Err(WorktreeValidationError::BrokenDotGit {
+                dotgit: dotgit.to_owned(),
+            });
+        }
+
+        // Now, we should also delete the .git file.
+        WorktreeWorkingDirectoryState::Present { dotgit }
+    } else {
+        WorktreeWorkingDirectoryState::Prunable
+    };
+
+    Ok(WorktreeStat {
+        working_directory_state,
+        worktree_data: worktree_data_canon,
+    })
+}
+
+/// `git worktree remove` implementation
+///
+/// Important note when checking functionality against Git itself --
+/// `git worktree remove` is documented as taking a <worktree> parameter (i.e. a
+/// name) but it only works with paths, or maybe the named method only works
+/// when the last path segment of the worktree location matches the worktree
+/// name.
+pub fn git_worktree_remove(stat: WorktreeStat) -> Result<(), WorktreeValidationError> {
+    let WorktreeStat {
+        working_directory_state,
+        worktree_data,
+    } = stat;
+    fs::remove_dir_all(&worktree_data).map_err(WorktreeValidationError::RemoveData)?;
+    let worktrees = worktree_data.parent().unwrap();
+    let other_dentries = worktrees
+        .read_dir()
+        .map_err(WorktreeValidationError::RemoveData)?
+        .any(|_| true);
+    if !other_dentries {
+        // Remove .git/worktrees entirely
+        fs::remove_dir(worktrees).map_err(WorktreeValidationError::RemoveData)?;
+    }
+    if let WorktreeWorkingDirectoryState::Present { dotgit } = working_directory_state {
+        fs::remove_file(&dotgit).map_err(|e| WorktreeValidationError::RemoveDotGit(dotgit, e))?;
+    }
     Ok(())
 }
 
