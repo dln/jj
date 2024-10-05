@@ -1107,13 +1107,5 @@ fn test_colocated_workspace_add_forget_add() {
 
     std::fs::remove_dir_all(&second_path).unwrap();
 
-    // HACK: prune the git worktree manually. We should probably implement `git
-    // worktree remove` and do that when forgetting workspaces.
-    Command::new("git")
-        .args(["worktree", "prune"])
-        .current_dir(&repo_path)
-        .assert()
-        .success();
-
     let _ = test_env.jj_cmd_ok(&repo_path, &["workspace", "add", "--colocate", "../second"]);
 }

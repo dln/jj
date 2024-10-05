@@ -60,12 +60,33 @@ pub fn cmd_workspace_forget(
         }
     }
 
+    let git_repo_path = workspace_command
+        .git_backend()
+        .map(|git_backend| git_backend.git_repo_path().to_owned());
+
     // bundle every workspace forget into a single transaction, so that e.g.
     // undo correctly restores all of them at once.
     let mut tx = workspace_command.start_transaction();
+
+    let mut worktrees_to_remove = vec![];
     wss.iter().try_for_each(|ws| {
-        tx.repo_mut().remove_git_head_target(ws);
-        tx.repo_mut().remove_wc_commit(ws)
+        if let Some(git_repo_path) = git_repo_path.as_deref() {
+            tx.repo_mut().remove_git_head_target(ws);
+            match jj_lib::git::git_worktree_validate(git_repo_path, ws.as_str()) {
+                Ok(stat) => worktrees_to_remove.push(stat),
+                Err(jj_lib::git::WorktreeValidationError::NonexistentWorktree(_named)) => {
+                    tracing::debug!("No git worktree found named {_named}");
+                }
+                Err(e) => {
+                    return Err(user_error(format!(
+                        "Invalid worktree for workspace {ws}: {e}"
+                    )))
+                }
+            }
+        }
+        tx.repo_mut()
+            .remove_wc_commit(ws)
+            .map_err(CommandError::from)
     })?;
 
     let description = if let [ws] = wss.as_slice() {
@@ -78,5 +99,10 @@ pub fn cmd_workspace_forget(
     };
 
     tx.finish(ui, description)?;
+
+    for validated in worktrees_to_remove {
+        jj_lib::git::git_worktree_remove(validated).map_err(user_error)?;
+    }
+
     Ok(())
 }
