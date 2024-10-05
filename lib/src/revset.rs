@@ -127,7 +127,10 @@ pub enum RevsetCommitRef {
     },
     Tags,
     GitRefs,
+    // For the current workspace
     GitHead,
+    // For all workspaces
+    GitHeads,
 }
 
 /// A custom revset filter expression, defined by an extension.
@@ -286,6 +289,10 @@ impl RevsetExpression {
 
     pub fn git_head() -> Rc<RevsetExpression> {
         Rc::new(RevsetExpression::CommitRef(RevsetCommitRef::GitHead))
+    }
+
+    pub fn git_heads() -> Rc<RevsetExpression> {
+        Rc::new(RevsetExpression::CommitRef(RevsetCommitRef::GitHeads))
     }
 
     pub fn latest(self: &Rc<RevsetExpression>, count: usize) -> Rc<RevsetExpression> {
@@ -673,6 +680,10 @@ static BUILTIN_FUNCTION_MAP: Lazy<HashMap<&'static str, RevsetFunction>> = Lazy:
     map.insert("git_head", |function, _context| {
         function.expect_no_arguments()?;
         Ok(RevsetExpression::git_head())
+    });
+    map.insert("git_heads", |function, _context| {
+        function.expect_no_arguments()?;
+        Ok(RevsetExpression::git_heads())
     });
     map.insert("latest", |function, context| {
         let ([candidates_arg], [count_opt_arg]) = function.expect_arguments()?;
@@ -1779,6 +1790,12 @@ fn resolve_commit_ref(
             .workspace_ctx()
             .into_iter()
             .flat_map(|workspace_id| repo.view().git_head(workspace_id).added_ids().cloned())
+            .collect()),
+        RevsetCommitRef::GitHeads => Ok(repo
+            .view()
+            .git_heads()
+            .values()
+            .flat_map(|reft| reft.added_ids().cloned())
             .collect()),
     }
 }
