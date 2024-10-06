@@ -25,9 +25,11 @@ use jj_lib::backend::CommitId;
 use jj_lib::backend::FileId;
 use jj_lib::backend::TreeValue;
 use jj_lib::fileset;
+use jj_lib::fileset::FilesetDiagnostics;
 use jj_lib::fileset::FilesetExpression;
 use jj_lib::matchers::EverythingMatcher;
 use jj_lib::matchers::Matcher;
+use jj_lib::merged_tree::MergedTree;
 use jj_lib::merged_tree::MergedTreeBuilder;
 use jj_lib::merged_tree::TreeDiffEntry;
 use jj_lib::repo::Repo;
@@ -36,6 +38,7 @@ use jj_lib::repo_path::RepoPathUiConverter;
 use jj_lib::revset::RevsetExpression;
 use jj_lib::revset::RevsetIteratorExt;
 use jj_lib::store::Store;
+use jj_lib::tree::Tree;
 use pollster::FutureExt;
 use rayon::iter::IntoParallelIterator;
 use rayon::prelude::ParallelIterator;
@@ -44,6 +47,7 @@ use tracing::instrument;
 use crate::cli_util::CommandHelper;
 use crate::cli_util::RevisionArg;
 use crate::command_error::config_error;
+use crate::command_error::print_parse_diagnostics;
 use crate::command_error::CommandError;
 use crate::config::to_toml_value;
 use crate::config::CommandNameAndArgs;
@@ -125,6 +129,10 @@ pub(crate) struct FixArgs {
     /// Fix only these paths
     #[arg(value_hint = clap::ValueHint::AnyPath)]
     paths: Vec<String>,
+    /// Fix unchanged files in addition to changed ones. If no paths are
+    /// specified, all files in the repo will be fixed.
+    #[arg(long)]
+    include_unchanged_files: bool,
 }
 
 #[instrument(skip_all)]
@@ -136,17 +144,16 @@ pub(crate) fn cmd_fix(
     let mut workspace_command = command.workspace_helper(ui)?;
     let tools_config = get_tools_config(ui, command.settings().config())?;
     let root_commits: Vec<CommitId> = if args.source.is_empty() {
-        workspace_command.parse_revset(&RevisionArg::from(
-            command.settings().config().get_string("revsets.fix")?,
-        ))?
+        let revs = command.settings().config().get_string("revsets.fix")?;
+        workspace_command.parse_revset(ui, &RevisionArg::from(revs))?
     } else {
-        workspace_command.parse_union_revsets(&args.source)?
+        workspace_command.parse_union_revsets(ui, &args.source)?
     }
     .evaluate_to_commit_ids()?
     .collect();
     workspace_command.check_rewritable(root_commits.iter())?;
     let matcher = workspace_command
-        .parse_file_patterns(&args.paths)?
+        .parse_file_patterns(ui, &args.paths)?
         .to_matcher();
 
     let mut tx = workspace_command.start_transaction();
@@ -177,19 +184,22 @@ pub(crate) fn cmd_fix(
     for commit in commits.iter().rev() {
         let mut paths: HashSet<RepoPathBuf> = HashSet::new();
 
-        // Fix all paths that were fixed in ancestors, so we don't lose those changes.
-        // We do this instead of rebasing onto those changes, to avoid merge conflicts.
-        for parent_id in commit.parent_ids() {
-            if let Some(parent_paths) = commit_paths.get(parent_id) {
-                paths.extend(parent_paths.iter().cloned());
+        // If --include-unchanged-files, we always fix every matching file in the tree.
+        // Otherwise, we fix the matching changed files in this commit, plus any that
+        // were fixed in ancestors, so we don't lose those changes. We do this
+        // instead of rebasing onto those changes, to avoid merge conflicts.
+        let parent_tree = if args.include_unchanged_files {
+            MergedTree::resolved(Tree::empty(tx.repo().store().clone(), RepoPathBuf::root()))
+        } else {
+            for parent_id in commit.parent_ids() {
+                if let Some(parent_paths) = commit_paths.get(parent_id) {
+                    paths.extend(parent_paths.iter().cloned());
+                }
             }
-        }
-
-        // Also fix any new paths that were changed in this commit.
-        let tree = commit.tree()?;
-        let parent_tree = commit.parent_tree(tx.repo())?;
+            commit.parent_tree(tx.repo())?
+        };
         // TODO: handle copy tracking
-        let mut diff_stream = parent_tree.diff_stream(&tree, &matcher);
+        let mut diff_stream = parent_tree.diff_stream(&commit.tree()?, &matcher);
         async {
             while let Some(TreeDiffEntry {
                 path: repo_path,
@@ -234,7 +244,7 @@ pub(crate) fn cmd_fix(
     // other parts of the commit like the description.
     let mut num_checked_commits = 0;
     let mut num_fixed_commits = 0;
-    tx.mut_repo().transform_descendants(
+    tx.repo_mut().transform_descendants(
         command.settings(),
         root_commits.iter().cloned().collect_vec(),
         |mut rewriter| {
@@ -344,8 +354,10 @@ fn fix_file_ids<'a>(
                         }
                     });
                 if new_content != old_content {
-                    let new_file_id =
-                        store.write_file(&tool_input.repo_path, &mut new_content.as_slice())?;
+                    // TODO: send futures back over channel
+                    let new_file_id = store
+                        .write_file(&tool_input.repo_path, &mut new_content.as_slice())
+                        .block_on()?;
                     updates_tx.send((tool_input, new_file_id)).unwrap();
                 }
             }
@@ -463,25 +475,28 @@ fn get_tools_config(ui: &mut Ui, config: &config::Config) -> Result<ToolsConfig,
         let mut tools: Vec<ToolConfig> = tools_table
             .into_iter()
             .sorted_by(|a, b| a.0.cmp(&b.0))
-            .map(|(_name, value)| -> Result<ToolConfig, CommandError> {
+            .map(|(name, value)| -> Result<ToolConfig, CommandError> {
+                let mut diagnostics = FilesetDiagnostics::new();
                 let tool: RawToolConfig = value.try_deserialize()?;
+                let expression = FilesetExpression::union_all(
+                    tool.patterns
+                        .iter()
+                        .map(|arg| {
+                            fileset::parse(
+                                &mut diagnostics,
+                                arg,
+                                &RepoPathUiConverter::Fs {
+                                    cwd: "".into(),
+                                    base: "".into(),
+                                },
+                            )
+                        })
+                        .try_collect()?,
+                );
+                print_parse_diagnostics(ui, &format!("In `fix.tools.{name}`"), &diagnostics)?;
                 Ok(ToolConfig {
                     command: tool.command,
-                    matcher: FilesetExpression::union_all(
-                        tool.patterns
-                            .iter()
-                            .map(|arg| {
-                                fileset::parse(
-                                    arg,
-                                    &RepoPathUiConverter::Fs {
-                                        cwd: "".into(),
-                                        base: "".into(),
-                                    },
-                                )
-                            })
-                            .try_collect()?,
-                    )
-                    .to_matcher(),
+                    matcher: expression.to_matcher(),
                 })
             })
             .try_collect()?;

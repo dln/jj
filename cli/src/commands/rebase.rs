@@ -246,14 +246,14 @@ pub(crate) fn cmd_rebase(
             "clap should forbid `-r --skip-empty`"
         );
         let target_commits: Vec<_> = workspace_command
-            .parse_union_revsets(&args.revisions)?
+            .parse_union_revsets(ui, &args.revisions)?
             .evaluate_to_commits()?
             .try_collect()?; // in reverse topological order
         if !args.insert_after.is_empty() && !args.insert_before.is_empty() {
             let after_commits =
-                workspace_command.resolve_some_revsets_default_single(&args.insert_after)?;
+                workspace_command.resolve_some_revsets_default_single(ui, &args.insert_after)?;
             let before_commits =
-                workspace_command.resolve_some_revsets_default_single(&args.insert_before)?;
+                workspace_command.resolve_some_revsets_default_single(ui, &args.insert_before)?;
             rebase_revisions_after_before(
                 ui,
                 command.settings(),
@@ -264,7 +264,7 @@ pub(crate) fn cmd_rebase(
             )?;
         } else if !args.insert_after.is_empty() {
             let after_commits =
-                workspace_command.resolve_some_revsets_default_single(&args.insert_after)?;
+                workspace_command.resolve_some_revsets_default_single(ui, &args.insert_after)?;
             rebase_revisions_after(
                 ui,
                 command.settings(),
@@ -274,7 +274,7 @@ pub(crate) fn cmd_rebase(
             )?;
         } else if !args.insert_before.is_empty() {
             let before_commits =
-                workspace_command.resolve_some_revsets_default_single(&args.insert_before)?;
+                workspace_command.resolve_some_revsets_default_single(ui, &args.insert_before)?;
             rebase_revisions_before(
                 ui,
                 command.settings(),
@@ -284,7 +284,7 @@ pub(crate) fn cmd_rebase(
             )?;
         } else {
             let new_parents = workspace_command
-                .resolve_some_revsets_default_single(&args.destination)?
+                .resolve_some_revsets_default_single(ui, &args.destination)?
                 .into_iter()
                 .collect_vec();
             rebase_revisions(
@@ -297,10 +297,11 @@ pub(crate) fn cmd_rebase(
         }
     } else if !args.source.is_empty() {
         let new_parents = workspace_command
-            .resolve_some_revsets_default_single(&args.destination)?
+            .resolve_some_revsets_default_single(ui, &args.destination)?
             .into_iter()
             .collect_vec();
-        let source_commits = workspace_command.resolve_some_revsets_default_single(&args.source)?;
+        let source_commits =
+            workspace_command.resolve_some_revsets_default_single(ui, &args.source)?;
         rebase_descendants_transaction(
             ui,
             command.settings(),
@@ -311,13 +312,13 @@ pub(crate) fn cmd_rebase(
         )?;
     } else {
         let new_parents = workspace_command
-            .resolve_some_revsets_default_single(&args.destination)?
+            .resolve_some_revsets_default_single(ui, &args.destination)?
             .into_iter()
             .collect_vec();
         let branch_commits = if args.branch.is_empty() {
-            IndexSet::from([workspace_command.resolve_single_rev(&RevisionArg::AT)?])
+            IndexSet::from([workspace_command.resolve_single_rev(ui, &RevisionArg::AT)?])
         } else {
-            workspace_command.resolve_some_revsets_default_single(&args.branch)?
+            workspace_command.resolve_some_revsets_default_single(ui, &args.branch)?
         };
         rebase_branch(
             ui,
@@ -376,7 +377,7 @@ fn rebase_descendants(
 ) -> Result<usize, CommandError> {
     for old_commit in old_commits.iter() {
         let rewriter = CommitRewriter::new(
-            tx.mut_repo(),
+            tx.repo_mut(),
             old_commit.borrow().clone(),
             new_parents
                 .iter()
@@ -386,7 +387,7 @@ fn rebase_descendants(
         rebase_commit_with_options(settings, rewriter, &rebase_options)?;
     }
     let num_rebased = old_commits.len()
-        + tx.mut_repo()
+        + tx.repo_mut()
             .rebase_descendants_with_options(settings, rebase_options)?;
     Ok(num_rebased)
 }
@@ -604,7 +605,7 @@ fn move_commits_transaction(
         num_skipped_rebases,
     } = move_commits(
         settings,
-        tx.mut_repo(),
+        tx.repo_mut(),
         new_parent_ids,
         new_children,
         target_commits,

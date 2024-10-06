@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::borrow::Cow;
+use std::cell::OnceCell;
 use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::env;
@@ -57,6 +58,7 @@ use jj_lib::commit::Commit;
 use jj_lib::dag_walk;
 use jj_lib::file_util;
 use jj_lib::fileset;
+use jj_lib::fileset::FilesetDiagnostics;
 use jj_lib::fileset::FilesetExpression;
 use jj_lib::git;
 use jj_lib::git_backend::GitBackend;
@@ -91,6 +93,7 @@ use jj_lib::repo_path::RepoPathUiConverter;
 use jj_lib::repo_path::UiPathParseError;
 use jj_lib::revset;
 use jj_lib::revset::RevsetAliasesMap;
+use jj_lib::revset::RevsetDiagnostics;
 use jj_lib::revset::RevsetExpression;
 use jj_lib::revset::RevsetExtensions;
 use jj_lib::revset::RevsetFilterPredicate;
@@ -121,7 +124,6 @@ use jj_lib::workspace::Workspace;
 use jj_lib::workspace::WorkspaceLoadError;
 use jj_lib::workspace::WorkspaceLoader;
 use jj_lib::workspace::WorkspaceLoaderFactory;
-use once_cell::unsync::OnceCell;
 use tracing::instrument;
 use tracing_chrome::ChromeLayerBuilder;
 use tracing_subscriber::prelude::*;
@@ -131,6 +133,7 @@ use crate::command_error::config_error_with_message;
 use crate::command_error::handle_command_result;
 use crate::command_error::internal_error;
 use crate::command_error::internal_error_with_message;
+use crate::command_error::print_parse_diagnostics;
 use crate::command_error::user_error;
 use crate::command_error::user_error_with_hint;
 use crate::command_error::user_error_with_message;
@@ -156,17 +159,21 @@ use crate::git_util::print_git_import_stats;
 use crate::merge_tools::DiffEditor;
 use crate::merge_tools::MergeEditor;
 use crate::merge_tools::MergeToolConfigError;
+use crate::operation_templater::OperationTemplateLanguage;
 use crate::operation_templater::OperationTemplateLanguageExtension;
 use crate::revset_util;
 use crate::revset_util::RevsetExpressionEvaluator;
 use crate::template_builder;
 use crate::template_builder::TemplateLanguage;
 use crate::template_parser::TemplateAliasesMap;
+use crate::template_parser::TemplateDiagnostics;
 use crate::templater::PropertyPlaceholder;
 use crate::templater::TemplateRenderer;
 use crate::text_util;
 use crate::ui::ColorChoice;
 use crate::ui::Ui;
+
+const SHORT_CHANGE_ID_TEMPLATE_TEXT: &str = "format_short_change_id(self.change_id())";
 
 #[derive(Clone)]
 struct ChromeTracingFlushGuard {
@@ -336,17 +343,17 @@ impl CommandHelper {
         template_text: &str,
         wrap_self: impl Fn(PropertyPlaceholder<C>) -> L::Property,
     ) -> Result<TemplateRenderer<'a, C>, CommandError> {
+        let mut diagnostics = TemplateDiagnostics::new();
         let aliases = self.load_template_aliases(ui)?;
-        Ok(template_builder::parse(
+        let template = template_builder::parse(
             language,
+            &mut diagnostics,
             template_text,
             &aliases,
             wrap_self,
-        )?)
-    }
-
-    pub fn operation_template_extensions(&self) -> &[Arc<dyn OperationTemplateLanguageExtension>] {
-        &self.data.operation_template_extensions
+        )?;
+        print_parse_diagnostics(ui, "In template expression", &diagnostics)?;
+        Ok(template)
     }
 
     pub fn workspace_loader(&self) -> Result<&dyn WorkspaceLoader, CommandError> {
@@ -358,7 +365,7 @@ impl CommandHelper {
 
     /// Loads workspace and repo, then snapshots the working copy if allowed.
     #[instrument(skip(self, ui))]
-    pub fn workspace_helper(&self, ui: &mut Ui) -> Result<WorkspaceCommandHelper, CommandError> {
+    pub fn workspace_helper(&self, ui: &Ui) -> Result<WorkspaceCommandHelper, CommandError> {
         let mut workspace_command = self.workspace_helper_no_snapshot(ui)?;
         workspace_command.maybe_snapshot(ui)?;
         Ok(workspace_command)
@@ -369,12 +376,13 @@ impl CommandHelper {
     #[instrument(skip(self, ui))]
     pub fn workspace_helper_no_snapshot(
         &self,
-        ui: &mut Ui,
+        ui: &Ui,
     ) -> Result<WorkspaceCommandHelper, CommandError> {
         let workspace = self.load_workspace()?;
         let op_head = self.resolve_operation(ui, workspace.repo_loader())?;
         let repo = workspace.repo_loader().load_at(&op_head)?;
-        WorkspaceCommandHelper::new(ui, self, workspace, repo, self.is_at_head_operation())
+        let env = self.workspace_environment(ui, &workspace)?;
+        WorkspaceCommandHelper::new(ui, workspace, repo, env, self.is_at_head_operation())
     }
 
     pub fn get_working_copy_factory(&self) -> Result<&dyn WorkingCopyFactory, CommandError> {
@@ -404,6 +412,15 @@ impl CommandHelper {
             })
     }
 
+    /// Loads command environment for the given `workspace`.
+    pub fn workspace_environment(
+        &self,
+        ui: &Ui,
+        workspace: &Workspace,
+    ) -> Result<WorkspaceCommandEnvironment, CommandError> {
+        WorkspaceCommandEnvironment::new(ui, self, workspace)
+    }
+
     /// Returns true if the working copy to be loaded is writable, and therefore
     /// should usually be snapshotted.
     pub fn is_working_copy_writable(&self) -> bool {
@@ -427,7 +444,7 @@ impl CommandHelper {
     #[instrument(skip_all)]
     pub fn resolve_operation(
         &self,
-        ui: &mut Ui,
+        ui: &Ui,
         repo_loader: &RepoLoader,
     ) -> Result<Operation, CommandError> {
         if let Some(op_str) = &self.data.global_args.at_operation {
@@ -450,7 +467,7 @@ impl CommandHelper {
                     );
                     for other_op_head in op_heads.into_iter().skip(1) {
                         tx.merge_operation(other_op_head)?;
-                        let num_rebased = tx.mut_repo().rebase_descendants(&self.data.settings)?;
+                        let num_rebased = tx.repo_mut().rebase_descendants(&self.data.settings)?;
                         if num_rebased > 0 {
                             writeln!(
                                 ui.status(),
@@ -475,25 +492,13 @@ impl CommandHelper {
     #[instrument(skip_all)]
     pub fn for_workable_repo(
         &self,
-        ui: &mut Ui,
+        ui: &Ui,
         workspace: Workspace,
         repo: Arc<ReadonlyRepo>,
     ) -> Result<WorkspaceCommandHelper, CommandError> {
+        let env = self.workspace_environment(ui, &workspace)?;
         let loaded_at_head = true;
-        WorkspaceCommandHelper::new(ui, self, workspace, repo, loaded_at_head)
-    }
-
-    /// Creates helper for the repo whose view might be out of sync with
-    /// the working copy. Therefore, the working copy should not be updated.
-    #[instrument(skip_all)]
-    pub fn for_temporary_repo(
-        &self,
-        ui: &mut Ui,
-        workspace: Workspace,
-        repo: Arc<ReadonlyRepo>,
-    ) -> Result<WorkspaceCommandHelper, CommandError> {
-        let loaded_at_head = false;
-        WorkspaceCommandHelper::new(ui, self, workspace, repo, loaded_at_head)
+        WorkspaceCommandHelper::new(ui, workspace, repo, env, loaded_at_head)
     }
 }
 
@@ -517,33 +522,33 @@ impl ReadonlyUserRepo {
     }
 }
 
-/// A branch that should be advanced to satisfy the "advance-branches" feature.
-/// This is a helper for `WorkspaceCommandTransaction`. It provides a type-safe
-/// way to separate the work of checking whether a branch can be advanced and
-/// actually advancing it. Advancing the branch never fails, but can't be done
-/// until the new `CommitId` is available. Splitting the work in this way also
-/// allows us to identify eligible branches without actually moving them and
-/// return config errors to the user early.
-pub struct AdvanceableBranch {
+/// A bookmark that should be advanced to satisfy the "advance-bookmarks"
+/// feature. This is a helper for `WorkspaceCommandTransaction`. It provides a
+/// type-safe way to separate the work of checking whether a bookmark can be
+/// advanced and actually advancing it. Advancing the bookmark never fails, but
+/// can't be done until the new `CommitId` is available. Splitting the work in
+/// this way also allows us to identify eligible bookmarks without actually
+/// moving them and return config errors to the user early.
+pub struct AdvanceableBookmark {
     name: String,
     old_commit_id: CommitId,
 }
 
-/// Helper for parsing and evaluating settings for the advance-branches feature.
-/// Settings are configured in the jj config.toml as lists of [`StringPattern`]s
-/// for enabled and disabled branches. Example:
+/// Helper for parsing and evaluating settings for the advance-bookmarks
+/// feature. Settings are configured in the jj config.toml as lists of
+/// [`StringPattern`]s for enabled and disabled bookmarks. Example:
 /// ```toml
 /// [experimental-advance-branches]
 /// # Enable the feature for all branches except "main".
 /// enabled-branches = ["glob:*"]
 /// disabled-branches = ["main"]
 /// ```
-struct AdvanceBranchesSettings {
-    enabled_branches: Vec<StringPattern>,
-    disabled_branches: Vec<StringPattern>,
+struct AdvanceBookmarksSettings {
+    enabled_bookmarks: Vec<StringPattern>,
+    disabled_bookmarks: Vec<StringPattern>,
 }
 
-impl AdvanceBranchesSettings {
+impl AdvanceBookmarksSettings {
     fn from_config(config: &config::Config) -> Result<Self, CommandError> {
         let get_setting = |setting_key| {
             let setting = format!("experimental-advance-branches.{setting_key}");
@@ -563,86 +568,310 @@ impl AdvanceBranchesSettings {
             }
         };
         Ok(Self {
-            enabled_branches: get_setting("enabled-branches")?,
-            disabled_branches: get_setting("disabled-branches")?,
+            enabled_bookmarks: get_setting("enabled-branches")?,
+            disabled_bookmarks: get_setting("disabled-branches")?,
         })
     }
 
-    /// Returns true if the advance-branches feature is enabled for
-    /// `branch_name`.
-    fn branch_is_eligible(&self, branch_name: &str) -> bool {
+    /// Returns true if the advance-bookmarks feature is enabled for
+    /// `bookmark_name`.
+    fn bookmark_is_eligible(&self, bookmark_name: &str) -> bool {
         if self
-            .disabled_branches
+            .disabled_bookmarks
             .iter()
-            .any(|d| d.matches(branch_name))
+            .any(|d| d.matches(bookmark_name))
         {
             return false;
         }
-        self.enabled_branches.iter().any(|e| e.matches(branch_name))
+        self.enabled_bookmarks
+            .iter()
+            .any(|e| e.matches(bookmark_name))
     }
 
     /// Returns true if the config includes at least one "enabled-branches"
     /// pattern.
     fn feature_enabled(&self) -> bool {
-        !self.enabled_branches.is_empty()
+        !self.enabled_bookmarks.is_empty()
+    }
+}
+
+/// Metadata and configuration loaded for a specific workspace.
+pub struct WorkspaceCommandEnvironment {
+    command: CommandHelper,
+    revset_aliases_map: RevsetAliasesMap,
+    template_aliases_map: TemplateAliasesMap,
+    path_converter: RepoPathUiConverter,
+    workspace_id: WorkspaceId,
+    immutable_heads_expression: Rc<RevsetExpression>,
+    short_prefixes_expression: Option<Rc<RevsetExpression>>,
+}
+
+impl WorkspaceCommandEnvironment {
+    #[instrument(skip_all)]
+    fn new(ui: &Ui, command: &CommandHelper, workspace: &Workspace) -> Result<Self, CommandError> {
+        let revset_aliases_map =
+            revset_util::load_revset_aliases(ui, &command.data.layered_configs)?;
+        let template_aliases_map = command.load_template_aliases(ui)?;
+        let path_converter = RepoPathUiConverter::Fs {
+            cwd: command.cwd().to_owned(),
+            base: workspace.workspace_root().to_owned(),
+        };
+        let mut env = Self {
+            command: command.clone(),
+            revset_aliases_map,
+            template_aliases_map,
+            path_converter,
+            workspace_id: workspace.workspace_id().to_owned(),
+            immutable_heads_expression: RevsetExpression::root(),
+            short_prefixes_expression: None,
+        };
+        env.immutable_heads_expression = env.load_immutable_heads_expression(ui)?;
+        env.short_prefixes_expression = env.load_short_prefixes_expression(ui)?;
+        Ok(env)
+    }
+
+    pub fn settings(&self) -> &UserSettings {
+        self.command.settings()
+    }
+
+    pub(crate) fn path_converter(&self) -> &RepoPathUiConverter {
+        &self.path_converter
+    }
+
+    pub fn workspace_id(&self) -> &WorkspaceId {
+        &self.workspace_id
+    }
+
+    pub(crate) fn revset_parse_context(&self) -> RevsetParseContext {
+        let workspace_context = RevsetWorkspaceContext {
+            path_converter: &self.path_converter,
+            workspace_id: &self.workspace_id,
+        };
+        let now = if let Some(timestamp) = self.settings().commit_timestamp() {
+            chrono::Local
+                .timestamp_millis_opt(timestamp.timestamp.0)
+                .unwrap()
+        } else {
+            chrono::Local::now()
+        };
+        RevsetParseContext::new(
+            &self.revset_aliases_map,
+            self.settings().user_email(),
+            now.into(),
+            self.command.revset_extensions(),
+            Some(workspace_context),
+        )
+    }
+
+    /// Creates fresh new context which manages cache of short commit/change ID
+    /// prefixes. New context should be created per repo view (or operation.)
+    pub fn new_id_prefix_context(&self) -> IdPrefixContext {
+        let context = IdPrefixContext::new(self.command.revset_extensions().clone());
+        match &self.short_prefixes_expression {
+            None => context,
+            Some(expression) => context.disambiguate_within(expression.clone()),
+        }
+    }
+
+    /// User-configured expression defining the immutable set.
+    pub fn immutable_expression(&self) -> Rc<RevsetExpression> {
+        // Negated ancestors expression `~::(<heads> | root())` is slightly
+        // easier to optimize than negated union `~(::<heads> | root())`.
+        self.immutable_heads_expression.ancestors()
+    }
+
+    /// User-configured expression defining the heads of the immutable set.
+    pub fn immutable_heads_expression(&self) -> &Rc<RevsetExpression> {
+        &self.immutable_heads_expression
+    }
+
+    fn load_immutable_heads_expression(
+        &self,
+        ui: &Ui,
+    ) -> Result<Rc<RevsetExpression>, CommandError> {
+        let mut diagnostics = RevsetDiagnostics::new();
+        let expression = revset_util::parse_immutable_heads_expression(
+            &mut diagnostics,
+            &self.revset_parse_context(),
+        )
+        .map_err(|e| config_error_with_message("Invalid `revset-aliases.immutable_heads()`", e))?;
+        print_parse_diagnostics(ui, "In `revset-aliases.immutable_heads()`", &diagnostics)?;
+        Ok(expression)
+    }
+
+    fn load_short_prefixes_expression(
+        &self,
+        ui: &Ui,
+    ) -> Result<Option<Rc<RevsetExpression>>, CommandError> {
+        let revset_string = self
+            .settings()
+            .config()
+            .get_string("revsets.short-prefixes")
+            .unwrap_or_else(|_| self.settings().default_revset());
+        if revset_string.is_empty() {
+            Ok(None)
+        } else {
+            let mut diagnostics = RevsetDiagnostics::new();
+            let (expression, modifier) = revset::parse_with_modifier(
+                &mut diagnostics,
+                &revset_string,
+                &self.revset_parse_context(),
+            )
+            .map_err(|err| config_error_with_message("Invalid `revsets.short-prefixes`", err))?;
+            print_parse_diagnostics(ui, "In `revsets.short-prefixes`", &diagnostics)?;
+            let (None | Some(RevsetModifier::All)) = modifier;
+            Ok(Some(revset::optimize(expression)))
+        }
+    }
+
+    fn check_repo_rewritable<'a>(
+        &self,
+        repo: &dyn Repo,
+        commits: impl IntoIterator<Item = &'a CommitId>,
+    ) -> Result<(), CommandError> {
+        if self.command.global_args().ignore_immutable {
+            let root_id = repo.store().root_commit_id();
+            return if commits.into_iter().contains(root_id) {
+                Err(user_error(format!(
+                    "The root commit {} is immutable",
+                    short_commit_hash(root_id),
+                )))
+            } else {
+                Ok(())
+            };
+        }
+
+        // Not using self.id_prefix_context() because the disambiguation data
+        // must not be calculated and cached against arbitrary repo. It's also
+        // unlikely that the immutable expression contains short hashes.
+        let id_prefix_context = IdPrefixContext::new(self.command.revset_extensions().clone());
+        let to_rewrite_revset =
+            RevsetExpression::commits(commits.into_iter().cloned().collect_vec());
+        let mut expression = RevsetExpressionEvaluator::new(
+            repo,
+            self.command.revset_extensions().clone(),
+            &id_prefix_context,
+            self.immutable_expression(),
+        );
+        expression.intersect_with(&to_rewrite_revset);
+
+        let mut commit_id_iter = expression.evaluate_to_commit_ids().map_err(|e| {
+            config_error_with_message("Invalid `revset-aliases.immutable_heads()`", e)
+        })?;
+
+        if let Some(commit_id) = commit_id_iter.next() {
+            let error = if &commit_id == repo.store().root_commit_id() {
+                user_error(format!(
+                    "The root commit {} is immutable",
+                    short_commit_hash(&commit_id),
+                ))
+            } else {
+                user_error_with_hint(
+                    format!("Commit {} is immutable", short_commit_hash(&commit_id)),
+                    "Pass `--ignore-immutable` or configure the set of immutable commits via \
+                     `revset-aliases.immutable_heads()`.",
+                )
+            };
+            return Err(error);
+        }
+
+        Ok(())
+    }
+
+    /// Parses template of the given language into evaluation tree.
+    ///
+    /// `wrap_self` specifies the type of the top-level property, which should
+    /// be one of the `L::wrap_*()` functions.
+    pub fn parse_template<'a, C: Clone + 'a, L: TemplateLanguage<'a> + ?Sized>(
+        &self,
+        ui: &Ui,
+        language: &L,
+        template_text: &str,
+        wrap_self: impl Fn(PropertyPlaceholder<C>) -> L::Property,
+    ) -> Result<TemplateRenderer<'a, C>, CommandError> {
+        let mut diagnostics = TemplateDiagnostics::new();
+        let template = template_builder::parse(
+            language,
+            &mut diagnostics,
+            template_text,
+            &self.template_aliases_map,
+            wrap_self,
+        )?;
+        print_parse_diagnostics(ui, "In template expression", &diagnostics)?;
+        Ok(template)
+    }
+
+    /// Creates commit template language environment for this workspace and the
+    /// given `repo`.
+    pub fn commit_template_language<'a>(
+        &'a self,
+        repo: &'a dyn Repo,
+        id_prefix_context: &'a IdPrefixContext,
+    ) -> CommitTemplateLanguage<'a> {
+        CommitTemplateLanguage::new(
+            repo,
+            &self.path_converter,
+            &self.workspace_id,
+            self.revset_parse_context(),
+            id_prefix_context,
+            self.immutable_expression(),
+            &self.command.data.commit_template_extensions,
+        )
+    }
+
+    pub fn operation_template_extensions(&self) -> &[Arc<dyn OperationTemplateLanguageExtension>] {
+        &self.command.data.operation_template_extensions
     }
 }
 
 /// Provides utilities for writing a command that works on a [`Workspace`]
 /// (which most commands do).
 pub struct WorkspaceCommandHelper {
-    command: CommandHelper,
     workspace: Workspace,
     user_repo: ReadonlyUserRepo,
+    env: WorkspaceCommandEnvironment,
     // TODO: Parsed template can be cached if it doesn't capture 'repo lifetime
     commit_summary_template_text: String,
-    revset_aliases_map: RevsetAliasesMap,
-    template_aliases_map: TemplateAliasesMap,
+    op_summary_template_text: String,
     may_update_working_copy: bool,
     working_copy_shared_with_git: bool,
-    path_converter: RepoPathUiConverter,
 }
 
 impl WorkspaceCommandHelper {
     #[instrument(skip_all)]
     fn new(
-        ui: &mut Ui,
-        command: &CommandHelper,
+        ui: &Ui,
         workspace: Workspace,
         repo: Arc<ReadonlyRepo>,
+        env: WorkspaceCommandEnvironment,
         loaded_at_head: bool,
     ) -> Result<Self, CommandError> {
-        let settings = command.settings();
+        let settings = env.settings();
         let commit_summary_template_text =
             settings.config().get_string("templates.commit_summary")?;
-        let revset_aliases_map =
-            revset_util::load_revset_aliases(ui, &command.data.layered_configs)?;
-        let template_aliases_map = command.load_template_aliases(ui)?;
-        let may_update_working_copy = loaded_at_head && !command.global_args().ignore_working_copy;
+        let op_summary_template_text = settings.config().get_string("templates.op_summary")?;
+        let may_update_working_copy =
+            loaded_at_head && !env.command.global_args().ignore_working_copy;
         let working_copy_shared_with_git = is_colocated_git_workspace(&workspace, &repo);
-        let path_converter = RepoPathUiConverter::Fs {
-            cwd: command.cwd().to_owned(),
-            base: workspace.workspace_root().clone(),
-        };
         let helper = Self {
-            command: command.clone(),
             workspace,
             user_repo: ReadonlyUserRepo::new(repo),
+            env,
             commit_summary_template_text,
-            revset_aliases_map,
-            template_aliases_map,
+            op_summary_template_text,
             may_update_working_copy,
             working_copy_shared_with_git,
-            path_converter,
         };
-        // Parse commit_summary template (and short-prefixes revset) early to
-        // report error before starting mutable operation.
-        helper.parse_commit_template(&helper.commit_summary_template_text)?;
+        // Parse commit_summary template early to report error before starting
+        // mutable operation.
+        helper.parse_operation_template(ui, &helper.op_summary_template_text)?;
+        helper.parse_commit_template(ui, &helper.commit_summary_template_text)?;
+        helper.parse_commit_template(ui, SHORT_CHANGE_ID_TEMPLATE_TEXT)?;
         Ok(helper)
     }
 
     pub fn settings(&self) -> &UserSettings {
-        self.command.settings()
+        self.env.settings()
     }
 
     pub fn git_backend(&self) -> Option<&GitBackend> {
@@ -653,7 +882,7 @@ impl WorkspaceCommandHelper {
         if self.may_update_working_copy {
             Ok(())
         } else {
-            let hint = if self.command.global_args().ignore_working_copy {
+            let hint = if self.env.command.global_args().ignore_working_copy {
                 "Don't use --ignore-working-copy."
             } else {
                 "Don't use --at-op."
@@ -668,7 +897,7 @@ impl WorkspaceCommandHelper {
     /// Snapshot the working copy if allowed, and import Git refs if the working
     /// copy is collocated with Git.
     #[instrument(skip_all)]
-    pub fn maybe_snapshot(&mut self, ui: &mut Ui) -> Result<(), CommandError> {
+    pub fn maybe_snapshot(&mut self, ui: &Ui) -> Result<(), CommandError> {
         if self.may_update_working_copy {
             if self.working_copy_shared_with_git {
                 self.import_git_head(ui)?;
@@ -693,12 +922,12 @@ impl WorkspaceCommandHelper {
     /// working-copy state will be reset to point to the new Git HEAD. The
     /// working-copy contents won't be updated.
     #[instrument(skip_all)]
-    fn import_git_head(&mut self, ui: &mut Ui) -> Result<(), CommandError> {
+    fn import_git_head(&mut self, ui: &Ui) -> Result<(), CommandError> {
         assert!(self.may_update_working_copy);
-        let command = self.command.clone();
+        let command = self.env.command.clone();
         let mut tx = self.start_transaction();
-        git::import_head(tx.mut_repo())?;
-        if !tx.mut_repo().has_changes() {
+        git::import_head(tx.repo_mut())?;
+        if !tx.repo().has_changes() {
             return Ok(());
         }
 
@@ -714,18 +943,18 @@ impl WorkspaceCommandHelper {
 
         let mut tx = tx.into_inner();
         let old_git_head = self.repo().view().git_head().clone();
-        let new_git_head = tx.mut_repo().view().git_head().clone();
+        let new_git_head = tx.repo().view().git_head().clone();
         if let Some(new_git_head_id) = new_git_head.as_normal() {
             let workspace_id = self.workspace_id().to_owned();
-            let new_git_head_commit = tx.mut_repo().store().get_commit(new_git_head_id)?;
-            tx.mut_repo()
+            let new_git_head_commit = tx.repo().store().get_commit(new_git_head_id)?;
+            tx.repo_mut()
                 .check_out(workspace_id, command.settings(), &new_git_head_commit)?;
             let mut locked_ws = self.workspace.start_working_copy_mutation()?;
             // The working copy was presumably updated by the git command that updated
             // HEAD, so we just need to reset our working copy
             // state to it without updating working copy files.
             locked_ws.locked_wc().reset(&new_git_head_commit)?;
-            tx.mut_repo().rebase_descendants(command.settings())?;
+            tx.repo_mut().rebase_descendants(command.settings())?;
             self.user_repo = ReadonlyUserRepo::new(tx.commit("import git head"));
             locked_ws.finish(self.user_repo.repo.op_id().clone())?;
             if old_git_head.is_present() {
@@ -744,29 +973,29 @@ impl WorkspaceCommandHelper {
     }
 
     /// Imports branches and tags from the underlying Git repo, abandons old
-    /// branches.
+    /// bookmarks.
     ///
-    /// If the working-copy branch is rebased, and if update is allowed, the new
-    /// working-copy commit will be checked out.
+    /// If the working-copy branch is rebased, and if update is allowed, the
+    /// new working-copy commit will be checked out.
     ///
     /// This function does not import the Git HEAD, but the HEAD may be reset to
     /// the working copy parent if the repository is colocated.
     #[instrument(skip_all)]
-    fn import_git_refs(&mut self, ui: &mut Ui) -> Result<(), CommandError> {
+    fn import_git_refs(&mut self, ui: &Ui) -> Result<(), CommandError> {
         let git_settings = self.settings().git_settings();
         let mut tx = self.start_transaction();
         // Automated import shouldn't fail because of reserved remote name.
-        let stats = git::import_some_refs(tx.mut_repo(), &git_settings, |ref_name| {
+        let stats = git::import_some_refs(tx.repo_mut(), &git_settings, |ref_name| {
             !git::is_reserved_git_remote_ref(ref_name)
         })?;
-        if !tx.mut_repo().has_changes() {
+        if !tx.repo().has_changes() {
             return Ok(());
         }
 
         print_git_import_stats(ui, tx.repo(), &stats, false)?;
         let mut tx = tx.into_inner();
         // Rebase here to show slightly different status message.
-        let num_rebased = tx.mut_repo().rebase_descendants(self.settings())?;
+        let num_rebased = tx.repo_mut().rebase_descendants(self.settings())?;
         if num_rebased > 0 {
             writeln!(
                 ui.status(),
@@ -785,8 +1014,20 @@ impl WorkspaceCommandHelper {
         &self.user_repo.repo
     }
 
+    pub fn repo_path(&self) -> &Path {
+        self.workspace.repo_path()
+    }
+
+    pub fn workspace(&self) -> &Workspace {
+        &self.workspace
+    }
+
     pub fn working_copy(&self) -> &dyn WorkingCopy {
         self.workspace.working_copy()
+    }
+
+    pub fn env(&self) -> &WorkspaceCommandEnvironment {
+        &self.env
     }
 
     pub fn unchecked_start_working_copy_mutation(
@@ -814,7 +1055,7 @@ impl WorkspaceCommandHelper {
         Ok((locked_ws, wc_commit))
     }
 
-    pub fn workspace_root(&self) -> &PathBuf {
+    pub fn workspace_root(&self) -> &Path {
         self.workspace.workspace_root()
     }
 
@@ -831,18 +1072,19 @@ impl WorkspaceCommandHelper {
     }
 
     pub fn format_file_path(&self, file: &RepoPath) -> String {
-        self.path_converter.format_file_path(file)
+        self.path_converter().format_file_path(file)
     }
 
     /// Parses a path relative to cwd into a RepoPath, which is relative to the
     /// workspace root.
     pub fn parse_file_path(&self, input: &str) -> Result<RepoPathBuf, UiPathParseError> {
-        self.path_converter.parse_file_path(input)
+        self.path_converter().parse_file_path(input)
     }
 
     /// Parses the given strings as file patterns.
     pub fn parse_file_patterns(
         &self,
+        ui: &Ui,
         values: &[String],
     ) -> Result<FilesetExpression, CommandError> {
         // TODO: This function might be superseded by parse_union_filesets(),
@@ -851,7 +1093,7 @@ impl WorkspaceCommandHelper {
         if values.is_empty() {
             Ok(FilesetExpression::all())
         } else if self.settings().config().get_bool("ui.allow-filesets")? {
-            self.parse_union_filesets(values)
+            self.parse_union_filesets(ui, values)
         } else {
             let expressions = values
                 .iter()
@@ -865,17 +1107,35 @@ impl WorkspaceCommandHelper {
     /// Parses the given fileset expressions and concatenates them all.
     pub fn parse_union_filesets(
         &self,
+        ui: &Ui,
         file_args: &[String], // TODO: introduce FileArg newtype?
     ) -> Result<FilesetExpression, CommandError> {
+        let mut diagnostics = FilesetDiagnostics::new();
         let expressions: Vec<_> = file_args
             .iter()
-            .map(|arg| fileset::parse_maybe_bare(arg, &self.path_converter))
+            .map(|arg| fileset::parse_maybe_bare(&mut diagnostics, arg, self.path_converter()))
             .try_collect()?;
+        print_parse_diagnostics(ui, "In fileset expression", &diagnostics)?;
         Ok(FilesetExpression::union_all(expressions))
     }
 
+    pub fn auto_tracking_matcher(&self, ui: &Ui) -> Result<Box<dyn Matcher>, CommandError> {
+        let mut diagnostics = FilesetDiagnostics::new();
+        let pattern = self.settings().config().get_string("snapshot.auto-track")?;
+        let expression = fileset::parse(
+            &mut diagnostics,
+            &pattern,
+            &RepoPathUiConverter::Fs {
+                cwd: "".into(),
+                base: "".into(),
+            },
+        )?;
+        print_parse_diagnostics(ui, "In `snapshot.auto-track`", &diagnostics)?;
+        Ok(expression.to_matcher())
+    }
+
     pub(crate) fn path_converter(&self) -> &RepoPathUiConverter {
-        &self.path_converter
+        self.env.path_converter()
     }
 
     #[instrument(skip_all)]
@@ -922,7 +1182,7 @@ impl WorkspaceCommandHelper {
 
     /// Creates textual diff renderer of the specified `formats`.
     pub fn diff_renderer(&self, formats: Vec<DiffFormat>) -> DiffRenderer<'_> {
-        DiffRenderer::new(self.repo().as_ref(), &self.path_converter, formats)
+        DiffRenderer::new(self.repo().as_ref(), self.path_converter(), formats)
     }
 
     /// Loads textual diff renderer from the settings and command arguments.
@@ -1003,8 +1263,12 @@ impl WorkspaceCommandHelper {
 
     /// Resolve a revset to a single revision. Return an error if the revset is
     /// empty or has multiple revisions.
-    pub fn resolve_single_rev(&self, revision_arg: &RevisionArg) -> Result<Commit, CommandError> {
-        let expression = self.parse_revset(revision_arg)?;
+    pub fn resolve_single_rev(
+        &self,
+        ui: &Ui,
+        revision_arg: &RevisionArg,
+    ) -> Result<Commit, CommandError> {
+        let expression = self.parse_revset(ui, revision_arg)?;
         let should_hint_about_all_prefix = false;
         revset_util::evaluate_revset_to_single_commit(
             revision_arg.as_ref(),
@@ -1021,11 +1285,12 @@ impl WorkspaceCommandHelper {
     /// any number of revisions (including 0.)
     pub fn resolve_some_revsets_default_single(
         &self,
+        ui: &Ui,
         revision_args: &[RevisionArg],
     ) -> Result<IndexSet<Commit>, CommandError> {
         let mut all_commits = IndexSet::new();
         for revision_arg in revision_args {
-            let (expression, modifier) = self.parse_revset_with_modifier(revision_arg)?;
+            let (expression, modifier) = self.parse_revset_with_modifier(ui, revision_arg)?;
             let all = match modifier {
                 Some(RevsetModifier::All) => true,
                 None => self
@@ -1062,9 +1327,10 @@ impl WorkspaceCommandHelper {
 
     pub fn parse_revset(
         &self,
+        ui: &Ui,
         revision_arg: &RevisionArg,
     ) -> Result<RevsetExpressionEvaluator<'_>, CommandError> {
-        let (expression, modifier) = self.parse_revset_with_modifier(revision_arg)?;
+        let (expression, modifier) = self.parse_revset_with_modifier(ui, revision_arg)?;
         // Whether the caller accepts multiple revisions or not, "all:" should
         // be valid. For example, "all:@" is a valid single-rev expression.
         let (None | Some(RevsetModifier::All)) = modifier;
@@ -1073,88 +1339,59 @@ impl WorkspaceCommandHelper {
 
     fn parse_revset_with_modifier(
         &self,
+        ui: &Ui,
         revision_arg: &RevisionArg,
     ) -> Result<(RevsetExpressionEvaluator<'_>, Option<RevsetModifier>), CommandError> {
+        let mut diagnostics = RevsetDiagnostics::new();
         let context = self.revset_parse_context();
-        let (expression, modifier) = revset::parse_with_modifier(revision_arg.as_ref(), &context)?;
-        Ok((self.attach_revset_evaluator(expression)?, modifier))
+        let (expression, modifier) =
+            revset::parse_with_modifier(&mut diagnostics, revision_arg.as_ref(), &context)?;
+        print_parse_diagnostics(ui, "In revset expression", &diagnostics)?;
+        Ok((self.attach_revset_evaluator(expression), modifier))
     }
 
     /// Parses the given revset expressions and concatenates them all.
     pub fn parse_union_revsets(
         &self,
+        ui: &Ui,
         revision_args: &[RevisionArg],
     ) -> Result<RevsetExpressionEvaluator<'_>, CommandError> {
+        let mut diagnostics = RevsetDiagnostics::new();
         let context = self.revset_parse_context();
         let expressions: Vec<_> = revision_args
             .iter()
-            .map(|arg| revset::parse_with_modifier(arg.as_ref(), &context))
+            .map(|arg| revset::parse_with_modifier(&mut diagnostics, arg.as_ref(), &context))
             .map_ok(|(expression, None | Some(RevsetModifier::All))| expression)
             .try_collect()?;
+        print_parse_diagnostics(ui, "In revset expression", &diagnostics)?;
         let expression = RevsetExpression::union_all(&expressions);
-        self.attach_revset_evaluator(expression)
+        Ok(self.attach_revset_evaluator(expression))
     }
 
     pub fn attach_revset_evaluator(
         &self,
         expression: Rc<RevsetExpression>,
-    ) -> Result<RevsetExpressionEvaluator<'_>, CommandError> {
-        Ok(RevsetExpressionEvaluator::new(
+    ) -> RevsetExpressionEvaluator<'_> {
+        RevsetExpressionEvaluator::new(
             self.repo().as_ref(),
-            self.command.revset_extensions().clone(),
-            self.id_prefix_context()?,
+            self.env.command.revset_extensions().clone(),
+            self.id_prefix_context(),
             expression,
-        ))
-    }
-
-    pub(crate) fn revset_parse_context(&self) -> RevsetParseContext {
-        let workspace_context = RevsetWorkspaceContext {
-            path_converter: &self.path_converter,
-            workspace_id: self.workspace_id(),
-        };
-        let now = if let Some(timestamp) = self.settings().commit_timestamp() {
-            chrono::Local
-                .timestamp_millis_opt(timestamp.timestamp.0)
-                .unwrap()
-        } else {
-            chrono::Local::now()
-        };
-        RevsetParseContext::new(
-            &self.revset_aliases_map,
-            self.settings().user_email(),
-            now.into(),
-            self.command.revset_extensions(),
-            Some(workspace_context),
         )
     }
 
-    fn new_id_prefix_context(&self) -> Result<IdPrefixContext, CommandError> {
-        let mut context: IdPrefixContext =
-            IdPrefixContext::new(self.command.revset_extensions().clone());
-        let revset_string: String = self
-            .settings()
-            .config()
-            .get_string("revsets.short-prefixes")
-            .unwrap_or_else(|_| self.settings().default_revset());
-        if !revset_string.is_empty() {
-            let (expression, modifier) =
-                revset::parse_with_modifier(&revset_string, &self.revset_parse_context()).map_err(
-                    |err| config_error_with_message("Invalid `revsets.short-prefixes`", err),
-                )?;
-            let (None | Some(RevsetModifier::All)) = modifier;
-            context = context.disambiguate_within(revset::optimize(expression));
-        }
-        Ok(context)
+    pub(crate) fn revset_parse_context(&self) -> RevsetParseContext {
+        self.env.revset_parse_context()
     }
 
-    pub fn id_prefix_context(&self) -> Result<&IdPrefixContext, CommandError> {
+    pub fn id_prefix_context(&self) -> &IdPrefixContext {
         self.user_repo
             .id_prefix_context
-            .get_or_try_init(|| self.new_id_prefix_context())
+            .get_or_init(|| self.env.new_id_prefix_context())
     }
 
     pub fn template_aliases_map(&self) -> &TemplateAliasesMap {
-        &self.template_aliases_map
+        &self.env.template_aliases_map
     }
 
     /// Parses template of the given language into evaluation tree.
@@ -1163,48 +1400,104 @@ impl WorkspaceCommandHelper {
     /// be one of the `L::wrap_*()` functions.
     pub fn parse_template<'a, C: Clone + 'a, L: TemplateLanguage<'a> + ?Sized>(
         &self,
+        ui: &Ui,
         language: &L,
         template_text: &str,
         wrap_self: impl Fn(PropertyPlaceholder<C>) -> L::Property,
     ) -> Result<TemplateRenderer<'a, C>, CommandError> {
-        let aliases = &self.template_aliases_map;
-        Ok(template_builder::parse(
+        self.env
+            .parse_template(ui, language, template_text, wrap_self)
+    }
+
+    /// Parses template that is validated by `Self::new()`.
+    fn reparse_valid_template<'a, C: Clone + 'a, L: TemplateLanguage<'a> + ?Sized>(
+        &self,
+        language: &L,
+        template_text: &str,
+        wrap_self: impl Fn(PropertyPlaceholder<C>) -> L::Property,
+    ) -> TemplateRenderer<'a, C> {
+        template_builder::parse(
             language,
+            &mut TemplateDiagnostics::new(),
             template_text,
-            aliases,
+            &self.env.template_aliases_map,
             wrap_self,
-        )?)
+        )
+        .expect("parse error should be confined by WorkspaceCommandHelper::new()")
     }
 
     /// Parses commit template into evaluation tree.
     pub fn parse_commit_template(
         &self,
+        ui: &Ui,
         template_text: &str,
     ) -> Result<TemplateRenderer<'_, Commit>, CommandError> {
-        let language = self.commit_template_language()?;
+        let language = self.commit_template_language();
         self.parse_template(
+            ui,
             &language,
             template_text,
             CommitTemplateLanguage::wrap_commit,
         )
     }
 
+    /// Parses commit template into evaluation tree.
+    pub fn parse_operation_template(
+        &self,
+        ui: &Ui,
+        template_text: &str,
+    ) -> Result<TemplateRenderer<'_, Operation>, CommandError> {
+        let language = self.operation_template_language();
+        self.parse_template(
+            ui,
+            &language,
+            template_text,
+            OperationTemplateLanguage::wrap_operation,
+        )
+    }
+
     /// Creates commit template language environment for this workspace.
-    pub fn commit_template_language(&self) -> Result<CommitTemplateLanguage<'_>, CommandError> {
-        Ok(CommitTemplateLanguage::new(
-            self.repo().as_ref(),
-            &self.path_converter,
-            self.workspace_id(),
-            self.revset_parse_context(),
-            self.id_prefix_context()?,
-            &self.command.data.commit_template_extensions,
-        ))
+    pub fn commit_template_language(&self) -> CommitTemplateLanguage<'_> {
+        self.env
+            .commit_template_language(self.repo().as_ref(), self.id_prefix_context())
+    }
+
+    /// Creates operation template language environment for this workspace.
+    pub fn operation_template_language(&self) -> OperationTemplateLanguage {
+        OperationTemplateLanguage::new(
+            self.repo().op_store().root_operation_id(),
+            Some(self.repo().op_id()),
+            self.env.operation_template_extensions(),
+        )
     }
 
     /// Template for one-line summary of a commit.
     pub fn commit_summary_template(&self) -> TemplateRenderer<'_, Commit> {
-        self.parse_commit_template(&self.commit_summary_template_text)
-            .expect("parse error should be confined by WorkspaceCommandHelper::new()")
+        let language = self.commit_template_language();
+        self.reparse_valid_template(
+            &language,
+            &self.commit_summary_template_text,
+            CommitTemplateLanguage::wrap_commit,
+        )
+    }
+
+    /// Template for one-line summary of an operation.
+    pub fn operation_summary_template(&self) -> TemplateRenderer<'_, Operation> {
+        let language = self.operation_template_language();
+        self.reparse_valid_template(
+            &language,
+            &self.op_summary_template_text,
+            OperationTemplateLanguage::wrap_operation,
+        )
+    }
+
+    pub fn short_change_id_template(&self) -> TemplateRenderer<'_, Commit> {
+        let language = self.commit_template_language();
+        self.reparse_valid_template(
+            &language,
+            SHORT_CHANGE_ID_TEMPLATE_TEXT,
+            CommitTemplateLanguage::wrap_commit,
+        )
     }
 
     /// Returns one-line summary of the given `commit`.
@@ -1231,73 +1524,16 @@ impl WorkspaceCommandHelper {
         self.commit_summary_template().format(commit, formatter)
     }
 
-    fn check_repo_rewritable<'a>(
-        &self,
-        repo: &dyn Repo,
-        commits: impl IntoIterator<Item = &'a CommitId>,
-    ) -> Result<(), CommandError> {
-        if self.command.global_args().ignore_immutable {
-            let root_id = self.repo().store().root_commit_id();
-            return if commits.into_iter().contains(root_id) {
-                Err(user_error(format!(
-                    "The root commit {} is immutable",
-                    short_commit_hash(root_id),
-                )))
-            } else {
-                Ok(())
-            };
-        }
-
-        // Not using self.id_prefix_context() because the disambiguation data
-        // must not be calculated and cached against arbitrary repo. It's also
-        // unlikely that the immutable expression contains short hashes.
-        let id_prefix_context = IdPrefixContext::new(self.command.revset_extensions().clone());
-        let to_rewrite_revset =
-            RevsetExpression::commits(commits.into_iter().cloned().collect_vec());
-        let immutable = revset_util::parse_immutable_expression(&self.revset_parse_context())
-            .map_err(|e| {
-                config_error_with_message("Invalid `revset-aliases.immutable_heads()`", e)
-            })?;
-        let mut expression = RevsetExpressionEvaluator::new(
-            repo,
-            self.command.revset_extensions().clone(),
-            &id_prefix_context,
-            immutable,
-        );
-        expression.intersect_with(&to_rewrite_revset);
-
-        let mut commit_id_iter = expression.evaluate_to_commit_ids().map_err(|e| {
-            config_error_with_message("Invalid `revset-aliases.immutable_heads()`", e)
-        })?;
-
-        if let Some(commit_id) = commit_id_iter.next() {
-            let error = if &commit_id == self.repo().store().root_commit_id() {
-                user_error(format!(
-                    "The root commit {} is immutable",
-                    short_commit_hash(&commit_id),
-                ))
-            } else {
-                user_error_with_hint(
-                    format!("Commit {} is immutable", short_commit_hash(&commit_id)),
-                    "Pass `--ignore-immutable` or configure the set of immutable commits via \
-                     `revset-aliases.immutable_heads()`.",
-                )
-            };
-            return Err(error);
-        }
-
-        Ok(())
-    }
-
     pub fn check_rewritable<'a>(
         &self,
         commits: impl IntoIterator<Item = &'a CommitId>,
     ) -> Result<(), CommandError> {
-        self.check_repo_rewritable(self.repo().as_ref(), commits)
+        self.env
+            .check_repo_rewritable(self.repo().as_ref(), commits)
     }
 
     #[instrument(skip_all)]
-    fn snapshot_working_copy(&mut self, ui: &mut Ui) -> Result<(), CommandError> {
+    fn snapshot_working_copy(&mut self, ui: &Ui) -> Result<(), CommandError> {
         let workspace_id = self.workspace_id().to_owned();
         let get_wc_commit = |repo: &ReadonlyRepo| -> Result<Option<_>, _> {
             repo.view()
@@ -1312,11 +1548,12 @@ impl WorkspaceCommandHelper {
             return Ok(());
         };
         let base_ignores = self.base_ignores()?;
+        let auto_tracking_matcher = self.auto_tracking_matcher(ui)?;
 
         // Compare working-copy tree and operation with repo's, and reload as needed.
         let fsmonitor_settings = self.settings().fsmonitor_settings()?;
         let max_new_file_size = self.settings().max_new_file_size()?;
-        let command = self.command.clone();
+        let command = self.env.command.clone();
         let mut locked_ws = self.workspace.start_working_copy_mutation()?;
         let old_op_id = locked_ws.locked_wc().old_operation_id().clone();
         let (repo, wc_commit) =
@@ -1339,7 +1576,7 @@ impl WorkspaceCommandHelper {
                             short_operation_hash(&old_op_id)
                         ),
                         "Run `jj workspace update-stale` to update it.
-See https://github.com/martinvonz/jj/blob/main/docs/working-copy.md#stale-working-copy \
+See https://martinvonz.github.io/jj/latest/working-copy/#stale-working-copy \
                          for more information.",
                     ));
                 }
@@ -1355,7 +1592,7 @@ See https://github.com/martinvonz/jj/blob/main/docs/working-copy.md#stale-workin
                     return Err(user_error_with_hint(
                         "Could not read working copy's operation.",
                         "Run `jj workspace update-stale` to recover.
-See https://github.com/martinvonz/jj/blob/main/docs/working-copy.md#stale-working-copy \
+See https://martinvonz.github.io/jj/latest/working-copy/#stale-working-copy \
                          for more information.",
                     ));
                 }
@@ -1363,10 +1600,11 @@ See https://github.com/martinvonz/jj/blob/main/docs/working-copy.md#stale-workin
             };
         self.user_repo = ReadonlyUserRepo::new(repo);
         let progress = crate::progress::snapshot_progress(ui);
-        let new_tree_id = locked_ws.locked_wc().snapshot(SnapshotOptions {
+        let new_tree_id = locked_ws.locked_wc().snapshot(&SnapshotOptions {
             base_ignores,
             fsmonitor_settings,
             progress: progress.as_ref().map(|x| x as _),
+            start_tracking_matcher: &auto_tracking_matcher,
             max_new_file_size,
         })?;
         drop(progress);
@@ -1377,7 +1615,7 @@ See https://github.com/martinvonz/jj/blob/main/docs/working-copy.md#stale-workin
                 command.string_args(),
             );
             tx.set_is_snapshot(true);
-            let mut_repo = tx.mut_repo();
+            let mut_repo = tx.repo_mut();
             let commit = mut_repo
                 .rewrite_commit(command.settings(), &wc_commit)
                 .set_tree_id(new_tree_id)
@@ -1394,8 +1632,8 @@ See https://github.com/martinvonz/jj/blob/main/docs/working-copy.md#stale-workin
             }
 
             if self.working_copy_shared_with_git {
-                let failed_branches = git::export_refs(mut_repo)?;
-                print_failed_git_export(ui, &failed_branches)?;
+                let refs = git::export_refs(mut_repo)?;
+                print_failed_git_export(ui, &refs)?;
             }
 
             self.user_repo = ReadonlyUserRepo::new(tx.commit("snapshot working copy"));
@@ -1406,7 +1644,7 @@ See https://github.com/martinvonz/jj/blob/main/docs/working-copy.md#stale-workin
 
     fn update_working_copy(
         &mut self,
-        ui: &mut Ui,
+        ui: &Ui,
         maybe_old_commit: Option<&Commit>,
         new_commit: &Commit,
     ) -> Result<(), CommandError> {
@@ -1448,7 +1686,8 @@ See https://github.com/martinvonz/jj/blob/main/docs/working-copy.md#stale-workin
     }
 
     pub fn start_transaction(&mut self) -> WorkspaceCommandTransaction {
-        let tx = start_repo_transaction(self.repo(), self.settings(), self.command.string_args());
+        let tx =
+            start_repo_transaction(self.repo(), self.settings(), self.env.command.string_args());
         let id_prefix_context = mem::take(&mut self.user_repo.id_prefix_context);
         WorkspaceCommandTransaction {
             helper: self,
@@ -1459,29 +1698,29 @@ See https://github.com/martinvonz/jj/blob/main/docs/working-copy.md#stale-workin
 
     fn finish_transaction(
         &mut self,
-        ui: &mut Ui,
+        ui: &Ui,
         mut tx: Transaction,
         description: impl Into<String>,
     ) -> Result<(), CommandError> {
-        if !tx.mut_repo().has_changes() {
+        if !tx.repo().has_changes() {
             writeln!(ui.status(), "Nothing changed.")?;
             return Ok(());
         }
-        let num_rebased = tx.mut_repo().rebase_descendants(self.settings())?;
+        let num_rebased = tx.repo_mut().rebase_descendants(self.settings())?;
         if num_rebased > 0 {
             writeln!(ui.status(), "Rebased {num_rebased} descendant commits")?;
         }
 
-        for (workspace_id, wc_commit_id) in
-            tx.mut_repo().view().wc_commit_ids().clone().iter().sorted()
+        for (workspace_id, wc_commit_id) in tx.repo().view().wc_commit_ids().clone().iter().sorted()
         //sorting otherwise non deterministic order (bad for tests)
         {
             if self
+                .env
                 .check_repo_rewritable(tx.repo(), [wc_commit_id])
                 .is_err()
             {
                 let wc_commit = tx.repo().store().get_commit(wc_commit_id)?;
-                tx.mut_repo()
+                tx.repo_mut()
                     .check_out(workspace_id.clone(), self.settings(), &wc_commit)?;
                 writeln!(
                     ui.warning_default(),
@@ -1509,15 +1748,17 @@ See https://github.com/martinvonz/jj/blob/main/docs/working-copy.md#stale-workin
         if self.working_copy_shared_with_git {
             let git_repo = self.git_backend().unwrap().open_git_repo()?;
             if let Some(wc_commit) = &maybe_new_wc_commit {
-                git::reset_head(tx.mut_repo(), &git_repo, wc_commit)?;
+                git::reset_head(tx.repo_mut(), &git_repo, wc_commit)?;
             }
-            let failed_branches = git::export_refs(tx.mut_repo())?;
-            print_failed_git_export(ui, &failed_branches)?;
+            let refs = git::export_refs(tx.repo_mut())?;
+            print_failed_git_export(ui, &refs)?;
         }
 
         self.user_repo = ReadonlyUserRepo::new(tx.commit(description));
-        self.report_repo_changes(ui, &old_repo)?;
 
+        // Update working copy before reporting repo changes, so that
+        // potential errors while reporting changes (broken pipe, etc)
+        // don't leave the working copy in a stale state.
         if self.may_update_working_copy {
             if let Some(new_commit) = &maybe_new_wc_commit {
                 self.update_working_copy(ui, maybe_old_wc_commit.as_ref(), new_commit)?;
@@ -1527,14 +1768,34 @@ See https://github.com/martinvonz/jj/blob/main/docs/working-copy.md#stale-workin
             }
         }
 
+        self.report_repo_changes(ui, &old_repo)?;
+
         let settings = self.settings();
-        if settings.user_name().is_empty() || settings.user_email().is_empty() {
+        let missing_user_name = settings.user_name().is_empty();
+        let missing_user_mail = settings.user_email().is_empty();
+        if missing_user_name || missing_user_mail {
+            let mut writer = ui.warning_default();
+            let not_configured_msg = match (missing_user_name, missing_user_mail) {
+                (true, true) => "Name and email not configured.",
+                (true, false) => "Name not configured.",
+                (false, true) => "Email not configured.",
+                _ => unreachable!(),
+            };
+            write!(writer, "{not_configured_msg} ")?;
             writeln!(
-                ui.warning_default(),
-                r#"Name and email not configured. Until configured, your commits will be created with the empty identity, and can't be pushed to remotes. To configure, run:
-  jj config set --user user.name "Some One"
-  jj config set --user user.email "someone@example.com""#
+                writer,
+                "Until configured, your commits will be created with the empty identity, and \
+                 can't be pushed to remotes. To configure, run:",
             )?;
+            if missing_user_name {
+                writeln!(writer, r#"  jj config set --user user.name "Some One""#)?;
+            }
+            if missing_user_mail {
+                writeln!(
+                    writer,
+                    r#"  jj config set --user user.email "someone@example.com""#
+                )?;
+            }
         }
         Ok(())
     }
@@ -1543,7 +1804,7 @@ See https://github.com/martinvonz/jj/blob/main/docs/working-copy.md#stale-workin
     /// operation (when `old_repo` was loaded).
     fn report_repo_changes(
         &self,
-        ui: &mut Ui,
+        ui: &Ui,
         old_repo: &Arc<ReadonlyRepo>,
     ) -> Result<(), CommandError> {
         let Some(mut fmt) = ui.status_formatter() else {
@@ -1661,17 +1922,16 @@ See https://github.com/martinvonz/jj/blob/main/docs/working-copy.md#stale-workin
             .roots()
             .evaluate_programmatic(repo)?;
 
-        let root_conflict_change_ids: Vec<_> = root_conflicts_revset
+        let root_conflict_commits: Vec<_> = root_conflicts_revset
             .iter()
             .commits(repo.store())
-            .map(|maybe_commit| maybe_commit.map(|c| c.change_id().clone()))
             .try_collect()?;
 
-        if !root_conflict_change_ids.is_empty() {
+        if !root_conflict_commits.is_empty() {
             fmt.push_label("hint")?;
             if only_one_conflicted_commit {
                 writeln!(fmt, "To resolve the conflicts, start by updating to it:",)?;
-            } else if root_conflict_change_ids.len() == 1 {
+            } else if root_conflict_commits.len() == 1 {
                 writeln!(
                     fmt,
                     "To resolve the conflicts, start by updating to the first one:",
@@ -1682,8 +1942,11 @@ See https://github.com/martinvonz/jj/blob/main/docs/working-copy.md#stale-workin
                     "To resolve the conflicts, start by updating to one of the first ones:",
                 )?;
             }
-            for change_id in root_conflict_change_ids {
-                writeln!(fmt, "  jj new {}", short_change_hash(&change_id))?;
+            let format_short_change_id = self.short_change_id_template();
+            for commit in root_conflict_commits {
+                write!(fmt, "  jj new ")?;
+                format_short_change_id.format(&commit, fmt)?;
+                writeln!(fmt)?;
             }
             writeln!(
                 fmt,
@@ -1696,34 +1959,35 @@ Then run `jj squash` to move the resolution into the conflicted commit."#,
         Ok(())
     }
 
-    /// Identifies branches which are eligible to be moved automatically during
-    /// `jj commit` and `jj new`. Whether a branch is eligible is determined by
-    /// its target and the user and repo config for "advance-branches".
+    /// Identifies bookmarks which are eligible to be moved automatically
+    /// during `jj commit` and `jj new`. Whether a bookmark is eligible is
+    /// determined by its target and the user and repo config for
+    /// "advance-bookmarks".
     ///
-    /// Returns a Vec of branches in `repo` that point to any of the `from`
+    /// Returns a Vec of bookmarks in `repo` that point to any of the `from`
     /// commits and that are eligible to advance. The `from` commits are
     /// typically the parents of the target commit of `jj commit` or `jj new`.
     ///
-    /// Branches are not moved until
-    /// `WorkspaceCommandTransaction::advance_branches()` is called with the
-    /// `AdvanceableBranch`s returned by this function.
+    /// Bookmarks are not moved until
+    /// `WorkspaceCommandTransaction::advance_bookmarks()` is called with the
+    /// `AdvanceableBookmark`s returned by this function.
     ///
-    /// Returns an empty `std::Vec` if no branches are eligible to advance.
-    pub fn get_advanceable_branches<'a>(
+    /// Returns an empty `std::Vec` if no bookmarks are eligible to advance.
+    pub fn get_advanceable_bookmarks<'a>(
         &self,
         from: impl IntoIterator<Item = &'a CommitId>,
-    ) -> Result<Vec<AdvanceableBranch>, CommandError> {
-        let ab_settings = AdvanceBranchesSettings::from_config(self.settings().config())?;
+    ) -> Result<Vec<AdvanceableBookmark>, CommandError> {
+        let ab_settings = AdvanceBookmarksSettings::from_config(self.settings().config())?;
         if !ab_settings.feature_enabled() {
             // Return early if we know that there's no work to do.
             return Ok(Vec::new());
         }
 
-        let mut advanceable_branches = Vec::new();
+        let mut advanceable_bookmarks = Vec::new();
         for from_commit in from {
-            for (name, _) in self.repo().view().local_branches_for_commit(from_commit) {
-                if ab_settings.branch_is_eligible(name) {
-                    advanceable_branches.push(AdvanceableBranch {
+            for (name, _) in self.repo().view().local_bookmarks_for_commit(from_commit) {
+                if ab_settings.bookmark_is_eligible(name) {
+                    advanceable_bookmarks.push(AdvanceableBookmark {
                         name: name.to_owned(),
                         old_commit_id: from_commit.clone(),
                     });
@@ -1731,7 +1995,7 @@ Then run `jj squash` to move the resolution into the conflicted commit."#,
             }
         }
 
-        Ok(advanceable_branches)
+        Ok(advanceable_bookmarks)
     }
 }
 
@@ -1767,22 +2031,22 @@ impl WorkspaceCommandTransaction<'_> {
         self.tx.repo()
     }
 
-    pub fn mut_repo(&mut self) -> &mut MutableRepo {
+    pub fn repo_mut(&mut self) -> &mut MutableRepo {
         self.id_prefix_context.take(); // invalidate
-        self.tx.mut_repo()
+        self.tx.repo_mut()
     }
 
     pub fn check_out(&mut self, commit: &Commit) -> Result<Commit, CheckOutCommitError> {
         let workspace_id = self.helper.workspace_id().to_owned();
         let settings = self.helper.settings();
         self.id_prefix_context.take(); // invalidate
-        self.tx.mut_repo().check_out(workspace_id, settings, commit)
+        self.tx.repo_mut().check_out(workspace_id, settings, commit)
     }
 
     pub fn edit(&mut self, commit: &Commit) -> Result<(), EditCommitError> {
         let workspace_id = self.helper.workspace_id().to_owned();
         self.id_prefix_context.take(); // invalidate
-        self.tx.mut_repo().edit(workspace_id, commit)
+        self.tx.repo_mut().edit(workspace_id, commit)
     }
 
     pub fn format_commit_summary(&self, commit: &Commit) -> String {
@@ -1803,8 +2067,12 @@ impl WorkspaceCommandTransaction<'_> {
 
     /// Template for one-line summary of a commit within transaction.
     pub fn commit_summary_template(&self) -> TemplateRenderer<'_, Commit> {
-        self.parse_commit_template(&self.helper.commit_summary_template_text)
-            .expect("parse error should be confined by WorkspaceCommandHelper::new()")
+        let language = self.commit_template_language();
+        self.helper.reparse_valid_template(
+            &language,
+            &self.helper.commit_summary_template_text,
+            CommitTemplateLanguage::wrap_commit,
+        )
     }
 
     /// Creates commit template language environment capturing the current
@@ -1812,32 +2080,28 @@ impl WorkspaceCommandTransaction<'_> {
     pub fn commit_template_language(&self) -> CommitTemplateLanguage<'_> {
         let id_prefix_context = self
             .id_prefix_context
-            .get_or_try_init(|| self.helper.new_id_prefix_context())
-            .expect("parse error should be confined by WorkspaceCommandHelper::new()");
-        CommitTemplateLanguage::new(
-            self.tx.repo(),
-            &self.helper.path_converter,
-            self.helper.workspace_id(),
-            self.helper.revset_parse_context(),
-            id_prefix_context,
-            &self.helper.command.data.commit_template_extensions,
-        )
+            .get_or_init(|| self.helper.env.new_id_prefix_context());
+        self.helper
+            .env
+            .commit_template_language(self.tx.repo(), id_prefix_context)
     }
 
     /// Parses commit template with the current transaction state.
     pub fn parse_commit_template(
         &self,
+        ui: &Ui,
         template_text: &str,
     ) -> Result<TemplateRenderer<'_, Commit>, CommandError> {
         let language = self.commit_template_language();
-        self.helper.parse_template(
+        self.helper.env.parse_template(
+            ui,
             &language,
             template_text,
             CommitTemplateLanguage::wrap_commit,
         )
     }
 
-    pub fn finish(self, ui: &mut Ui, description: impl Into<String>) -> Result<(), CommandError> {
+    pub fn finish(self, ui: &Ui, description: impl Into<String>) -> Result<(), CommandError> {
         self.helper.finish_transaction(ui, self.tx, description)
     }
 
@@ -1849,18 +2113,18 @@ impl WorkspaceCommandTransaction<'_> {
         self.tx
     }
 
-    /// Moves each branch in `branches` from an old commit it's associated with
-    /// (configured by `get_advanceable_branches`) to the `move_to` commit. If
-    /// the branch is conflicted before the update, it will remain conflicted
-    /// after the update, but the conflict will involve the `move_to` commit
-    /// instead of the old commit.
-    pub fn advance_branches(&mut self, branches: Vec<AdvanceableBranch>, move_to: &CommitId) {
-        for branch in branches {
-            // This removes the old commit ID from the branch's RefTarget and
+    /// Moves each bookmark in `bookmarks` from an old commit it's associated
+    /// with (configured by `get_advanceable_bookmarks`) to the `move_to`
+    /// commit. If the bookmark is conflicted before the update, it will
+    /// remain conflicted after the update, but the conflict will involve
+    /// the `move_to` commit instead of the old commit.
+    pub fn advance_bookmarks(&mut self, bookmarks: Vec<AdvanceableBookmark>, move_to: &CommitId) {
+        for bookmark in bookmarks {
+            // This removes the old commit ID from the bookmark's RefTarget and
             // replaces it with the `move_to` ID.
-            self.mut_repo().merge_local_branch(
-                &branch.name,
-                &RefTarget::normal(branch.old_commit_id),
+            self.repo_mut().merge_local_bookmark(
+                &bookmark.name,
+                &RefTarget::normal(bookmark.old_commit_id),
                 &RefTarget::normal(move_to.clone()),
             );
         }
@@ -2096,7 +2360,7 @@ pub fn print_conflicted_paths(
 }
 
 pub fn print_checkout_stats(
-    ui: &mut Ui,
+    ui: &Ui,
     stats: CheckoutStats,
     new_commit: &Commit,
 ) -> Result<(), std::io::Error> {
@@ -2154,35 +2418,35 @@ pub fn print_unmatched_explicit_paths<'a>(
     Ok(())
 }
 
-pub fn print_trackable_remote_branches(ui: &Ui, view: &View) -> io::Result<()> {
-    let remote_branch_names = view
-        .branches()
-        .filter(|(_, branch_target)| branch_target.local_target.is_present())
-        .flat_map(|(name, branch_target)| {
-            branch_target
+pub fn print_trackable_remote_bookmarks(ui: &Ui, view: &View) -> io::Result<()> {
+    let remote_bookmark_names = view
+        .bookmarks()
+        .filter(|(_, bookmark_target)| bookmark_target.local_target.is_present())
+        .flat_map(|(name, bookmark_target)| {
+            bookmark_target
                 .remote_refs
                 .into_iter()
                 .filter(|&(_, remote_ref)| !remote_ref.is_tracking())
                 .map(move |(remote, _)| format!("{name}@{remote}"))
         })
         .collect_vec();
-    if remote_branch_names.is_empty() {
+    if remote_bookmark_names.is_empty() {
         return Ok(());
     }
 
     if let Some(mut formatter) = ui.status_formatter() {
         writeln!(
             formatter.labeled("hint").with_heading("Hint: "),
-            "The following remote branches aren't associated with the existing local branches:"
+            "The following remote bookmarks aren't associated with the existing local bookmarks:"
         )?;
-        for full_name in &remote_branch_names {
+        for full_name in &remote_bookmark_names {
             write!(formatter, "  ")?;
-            writeln!(formatter.labeled("branch"), "{full_name}")?;
+            writeln!(formatter.labeled("bookmark"), "{full_name}")?;
         }
         writeln!(
             formatter.labeled("hint").with_heading("Hint: "),
-            "Run `jj branch track {names}` to keep local branches updated on future pulls.",
-            names = remote_branch_names.join(" "),
+            "Run `jj bookmark track {names}` to keep local bookmarks updated on future pulls.",
+            names = remote_bookmark_names.join(" "),
         )?;
     }
     Ok(())
@@ -2248,48 +2512,48 @@ fn load_template_aliases(
 
 /// Helper to reformat content of log-like commands.
 #[derive(Clone, Debug)]
-pub enum LogContentFormat {
-    NoWrap,
-    Wrap { term_width: usize },
+pub struct LogContentFormat {
+    width: usize,
+    word_wrap: bool,
 }
 
 impl LogContentFormat {
+    /// Creates new formatting helper for the terminal.
     pub fn new(ui: &Ui, settings: &UserSettings) -> Result<Self, config::ConfigError> {
-        if settings.config().get_bool("ui.log-word-wrap")? {
-            let term_width = ui.term_width();
-            Ok(LogContentFormat::Wrap { term_width })
+        Ok(LogContentFormat {
+            width: ui.term_width(),
+            word_wrap: settings.config().get_bool("ui.log-word-wrap")?,
+        })
+    }
+
+    /// Subtracts the given `width` and returns new formatting helper.
+    #[must_use]
+    pub fn sub_width(&self, width: usize) -> Self {
+        LogContentFormat {
+            width: self.width.saturating_sub(width),
+            word_wrap: self.word_wrap,
+        }
+    }
+
+    /// Current width available to content.
+    pub fn width(&self) -> usize {
+        self.width
+    }
+
+    /// Writes content which will optionally be wrapped at the current width.
+    pub fn write<E: From<io::Error>>(
+        &self,
+        formatter: &mut dyn Formatter,
+        content_fn: impl FnOnce(&mut dyn Formatter) -> Result<(), E>,
+    ) -> Result<(), E> {
+        if self.word_wrap {
+            let mut recorder = FormatRecorder::new();
+            content_fn(&mut recorder)?;
+            text_util::write_wrapped(formatter, &recorder, self.width)?;
         } else {
-            Ok(LogContentFormat::NoWrap)
+            content_fn(formatter)?;
         }
-    }
-
-    pub fn write(
-        &self,
-        formatter: &mut dyn Formatter,
-        content_fn: impl FnOnce(&mut dyn Formatter) -> std::io::Result<()>,
-    ) -> std::io::Result<()> {
-        self.write_graph_text(formatter, content_fn, || 0)
-    }
-
-    pub fn write_graph_text(
-        &self,
-        formatter: &mut dyn Formatter,
-        content_fn: impl FnOnce(&mut dyn Formatter) -> std::io::Result<()>,
-        graph_width_fn: impl FnOnce() -> usize,
-    ) -> std::io::Result<()> {
-        match self {
-            LogContentFormat::NoWrap => content_fn(formatter),
-            LogContentFormat::Wrap { term_width } => {
-                let mut recorder = FormatRecorder::new();
-                content_fn(&mut recorder)?;
-                text_util::write_wrapped(
-                    formatter,
-                    &recorder,
-                    term_width.saturating_sub(graph_width_fn()),
-                )?;
-                Ok(())
-            }
-        }
+        Ok(())
     }
 }
 
@@ -2430,30 +2694,30 @@ impl DiffSelector {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct RemoteBranchName {
-    pub branch: String,
+pub struct RemoteBookmarkName {
+    pub bookmark: String,
     pub remote: String,
 }
 
-impl fmt::Display for RemoteBranchName {
+impl fmt::Display for RemoteBookmarkName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let RemoteBranchName { branch, remote } = self;
-        write!(f, "{branch}@{remote}")
+        let RemoteBookmarkName { bookmark, remote } = self;
+        write!(f, "{bookmark}@{remote}")
     }
 }
 
 #[derive(Clone, Debug)]
-pub struct RemoteBranchNamePattern {
-    pub branch: StringPattern,
+pub struct RemoteBookmarkNamePattern {
+    pub bookmark: StringPattern,
     pub remote: StringPattern,
 }
 
-impl FromStr for RemoteBranchNamePattern {
+impl FromStr for RemoteBookmarkNamePattern {
     type Err = String;
 
     fn from_str(src: &str) -> Result<Self, Self::Err> {
-        // The kind prefix applies to both branch and remote fragments. It's
-        // weird that unanchored patterns like substring:branch@remote is split
+        // The kind prefix applies to both bookmark and remote fragments. It's
+        // weird that unanchored patterns like substring:bookmark@remote is split
         // into two, but I can't think of a better syntax.
         // TODO: should we disable substring pattern? what if we added regex?
         let (maybe_kind, pat) = src
@@ -2466,33 +2730,33 @@ impl FromStr for RemoteBranchNamePattern {
                 Ok(StringPattern::exact(pat))
             }
         };
-        // TODO: maybe reuse revset parser to handle branch/remote name containing @
-        let (branch, remote) = pat
-            .rsplit_once('@')
-            .ok_or_else(|| "remote branch must be specified in branch@remote form".to_owned())?;
-        Ok(RemoteBranchNamePattern {
-            branch: to_pattern(branch)?,
+        // TODO: maybe reuse revset parser to handle bookmark/remote name containing @
+        let (bookmark, remote) = pat.rsplit_once('@').ok_or_else(|| {
+            "remote bookmark must be specified in bookmark@remote form".to_owned()
+        })?;
+        Ok(RemoteBookmarkNamePattern {
+            bookmark: to_pattern(bookmark)?,
             remote: to_pattern(remote)?,
         })
     }
 }
 
-impl RemoteBranchNamePattern {
+impl RemoteBookmarkNamePattern {
     pub fn is_exact(&self) -> bool {
-        self.branch.is_exact() && self.remote.is_exact()
+        self.bookmark.is_exact() && self.remote.is_exact()
     }
 }
 
-impl fmt::Display for RemoteBranchNamePattern {
+impl fmt::Display for RemoteBookmarkNamePattern {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let RemoteBranchNamePattern { branch, remote } = self;
-        write!(f, "{branch}@{remote}")
+        let RemoteBookmarkNamePattern { bookmark, remote } = self;
+        write!(f, "{bookmark}@{remote}")
     }
 }
 
 /// Jujutsu (An experimental VCS)
 ///
-/// To get started, see the tutorial at https://github.com/martinvonz/jj/blob/main/docs/tutorial.md.
+/// To get started, see the tutorial at https://martinvonz.github.io/jj/latest/tutorial/.
 #[allow(rustdoc::bare_urls)]
 #[derive(clap::Parser, Clone, Debug)]
 #[command(name = "jj")]

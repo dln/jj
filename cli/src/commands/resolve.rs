@@ -68,9 +68,9 @@ pub(crate) fn cmd_resolve(
 ) -> Result<(), CommandError> {
     let mut workspace_command = command.workspace_helper(ui)?;
     let matcher = workspace_command
-        .parse_file_patterns(&args.paths)?
+        .parse_file_patterns(ui, &args.paths)?
         .to_matcher();
-    let commit = workspace_command.resolve_single_rev(&args.revision)?;
+    let commit = workspace_command.resolve_single_rev(ui, &args.revision)?;
     let tree = commit.tree()?;
     let conflicts = tree
         .conflicts()
@@ -102,7 +102,7 @@ pub(crate) fn cmd_resolve(
     let mut tx = workspace_command.start_transaction();
     let new_tree_id = merge_editor.edit_file(&tree, repo_path)?;
     let new_commit = tx
-        .mut_repo()
+        .repo_mut()
         .rewrite_commit(command.settings(), &commit)
         .set_tree_id(new_tree_id)
         .write()?;

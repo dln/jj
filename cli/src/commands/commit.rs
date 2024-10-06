@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use jj_lib::backend::Signature;
 use jj_lib::object_id::ObjectId;
 use jj_lib::repo::Repo;
 use tracing::instrument;
@@ -22,6 +23,7 @@ use crate::command_error::CommandError;
 use crate::description_util::description_template;
 use crate::description_util::edit_description;
 use crate::description_util::join_message_paragraphs;
+use crate::text_util::parse_author;
 use crate::ui::Ui;
 
 /// Update the description and create a new change on top.
@@ -50,6 +52,16 @@ pub(crate) struct CommitArgs {
     /// $ JJ_USER='Foo Bar' JJ_EMAIL=foo@bar.com jj commit --reset-author
     #[arg(long)]
     reset_author: bool,
+    /// Set author to the provided string
+    ///
+    /// This changes author name and email while retaining author
+    /// timestamp for non-discardable commits.
+    #[arg(
+        long,
+        conflicts_with = "reset_author",
+        value_parser = parse_author
+    )]
+    author: Option<(String, String)>,
 }
 
 #[instrument(skip_all)]
@@ -65,9 +77,9 @@ pub(crate) fn cmd_commit(
         .ok_or_else(|| user_error("This command requires a working copy"))?;
     let commit = workspace_command.repo().store().get_commit(commit_id)?;
     let matcher = workspace_command
-        .parse_file_patterns(&args.paths)?
+        .parse_file_patterns(ui, &args.paths)?
         .to_matcher();
-    let advanceable_branches = workspace_command.get_advanceable_branches(commit.parent_ids())?;
+    let advanceable_bookmarks = workspace_command.get_advanceable_bookmarks(commit.parent_ids())?;
     let diff_selector =
         workspace_command.diff_selector(ui, args.tool.as_deref(), args.interactive)?;
     let mut tx = workspace_command.start_transaction();
@@ -99,12 +111,20 @@ new working-copy commit.
     }
 
     let mut commit_builder = tx
-        .mut_repo()
+        .repo_mut()
         .rewrite_commit(command.settings(), &commit)
         .detach();
     commit_builder.set_tree_id(tree_id);
     if args.reset_author {
         commit_builder.set_author(commit_builder.committer().clone());
+    }
+    if let Some((name, email)) = args.author.clone() {
+        let new_author = Signature {
+            name,
+            email,
+            timestamp: commit_builder.author().timestamp,
+        };
+        commit_builder.set_author(new_author);
     }
 
     let description = if !args.message_paragraphs.is_empty() {
@@ -114,19 +134,16 @@ new working-copy commit.
             commit_builder.set_description(command.settings().default_description());
         }
         let temp_commit = commit_builder.write_hidden()?;
-        let template = description_template(&tx, "", &temp_commit)?;
-        edit_description(tx.base_repo(), &template, command.settings())?
+        let template = description_template(ui, &tx, "", &temp_commit)?;
+        edit_description(tx.base_workspace_helper(), &template, command.settings())?
     };
     commit_builder.set_description(description);
-    let new_commit = commit_builder.write(tx.mut_repo())?;
+    let new_commit = commit_builder.write(tx.repo_mut())?;
 
-    let workspace_ids = tx
-        .mut_repo()
-        .view()
-        .workspaces_for_wc_commit_id(commit.id());
+    let workspace_ids = tx.repo().view().workspaces_for_wc_commit_id(commit.id());
     if !workspace_ids.is_empty() {
         let new_wc_commit = tx
-            .mut_repo()
+            .repo_mut()
             .new_commit(
                 command.settings(),
                 vec![new_commit.id().clone()],
@@ -134,11 +151,11 @@ new working-copy commit.
             )
             .write()?;
 
-        // Does nothing if there's no branches to advance.
-        tx.advance_branches(advanceable_branches, new_commit.id());
+        // Does nothing if there's no bookmarks to advance.
+        tx.advance_bookmarks(advanceable_bookmarks, new_commit.id());
 
         for workspace_id in workspace_ids {
-            tx.mut_repo().edit(workspace_id, &new_wc_commit).unwrap();
+            tx.repo_mut().edit(workspace_id, &new_wc_commit).unwrap();
         }
     }
     tx.finish(ui, format!("commit {}", commit.id().hex()))?;

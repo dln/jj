@@ -77,6 +77,9 @@ fn test_workspaces_sparse_patterns() {
     let ws1_path = test_env.env_root().join("ws1");
     let ws2_path = test_env.env_root().join("ws2");
     let ws3_path = test_env.env_root().join("ws3");
+    let ws4_path = test_env.env_root().join("ws4");
+    let ws5_path = test_env.env_root().join("ws5");
+    let ws6_path = test_env.env_root().join("ws6");
 
     test_env.jj_cmd_ok(&ws1_path, &["sparse", "set", "--clear", "--add=foo"]);
     test_env.jj_cmd_ok(&ws1_path, &["workspace", "add", "../ws2"]);
@@ -91,6 +94,30 @@ fn test_workspaces_sparse_patterns() {
     bar
     foo
     "###);
+    // --sparse-patterns behavior
+    test_env.jj_cmd_ok(
+        &ws3_path,
+        &["workspace", "add", "--sparse-patterns=copy", "../ws4"],
+    );
+    let stdout = test_env.jj_cmd_success(&ws4_path, &["sparse", "list"]);
+    insta::assert_snapshot!(stdout, @r###"
+    bar
+    foo
+    "###);
+    test_env.jj_cmd_ok(
+        &ws3_path,
+        &["workspace", "add", "--sparse-patterns=full", "../ws5"],
+    );
+    let stdout = test_env.jj_cmd_success(&ws5_path, &["sparse", "list"]);
+    insta::assert_snapshot!(stdout, @r###"
+    .
+    "###);
+    test_env.jj_cmd_ok(
+        &ws3_path,
+        &["workspace", "add", "--sparse-patterns=empty", "../ws6"],
+    );
+    let stdout = test_env.jj_cmd_success(&ws6_path, &["sparse", "list"]);
+    insta::assert_snapshot!(stdout, @"");
 }
 
 /// Test adding a second workspace while the current workspace is editing a
@@ -476,14 +503,14 @@ fn test_workspaces_conflicting_edits() {
     insta::assert_snapshot!(stderr, @r###"
     Error: The working copy is stale (not updated since operation 0da24da631e3).
     Hint: Run `jj workspace update-stale` to update it.
-    See https://github.com/martinvonz/jj/blob/main/docs/working-copy.md#stale-working-copy for more information.
+    See https://martinvonz.github.io/jj/latest/working-copy/#stale-working-copy for more information.
     "###);
     // Same error on second run, and from another command
     let stderr = test_env.jj_cmd_failure(&secondary_path, &["log"]);
     insta::assert_snapshot!(stderr, @r###"
     Error: The working copy is stale (not updated since operation 0da24da631e3).
     Hint: Run `jj workspace update-stale` to update it.
-    See https://github.com/martinvonz/jj/blob/main/docs/working-copy.md#stale-working-copy for more information.
+    See https://martinvonz.github.io/jj/latest/working-copy/#stale-working-copy for more information.
     "###);
     let (stdout, stderr) = test_env.jj_cmd_ok(&secondary_path, &["workspace", "update-stale"]);
     // It was detected that the working copy is now stale.
@@ -563,7 +590,7 @@ fn test_workspaces_updated_by_other() {
     insta::assert_snapshot!(stderr, @r###"
     Error: The working copy is stale (not updated since operation 0da24da631e3).
     Hint: Run `jj workspace update-stale` to update it.
-    See https://github.com/martinvonz/jj/blob/main/docs/working-copy.md#stale-working-copy for more information.
+    See https://martinvonz.github.io/jj/latest/working-copy/#stale-working-copy for more information.
     "###);
     let (stdout, stderr) = test_env.jj_cmd_ok(&secondary_path, &["workspace", "update-stale"]);
     // It was detected that the working copy is now stale, but clean. So no
@@ -660,7 +687,7 @@ fn test_workspaces_current_op_discarded_by_other() {
     insta::assert_snapshot!(stderr, @r###"
     Error: Could not read working copy's operation.
     Hint: Run `jj workspace update-stale` to recover.
-    See https://github.com/martinvonz/jj/blob/main/docs/working-copy.md#stale-working-copy for more information.
+    See https://martinvonz.github.io/jj/latest/working-copy/#stale-working-copy for more information.
     "###);
 
     let (stdout, stderr) = test_env.jj_cmd_ok(&secondary_path, &["workspace", "update-stale"]);
@@ -702,7 +729,7 @@ fn test_workspaces_current_op_discarded_by_other() {
     secondary
     "###);
 
-    let (stdout, stderr) = test_env.jj_cmd_ok(&secondary_path, &["obslog"]);
+    let (stdout, stderr) = test_env.jj_cmd_ok(&secondary_path, &["evolog"]);
     insta::assert_snapshot!(stderr, @"");
     insta::assert_snapshot!(stdout, @r###"
     @  kmkuslsw test.user@example.com 2001-02-03 08:05:18 secondary@ b0b40043
@@ -1048,6 +1075,93 @@ fn test_debug_snapshot() {
     ○  9a7d829846af test-username@host.example.com 2001-02-03 04:05:07.000 +07:00 - 2001-02-03 04:05:07.000 +07:00
     │  initialize repo
     ○  000000000000 root()
+    "###);
+}
+
+#[test]
+fn test_workspaces_rename_nothing_changed() {
+    let test_env = TestEnvironment::default();
+    test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "main"]);
+    let main_path = test_env.env_root().join("main");
+    let (stdout, stderr) = test_env.jj_cmd_ok(&main_path, &["workspace", "rename", "default"]);
+    insta::assert_snapshot!(stdout, @"");
+    insta::assert_snapshot!(stderr, @r###"
+    Nothing changed.
+    "###);
+}
+
+#[test]
+fn test_workspaces_rename_new_workspace_name_already_used() {
+    let test_env = TestEnvironment::default();
+    test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "main"]);
+    let main_path = test_env.env_root().join("main");
+    test_env.jj_cmd_ok(
+        &main_path,
+        &["workspace", "add", "--name", "second", "../secondary"],
+    );
+    let stderr = test_env.jj_cmd_failure(&main_path, &["workspace", "rename", "second"]);
+    insta::assert_snapshot!(stderr, @r###"
+    Error: Failed to rename a workspace
+    Caused by: Workspace second already exists
+    "###);
+}
+
+#[test]
+fn test_workspaces_rename_forgotten_workspace() {
+    let test_env = TestEnvironment::default();
+    test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "main"]);
+    let main_path = test_env.env_root().join("main");
+    test_env.jj_cmd_ok(
+        &main_path,
+        &["workspace", "add", "--name", "second", "../secondary"],
+    );
+    test_env.jj_cmd_ok(&main_path, &["workspace", "forget", "second"]);
+    let secondary_path = test_env.env_root().join("secondary");
+    let stderr = test_env.jj_cmd_failure(&secondary_path, &["workspace", "rename", "third"]);
+    insta::assert_snapshot!(stderr, @r###"
+    Error: The current workspace 'second' is not tracked in the repo.
+    "###);
+}
+
+#[test]
+fn test_workspaces_rename_workspace() {
+    let test_env = TestEnvironment::default();
+    test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "main"]);
+    let main_path = test_env.env_root().join("main");
+    test_env.jj_cmd_ok(
+        &main_path,
+        &["workspace", "add", "--name", "second", "../secondary"],
+    );
+    let secondary_path = test_env.env_root().join("secondary");
+
+    // Both workspaces show up when we list them
+    let stdout = test_env.jj_cmd_success(&main_path, &["workspace", "list"]);
+    insta::assert_snapshot!(stdout, @r###"
+    default: qpvuntsm 230dd059 (empty) (no description set)
+    second: uuqppmxq 57d63245 (empty) (no description set)
+    "###);
+
+    let stdout = test_env.jj_cmd_success(&secondary_path, &["workspace", "rename", "third"]);
+    insta::assert_snapshot!(stdout, @"");
+
+    let stdout = test_env.jj_cmd_success(&main_path, &["workspace", "list"]);
+    insta::assert_snapshot!(stdout, @r###"
+    default: qpvuntsm 230dd059 (empty) (no description set)
+    third: uuqppmxq 57d63245 (empty) (no description set)
+    "###);
+
+    // Can see the working-copy commit in each workspace in the log output.
+    insta::assert_snapshot!(get_log_output(&test_env, &main_path), @r###"
+    ○  57d63245a308 third@
+    │ @  230dd059e1b0 default@
+    ├─╯
+    ◆  000000000000
+    "###);
+    insta::assert_snapshot!(get_log_output(&test_env, &secondary_path), @r###"
+    @  57d63245a308 third@
+    │ ○  230dd059e1b0 default@
+    ├─╯
+    ◆  000000000000
     "###);
 }
 

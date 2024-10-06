@@ -43,7 +43,7 @@ pub(crate) fn cmd_backout(
 ) -> Result<(), CommandError> {
     let mut workspace_command = command.workspace_helper(ui)?;
     let to_back_out: Vec<_> = workspace_command
-        .parse_union_revsets(&args.revisions)?
+        .parse_union_revsets(ui, &args.revisions)?
         .evaluate_to_commits()?
         .try_collect()?; // in reverse topological order
     if to_back_out.is_empty() {
@@ -52,7 +52,7 @@ pub(crate) fn cmd_backout(
     }
     let mut parents = vec![];
     for revision_str in &args.destination {
-        let destination = workspace_command.resolve_single_rev(revision_str)?;
+        let destination = workspace_command.resolve_single_rev(ui, revision_str)?;
         parents.push(destination);
     }
     let mut tx = workspace_command.start_transaction();
@@ -65,7 +65,7 @@ pub(crate) fn cmd_backout(
             to_back_out.len() - 1
         )
     };
-    let mut new_base_tree = merge_commit_trees(tx.mut_repo(), &parents)?;
+    let mut new_base_tree = merge_commit_trees(tx.repo(), &parents)?;
     for commit_to_back_out in to_back_out {
         let commit_to_back_out_subject = commit_to_back_out
             .description()
@@ -77,12 +77,12 @@ pub(crate) fn cmd_backout(
             commit_to_back_out_subject,
             &commit_to_back_out.id().hex()
         );
-        let old_base_tree = commit_to_back_out.parent_tree(tx.mut_repo())?;
+        let old_base_tree = commit_to_back_out.parent_tree(tx.repo())?;
         let old_tree = commit_to_back_out.tree()?;
         let new_tree = new_base_tree.merge(&old_tree, &old_base_tree)?;
         let new_parent_ids = parents.iter().map(|commit| commit.id().clone()).collect();
         let new_commit = tx
-            .mut_repo()
+            .repo_mut()
             .new_commit(command.settings(), new_parent_ids, new_tree.id())
             .set_description(new_commit_description)
             .write()?;

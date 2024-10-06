@@ -606,7 +606,7 @@ impl TreeState {
                 return Err(TreeStateError::ReadTreeState {
                     path: tree_state_path,
                     source: err,
-                })
+                });
             }
             Ok(file) => file,
         };
@@ -709,7 +709,7 @@ impl TreeState {
         self.store.get_root_tree(&self.tree_id)
     }
 
-    fn write_file_to_store(
+    async fn write_file_to_store(
         &self,
         path: &RepoPath,
         disk_path: &Path,
@@ -718,10 +718,10 @@ impl TreeState {
             message: format!("Failed to open file {}", disk_path.display()),
             err: err.into(),
         })?;
-        Ok(self.store.write_file(path, &mut file)?)
+        Ok(self.store.write_file(path, &mut file).await?)
     }
 
-    fn write_symlink_to_store(
+    async fn write_symlink_to_store(
         &self,
         path: &RepoPath,
         disk_path: &Path,
@@ -737,7 +737,7 @@ impl TreeState {
                     .ok_or_else(|| SnapshotError::InvalidUtf8SymlinkTarget {
                         path: disk_path.to_path_buf(),
                     })?;
-            Ok(self.store.write_symlink(path, str_target)?)
+            Ok(self.store.write_symlink(path, str_target).await?)
         } else {
             let target = fs::read(disk_path).map_err(|err| SnapshotError::Other {
                 message: format!("Failed to read file {}", disk_path.display()),
@@ -747,7 +747,7 @@ impl TreeState {
                 String::from_utf8(target).map_err(|_| SnapshotError::InvalidUtf8SymlinkTarget {
                     path: disk_path.to_path_buf(),
                 })?;
-            Ok(self.store.write_symlink(path, &string_target)?)
+            Ok(self.store.write_symlink(path, &string_target).await?)
         }
     }
 
@@ -792,17 +792,18 @@ impl TreeState {
     /// Look for changes to the working copy. If there are any changes, create
     /// a new tree from it and return it, and also update the dirstate on disk.
     #[instrument(skip_all)]
-    pub fn snapshot(&mut self, options: SnapshotOptions) -> Result<bool, SnapshotError> {
+    pub fn snapshot(&mut self, options: &SnapshotOptions) -> Result<bool, SnapshotError> {
         let SnapshotOptions {
             base_ignores,
             fsmonitor_settings,
             progress,
+            start_tracking_matcher,
             max_new_file_size,
         } = options;
 
         let sparse_matcher = self.sparse_matcher();
 
-        let fsmonitor_clock_needs_save = fsmonitor_settings != FsmonitorSettings::None;
+        let fsmonitor_clock_needs_save = *fsmonitor_settings != FsmonitorSettings::None;
         let mut is_dirty = fsmonitor_clock_needs_save;
         let FsmonitorMatcher {
             matcher: fsmonitor_matcher,
@@ -829,18 +830,19 @@ impl TreeState {
             let directory_to_visit = DirectoryToVisit {
                 dir: RepoPathBuf::root(),
                 disk_dir: self.working_copy_path.clone(),
-                git_ignore: base_ignores,
+                git_ignore: base_ignores.clone(),
                 file_states: self.file_states.all(),
             };
             self.visit_directory(
                 &matcher,
+                start_tracking_matcher,
                 &current_tree,
                 tree_entries_tx,
                 file_states_tx,
                 present_files_tx,
                 directory_to_visit,
-                progress,
-                max_new_file_size,
+                *progress,
+                *max_new_file_size,
             )
         })?;
 
@@ -907,6 +909,7 @@ impl TreeState {
     fn visit_directory(
         &self,
         matcher: &dyn Matcher,
+        start_tracking_matcher: &dyn Matcher,
         current_tree: &MergedTree,
         tree_entries_tx: Sender<(RepoPathBuf, MergedTreeValue)>,
         file_states_tx: Sender<(RepoPathBuf, FileState)>,
@@ -963,7 +966,12 @@ impl TreeState {
 
                 if file_type.is_dir() {
                     let file_states = file_states.prefixed(&path);
-                    if git_ignore.matches(&path.to_internal_dir_string()) {
+                    if git_ignore.matches(&path.to_internal_dir_string())
+                        || start_tracking_matcher.visit(&path).is_nothing()
+                    {
+                        // TODO: Report this directory to the caller if there are unignored paths we
+                        // should not start tracking.
+
                         // If the whole directory is ignored, visit only paths we're already
                         // tracking.
                         for (tracked_path, current_file_state) in file_states {
@@ -1016,6 +1024,7 @@ impl TreeState {
                         };
                         self.visit_directory(
                             matcher,
+                            start_tracking_matcher,
                             current_tree,
                             tree_entries_tx.clone(),
                             file_states_tx.clone(),
@@ -1033,8 +1042,12 @@ impl TreeState {
                         && git_ignore.matches(path.as_internal_file_string())
                     {
                         // If it wasn't already tracked and it matches
-                        // the ignored paths, then
-                        // ignore it.
+                        // the ignored paths, then ignore it.
+                    } else if maybe_current_file_state.is_none()
+                        && !start_tracking_matcher.matches(&path)
+                    {
+                        // Leave the file untracked
+                        // TODO: Report this path to the caller
                     } else {
                         let metadata = entry.metadata().map_err(|err| SnapshotError::Other {
                             message: format!("Failed to stat file {}", entry.path().display()),
@@ -1042,6 +1055,7 @@ impl TreeState {
                         })?;
                         if maybe_current_file_state.is_none() && metadata.len() > max_new_file_size
                         {
+                            // TODO: Maybe leave the file untracked instead
                             return Err(SnapshotError::NewFileTooLarge {
                                 path: entry.path().clone(),
                                 size: HumanByteSize(metadata.len()),
@@ -1075,13 +1089,13 @@ impl TreeState {
     #[instrument(skip_all)]
     fn make_fsmonitor_matcher(
         &self,
-        fsmonitor_settings: FsmonitorSettings,
+        fsmonitor_settings: &FsmonitorSettings,
     ) -> Result<FsmonitorMatcher, SnapshotError> {
         let (watchman_clock, changed_files) = match fsmonitor_settings {
             FsmonitorSettings::None => (None, None),
-            FsmonitorSettings::Test { changed_files } => (None, Some(changed_files)),
+            FsmonitorSettings::Test { changed_files } => (None, Some(changed_files.clone())),
             #[cfg(feature = "watchman")]
-            FsmonitorSettings::Watchman(config) => match self.query_watchman(&config) {
+            FsmonitorSettings::Watchman(config) => match self.query_watchman(config) {
                 Ok((watchman_clock, changed_files)) => (Some(watchman_clock.into()), changed_files),
                 Err(err) => {
                     tracing::warn!(?err, "Failed to query filesystem monitor");
@@ -1152,14 +1166,13 @@ impl TreeState {
                 new_file_state.file_type.clone()
             };
             let new_tree_values = match new_file_type {
-                FileType::Normal { executable } => self.write_path_to_store(
-                    repo_path,
-                    &disk_path,
-                    &current_tree_values,
-                    executable,
-                )?,
+                FileType::Normal { executable } => self
+                    .write_path_to_store(repo_path, &disk_path, &current_tree_values, executable)
+                    .block_on()?,
                 FileType::Symlink => {
-                    let id = self.write_symlink_to_store(repo_path, &disk_path)?;
+                    let id = self
+                        .write_symlink_to_store(repo_path, &disk_path)
+                        .block_on()?;
                     Merge::normal(TreeValue::Symlink(id))
                 }
                 FileType::GitSubmodule => panic!("git submodule cannot be written to store"),
@@ -1172,7 +1185,7 @@ impl TreeState {
         }
     }
 
-    fn write_path_to_store(
+    async fn write_path_to_store(
         &self,
         repo_path: &RepoPath,
         disk_path: &Path,
@@ -1184,7 +1197,7 @@ impl TreeState {
         if let Some(current_tree_value) = current_tree_values.as_resolved() {
             #[cfg(unix)]
             let _ = current_tree_value; // use the variable
-            let id = self.write_file_to_store(repo_path, disk_path)?;
+            let id = self.write_file_to_store(repo_path, disk_path).await?;
             // On Windows, we preserve the executable bit from the current tree.
             #[cfg(windows)]
             let executable = {
@@ -1613,6 +1626,7 @@ impl WorkingCopy for LocalWorkingCopy {
             old_operation_id,
             old_tree_id,
             tree_state_dirty: false,
+            new_workspace_id: None,
         }))
     }
 }
@@ -1812,6 +1826,7 @@ pub struct LockedLocalWorkingCopy {
     old_operation_id: OperationId,
     old_tree_id: MergedTreeId,
     tree_state_dirty: bool,
+    new_workspace_id: Option<WorkspaceId>,
 }
 
 impl LockedWorkingCopy for LockedLocalWorkingCopy {
@@ -1831,7 +1846,7 @@ impl LockedWorkingCopy for LockedLocalWorkingCopy {
         &self.old_tree_id
     }
 
-    fn snapshot(&mut self, options: SnapshotOptions) -> Result<MergedTreeId, SnapshotError> {
+    fn snapshot(&mut self, options: &SnapshotOptions) -> Result<MergedTreeId, SnapshotError> {
         let tree_state = self
             .wc
             .tree_state_mut()
@@ -1857,6 +1872,10 @@ impl LockedWorkingCopy for LockedLocalWorkingCopy {
             .check_out(&new_tree)?;
         self.tree_state_dirty = true;
         Ok(stats)
+    }
+
+    fn rename_workspace(&mut self, new_workspace_id: WorkspaceId) {
+        self.new_workspace_id = Some(new_workspace_id);
     }
 
     fn reset(&mut self, commit: &Commit) -> Result<(), ResetError> {
@@ -1924,7 +1943,10 @@ impl LockedWorkingCopy for LockedLocalWorkingCopy {
                     err: Box::new(err),
                 })?;
         }
-        if self.old_operation_id != operation_id {
+        if self.old_operation_id != operation_id || self.new_workspace_id.is_some() {
+            if let Some(new_workspace_id) = self.new_workspace_id {
+                self.wc.checkout_state_mut().workspace_id = new_workspace_id;
+            }
             self.wc.checkout_state_mut().operation_id = operation_id;
             self.wc.save();
         }

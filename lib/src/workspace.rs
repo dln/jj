@@ -101,6 +101,7 @@ pub struct Workspace {
     // Path to the workspace root (typically the parent of a .jj/ directory), which is where
     // working copy files live.
     workspace_root: PathBuf,
+    repo_path: PathBuf,
     repo_loader: RepoLoader,
     working_copy: Box<dyn WorkingCopy>,
 }
@@ -128,7 +129,7 @@ fn init_working_copy(
     std::fs::create_dir(&working_copy_state_path).context(&working_copy_state_path)?;
 
     let mut tx = repo.start_transaction(user_settings);
-    tx.mut_repo().check_out(
+    tx.repo_mut().check_out(
         workspace_id.clone(),
         user_settings,
         &repo.store().root_commit(),
@@ -150,12 +151,14 @@ fn init_working_copy(
 impl Workspace {
     pub fn new(
         workspace_root: &Path,
+        repo_path: PathBuf,
         working_copy: Box<dyn WorkingCopy>,
         repo_loader: RepoLoader,
     ) -> Result<Workspace, PathError> {
         let workspace_root = workspace_root.canonicalize().context(workspace_root)?;
         Ok(Self::new_no_canonicalize(
             workspace_root,
+            repo_path,
             working_copy,
             repo_loader,
         ))
@@ -163,11 +166,13 @@ impl Workspace {
 
     pub fn new_no_canonicalize(
         workspace_root: PathBuf,
+        repo_path: PathBuf,
         working_copy: Box<dyn WorkingCopy>,
         repo_loader: RepoLoader,
     ) -> Self {
         Self {
             workspace_root,
+            repo_path,
             repo_loader,
             working_copy,
         }
@@ -309,7 +314,7 @@ impl Workspace {
                 workspace_id,
             )?;
             let repo_loader = repo.loader();
-            let workspace = Workspace::new(workspace_root, working_copy, repo_loader)?;
+            let workspace = Workspace::new(workspace_root, repo_dir, working_copy, repo_loader)?;
             Ok((workspace, repo))
         })()
         .inspect_err(|_err| {
@@ -340,13 +345,14 @@ impl Workspace {
     pub fn init_workspace_with_existing_repo(
         user_settings: &UserSettings,
         workspace_root: &Path,
+        repo_path: &Path,
         repo: &Arc<ReadonlyRepo>,
         working_copy_factory: &dyn WorkingCopyFactory,
         workspace_id: WorkspaceId,
     ) -> Result<(Self, Arc<ReadonlyRepo>), WorkspaceInitError> {
         let jj_dir = create_jj_dir(workspace_root)?;
 
-        let repo_dir = repo.repo_path().canonicalize().context(repo.repo_path())?;
+        let repo_dir = repo_path.canonicalize().context(repo_path)?;
         let repo_file_path = jj_dir.join("repo");
         let mut repo_file = File::create(&repo_file_path).context(&repo_file_path)?;
         repo_file
@@ -366,7 +372,7 @@ impl Workspace {
             working_copy_factory,
             workspace_id,
         )?;
-        let workspace = Workspace::new(workspace_root, working_copy, repo.loader())?;
+        let workspace = Workspace::new(workspace_root, repo_dir, working_copy, repo.loader())?;
         Ok((workspace, repo))
     }
 
@@ -381,7 +387,7 @@ impl Workspace {
         Ok(workspace)
     }
 
-    pub fn workspace_root(&self) -> &PathBuf {
+    pub fn workspace_root(&self) -> &Path {
         &self.workspace_root
     }
 
@@ -389,8 +395,8 @@ impl Workspace {
         self.working_copy.workspace_id()
     }
 
-    pub fn repo_path(&self) -> &PathBuf {
-        self.repo_loader.repo_path()
+    pub fn repo_path(&self) -> &Path {
+        &self.repo_path
     }
 
     pub fn repo_loader(&self) -> &RepoLoader {
@@ -521,10 +527,12 @@ impl WorkspaceLoaderFactory for DefaultWorkspaceLoaderFactory {
     }
 }
 
+/// Helps create a `Workspace` instance by reading `.jj/repo/` and
+/// `.jj/working_copy/` from the file system.
 #[derive(Clone, Debug)]
 struct DefaultWorkspaceLoader {
     workspace_root: PathBuf,
-    repo_dir: PathBuf,
+    repo_path: PathBuf,
     working_copy_state_path: PathBuf,
 }
 
@@ -556,7 +564,7 @@ impl DefaultWorkspaceLoader {
         let working_copy_state_path = jj_dir.join("working_copy");
         Ok(Self {
             workspace_root: workspace_root.to_owned(),
-            repo_dir,
+            repo_path: repo_dir,
             working_copy_state_path,
         })
     }
@@ -568,7 +576,7 @@ impl WorkspaceLoader for DefaultWorkspaceLoader {
     }
 
     fn repo_path(&self) -> &Path {
-        &self.repo_dir
+        &self.repo_path
     }
 
     fn load(
@@ -577,10 +585,16 @@ impl WorkspaceLoader for DefaultWorkspaceLoader {
         store_factories: &StoreFactories,
         working_copy_factories: &WorkingCopyFactories,
     ) -> Result<Workspace, WorkspaceLoadError> {
-        let repo_loader = RepoLoader::init(user_settings, &self.repo_dir, store_factories)?;
+        let repo_loader =
+            RepoLoader::init_from_file_system(user_settings, &self.repo_path, store_factories)?;
         let working_copy_factory = get_working_copy_factory(self, working_copy_factories)?;
         let working_copy = self.load_working_copy(repo_loader.store(), working_copy_factory)?;
-        let workspace = Workspace::new(&self.workspace_root, working_copy, repo_loader)?;
+        let workspace = Workspace::new(
+            &self.workspace_root,
+            self.repo_path.clone(),
+            working_copy,
+            repo_loader,
+        )?;
         Ok(workspace)
     }
 

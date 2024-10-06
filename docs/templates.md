@@ -14,7 +14,7 @@ object can be referenced as `self`.
 
 ### Commit keywords
 
-In `jj log`/`jj obslog` templates, all 0-argument methods of [the `Commit`
+In `jj log`/`jj evolog` templates, all 0-argument methods of [the `Commit`
 type](#commit-type) are available as keywords. For example, `commit_id` is
 equivalent to `self.commit_id()`.
 
@@ -80,11 +80,11 @@ This type cannot be printed. The following methods are defined.
   working-copy commit as `<workspace name>@`.
 * `current_working_copy() -> Boolean`: True for the working-copy commit of the
   current workspace.
-* `branches() -> List<RefName>`: Local and remote branches pointing to the commit.
-  A tracking remote branch will be included only if its target is different
-  from the local one.
-* `local_branches() -> List<RefName>`: All local branches pointing to the commit.
-* `remote_branches() -> List<RefName>`: All remote branches pointing to the commit.
+* `bookmarks() -> List<RefName>`: Local and remote bookmarks pointing to the
+  commit. A tracking remote bookmark will be included only if its target is
+  different from the local one.
+* `local_bookmarks() -> List<RefName>`: All local bookmarks pointing to the commit.
+* `remote_bookmarks() -> List<RefName>`: All remote bookmarks pointing to the commit.
 * `tags() -> List<RefName>`
 * `git_refs() -> List<RefName>`
 * `git_head() -> Option<RefName>`
@@ -105,6 +105,8 @@ This type cannot be printed. The following methods are defined.
 
 The following methods are defined.
 
+* `.normal_hex() -> String`: Normal hex representation (0-9a-f), useful for
+  ChangeId, whose canonical hex representation is "reversed" (z-k).
 * `.short([len: Integer]) -> String`
 * `.shortest([min_len: Integer]) -> ShortestIdPrefix`: Shortest unique prefix.
 
@@ -158,11 +160,11 @@ invoked. If not set, an error will be reported inline on method call.
 
 The following methods are defined.
 
-* `.name() -> String`: Local branch or tag name.
+* `.name() -> String`: Local bookmark or tag name.
 * `.remote() -> String`: Remote name or empty if this is a local ref.
 * `.present() -> Boolean`: True if the ref points to any commit.
-* `.conflict() -> Boolean`: True if [the branch or tag is
-  conflicted](branches.md#conflicts).
+* `.conflict() -> Boolean`: True if [the bookmark or tag is
+  conflicted](bookmarks.md#conflicts).
 * `.normal_target() -> Option<Commit>`: Target commit if the ref is not
   conflicted and points to a commit.
 * `.removed_targets() -> List<Commit>`: Old target commits if conflicted.
@@ -300,4 +302,18 @@ concat(
 )
 '''
 'format_field(key, value)' = 'key ++ ": " ++ value ++ "\n"'
+```
+
+## Examples
+
+Get short commit IDs of the working-copy parents:
+
+```sh
+jj log --no-graph -r @ -T 'parents.map(|c| c.commit_id().short()).join(",")'
+```
+
+Show machine-readable list of full commit and change IDs:
+
+```sh
+jj log --no-graph -T 'commit_id ++ " " ++ change_id ++ "\n"'
 ```

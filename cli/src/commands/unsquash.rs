@@ -56,8 +56,17 @@ pub(crate) fn cmd_unsquash(
     command: &CommandHelper,
     args: &UnsquashArgs,
 ) -> Result<(), CommandError> {
+    writeln!(
+        ui.warning_default(),
+        "`jj unsquash` is deprecated; use `jj diffedit --restore-descendants` or `jj squash` \
+         instead"
+    )?;
+    writeln!(
+        ui.warning_default(),
+        "`jj unsquash` will be removed in a future version, and this will be a hard error"
+    )?;
     let mut workspace_command = command.workspace_helper(ui)?;
-    let commit = workspace_command.resolve_single_rev(&args.revision)?;
+    let commit = workspace_command.resolve_single_rev(ui, &args.revision)?;
     workspace_command.check_rewritable([commit.id()])?;
     if commit.parent_ids().len() > 1 {
         return Err(user_error("Cannot unsquash merge commits"));
@@ -106,24 +115,28 @@ aborted.
     // Abandon the parent if it is now empty (always the case in the non-interactive
     // case).
     if new_parent_tree_id == parent_base_tree.id() {
-        tx.mut_repo().record_abandoned_commit(parent.id().clone());
-        let description =
-            combine_messages(tx.base_repo(), &[&parent], &commit, command.settings())?;
+        tx.repo_mut().record_abandoned_commit(parent.id().clone());
+        let description = combine_messages(
+            tx.base_workspace_helper(),
+            &[&parent],
+            &commit,
+            command.settings(),
+        )?;
         // Commit the new child on top of the parent's parents.
-        tx.mut_repo()
+        tx.repo_mut()
             .rewrite_commit(command.settings(), &commit)
             .set_parents(parent.parent_ids().to_vec())
             .set_description(description)
             .write()?;
     } else {
         let new_parent = tx
-            .mut_repo()
+            .repo_mut()
             .rewrite_commit(command.settings(), &parent)
             .set_tree_id(new_parent_tree_id)
             .set_predecessors(vec![parent.id().clone(), commit.id().clone()])
             .write()?;
         // Commit the new child on top of the new parent.
-        tx.mut_repo()
+        tx.repo_mut()
             .rewrite_commit(command.settings(), &commit)
             .set_parents(vec![new_parent.id().clone()])
             .write()?;

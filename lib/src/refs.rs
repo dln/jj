@@ -175,14 +175,14 @@ pub struct LocalAndRemoteRef<'a> {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash)]
-pub struct BranchPushUpdate {
+pub struct BookmarkPushUpdate {
     pub old_target: Option<CommitId>,
     pub new_target: Option<CommitId>,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
-pub enum BranchPushAction {
-    Update(BranchPushUpdate),
+pub enum BookmarkPushAction {
+    Update(BookmarkPushUpdate),
     AlreadyMatches,
     LocalConflicted,
     RemoteConflicted,
@@ -190,20 +190,20 @@ pub enum BranchPushAction {
 }
 
 /// Figure out what changes (if any) need to be made to the remote when pushing
-/// this branch.
-pub fn classify_branch_push_action(targets: LocalAndRemoteRef) -> BranchPushAction {
+/// this bookmark.
+pub fn classify_bookmark_push_action(targets: LocalAndRemoteRef) -> BookmarkPushAction {
     let local_target = targets.local_target;
     let remote_target = targets.remote_ref.tracking_target();
     if local_target == remote_target {
-        BranchPushAction::AlreadyMatches
+        BookmarkPushAction::AlreadyMatches
     } else if local_target.has_conflict() {
-        BranchPushAction::LocalConflicted
+        BookmarkPushAction::LocalConflicted
     } else if remote_target.has_conflict() {
-        BranchPushAction::RemoteConflicted
+        BookmarkPushAction::RemoteConflicted
     } else if targets.remote_ref.is_present() && !targets.remote_ref.is_tracking() {
-        BranchPushAction::RemoteUntracked
+        BookmarkPushAction::RemoteUntracked
     } else {
-        BranchPushAction::Update(BranchPushUpdate {
+        BookmarkPushAction::Update(BookmarkPushUpdate {
             old_target: remote_target.as_normal().cloned(),
             new_target: local_target.as_normal().cloned(),
         })
@@ -230,28 +230,28 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_branch_push_action_unchanged() {
+    fn test_classify_bookmark_push_action_unchanged() {
         let commit_id1 = CommitId::from_hex("11");
         let targets = LocalAndRemoteRef {
             local_target: &RefTarget::normal(commit_id1.clone()),
             remote_ref: &tracking_remote_ref(RefTarget::normal(commit_id1)),
         };
         assert_eq!(
-            classify_branch_push_action(targets),
-            BranchPushAction::AlreadyMatches
+            classify_bookmark_push_action(targets),
+            BookmarkPushAction::AlreadyMatches
         );
     }
 
     #[test]
-    fn test_classify_branch_push_action_added() {
+    fn test_classify_bookmark_push_action_added() {
         let commit_id1 = CommitId::from_hex("11");
         let targets = LocalAndRemoteRef {
             local_target: &RefTarget::normal(commit_id1.clone()),
             remote_ref: RemoteRef::absent_ref(),
         };
         assert_eq!(
-            classify_branch_push_action(targets),
-            BranchPushAction::Update(BranchPushUpdate {
+            classify_bookmark_push_action(targets),
+            BookmarkPushAction::Update(BookmarkPushUpdate {
                 old_target: None,
                 new_target: Some(commit_id1),
             })
@@ -259,15 +259,15 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_branch_push_action_removed() {
+    fn test_classify_bookmark_push_action_removed() {
         let commit_id1 = CommitId::from_hex("11");
         let targets = LocalAndRemoteRef {
             local_target: RefTarget::absent_ref(),
             remote_ref: &tracking_remote_ref(RefTarget::normal(commit_id1.clone())),
         };
         assert_eq!(
-            classify_branch_push_action(targets),
-            BranchPushAction::Update(BranchPushUpdate {
+            classify_bookmark_push_action(targets),
+            BookmarkPushAction::Update(BookmarkPushUpdate {
                 old_target: Some(commit_id1),
                 new_target: None,
             })
@@ -275,7 +275,7 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_branch_push_action_updated() {
+    fn test_classify_bookmark_push_action_updated() {
         let commit_id1 = CommitId::from_hex("11");
         let commit_id2 = CommitId::from_hex("22");
         let targets = LocalAndRemoteRef {
@@ -283,8 +283,8 @@ mod tests {
             remote_ref: &tracking_remote_ref(RefTarget::normal(commit_id1.clone())),
         };
         assert_eq!(
-            classify_branch_push_action(targets),
-            BranchPushAction::Update(BranchPushUpdate {
+            classify_bookmark_push_action(targets),
+            BookmarkPushAction::Update(BookmarkPushUpdate {
                 old_target: Some(commit_id1),
                 new_target: Some(commit_id2),
             })
@@ -292,22 +292,22 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_branch_push_action_removed_untracked() {
-        // This is not RemoteUntracked error since non-tracking remote branches
-        // have no relation to local branches, and there's nothing to push.
+    fn test_classify_bookmark_push_action_removed_untracked() {
+        // This is not RemoteUntracked error since non-tracking remote bookmarks
+        // have no relation to local bookmarks, and there's nothing to push.
         let commit_id1 = CommitId::from_hex("11");
         let targets = LocalAndRemoteRef {
             local_target: RefTarget::absent_ref(),
             remote_ref: &new_remote_ref(RefTarget::normal(commit_id1.clone())),
         };
         assert_eq!(
-            classify_branch_push_action(targets),
-            BranchPushAction::AlreadyMatches
+            classify_bookmark_push_action(targets),
+            BookmarkPushAction::AlreadyMatches
         );
     }
 
     #[test]
-    fn test_classify_branch_push_action_updated_untracked() {
+    fn test_classify_bookmark_push_action_updated_untracked() {
         let commit_id1 = CommitId::from_hex("11");
         let commit_id2 = CommitId::from_hex("22");
         let targets = LocalAndRemoteRef {
@@ -315,13 +315,13 @@ mod tests {
             remote_ref: &new_remote_ref(RefTarget::normal(commit_id1.clone())),
         };
         assert_eq!(
-            classify_branch_push_action(targets),
-            BranchPushAction::RemoteUntracked
+            classify_bookmark_push_action(targets),
+            BookmarkPushAction::RemoteUntracked
         );
     }
 
     #[test]
-    fn test_classify_branch_push_action_local_conflicted() {
+    fn test_classify_bookmark_push_action_local_conflicted() {
         let commit_id1 = CommitId::from_hex("11");
         let commit_id2 = CommitId::from_hex("22");
         let targets = LocalAndRemoteRef {
@@ -329,13 +329,13 @@ mod tests {
             remote_ref: &tracking_remote_ref(RefTarget::normal(commit_id1)),
         };
         assert_eq!(
-            classify_branch_push_action(targets),
-            BranchPushAction::LocalConflicted
+            classify_bookmark_push_action(targets),
+            BookmarkPushAction::LocalConflicted
         );
     }
 
     #[test]
-    fn test_classify_branch_push_action_remote_conflicted() {
+    fn test_classify_bookmark_push_action_remote_conflicted() {
         let commit_id1 = CommitId::from_hex("11");
         let commit_id2 = CommitId::from_hex("22");
         let targets = LocalAndRemoteRef {
@@ -346,8 +346,8 @@ mod tests {
             )),
         };
         assert_eq!(
-            classify_branch_push_action(targets),
-            BranchPushAction::RemoteConflicted
+            classify_bookmark_push_action(targets),
+            BookmarkPushAction::RemoteConflicted
         );
     }
 }

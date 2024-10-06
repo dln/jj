@@ -31,9 +31,21 @@ use crate::command_error::user_error;
 use crate::command_error::CommandError;
 use crate::ui::Ui;
 
+/// How to handle sparse patterns when creating a new workspace.
+#[derive(clap::ValueEnum, Clone, Debug, Eq, PartialEq)]
+enum SparseInheritance {
+    /// Copy all sparse patterns from the current workspace.
+    Copy,
+    /// Include all files in the new workspace.
+    Full,
+    /// Clear all files from the workspace (it will be empty).
+    Empty,
+}
+
 /// Add a workspace
 ///
-/// Sparse patterns will be copied over from the current workspace.
+/// By default, the new workspace inherits the sparse patterns of the current
+/// workspace. You can override this with the `--sparse-patterns` option.
 #[derive(clap::Args, Clone, Debug)]
 pub struct WorkspaceAddArgs {
     /// Where to create the new workspace
@@ -58,6 +70,9 @@ pub struct WorkspaceAddArgs {
     /// new r1 r2 r3 ...`.
     #[arg(long, short)]
     revision: Vec<RevisionArg>,
+    /// How to handle sparse patterns when creating a new workspace.
+    #[arg(long, value_enum, default_value_t = SparseInheritance::Copy)]
+    sparse_patterns: SparseInheritance,
 }
 
 #[instrument(skip_all)]
@@ -92,9 +107,11 @@ pub fn cmd_workspace_add(
     }
 
     let working_copy_factory = command.get_working_copy_factory()?;
+    let repo_path = old_workspace_command.repo_path();
     let (new_workspace, repo) = Workspace::init_workspace_with_existing_repo(
         command.settings(),
         &destination_path,
+        repo_path,
         repo,
         working_copy_factory,
         workspace_id,
@@ -114,19 +131,29 @@ pub fn cmd_workspace_add(
         )?;
     }
 
-    // Copy sparse patterns from workspace where the command was run
     let mut new_workspace_command = command.for_workable_repo(ui, new_workspace, repo)?;
-    let (mut locked_ws, _wc_commit) = new_workspace_command.start_working_copy_mutation()?;
-    let sparse_patterns = old_workspace_command
-        .working_copy()
-        .sparse_patterns()?
-        .to_vec();
-    locked_ws
-        .locked_wc()
-        .set_sparse_patterns(sparse_patterns)
-        .map_err(|err| internal_error_with_message("Failed to set sparse patterns", err))?;
-    let operation_id = locked_ws.locked_wc().old_operation_id().clone();
-    locked_ws.finish(operation_id)?;
+
+    let sparsity = match args.sparse_patterns {
+        SparseInheritance::Full => None,
+        SparseInheritance::Empty => Some(vec![]),
+        SparseInheritance::Copy => {
+            let sparse_patterns = old_workspace_command
+                .working_copy()
+                .sparse_patterns()?
+                .to_vec();
+            Some(sparse_patterns)
+        }
+    };
+
+    if let Some(sparse_patterns) = sparsity {
+        let (mut locked_ws, _wc_commit) = new_workspace_command.start_working_copy_mutation()?;
+        locked_ws
+            .locked_wc()
+            .set_sparse_patterns(sparse_patterns)
+            .map_err(|err| internal_error_with_message("Failed to set sparse patterns", err))?;
+        let operation_id = locked_ws.locked_wc().old_operation_id().clone();
+        locked_ws.finish(operation_id)?;
+    }
 
     let mut tx = new_workspace_command.start_transaction();
 
@@ -150,7 +177,7 @@ pub fn cmd_workspace_add(
         }
     } else {
         old_workspace_command
-            .resolve_some_revsets_default_single(&args.revision)?
+            .resolve_some_revsets_default_single(ui, &args.revision)?
             .into_iter()
             .collect_vec()
     };
@@ -158,7 +185,7 @@ pub fn cmd_workspace_add(
     let tree = merge_commit_trees(tx.repo(), &parents)?;
     let parent_ids = parents.iter().ids().cloned().collect_vec();
     let new_wc_commit = tx
-        .mut_repo()
+        .repo_mut()
         .new_commit(command.settings(), parent_ids, tree.id())
         .write()?;
 

@@ -17,8 +17,10 @@ use std::io::Write as _;
 
 use jj_lib::object_id::ObjectId;
 use jj_lib::revset;
+use jj_lib::revset::RevsetDiagnostics;
 
 use crate::cli_util::CommandHelper;
+use crate::command_error::print_parse_diagnostics;
 use crate::command_error::CommandError;
 use crate::revset_util;
 use crate::ui::Ui;
@@ -38,7 +40,9 @@ pub fn cmd_debug_revset(
     let workspace_ctx = workspace_command.revset_parse_context();
     let repo = workspace_command.repo().as_ref();
 
-    let expression = revset::parse(&args.revision, &workspace_ctx)?;
+    let mut diagnostics = RevsetDiagnostics::new();
+    let expression = revset::parse(&mut diagnostics, &args.revision, &workspace_ctx)?;
+    print_parse_diagnostics(ui, "In revset expression", &diagnostics)?;
     writeln!(ui.stdout(), "-- Parsed:")?;
     writeln!(ui.stdout(), "{expression:#?}")?;
     writeln!(ui.stdout())?;
@@ -51,7 +55,7 @@ pub fn cmd_debug_revset(
     let symbol_resolver = revset_util::default_symbol_resolver(
         repo,
         command.revset_extensions().symbol_resolvers(),
-        workspace_command.id_prefix_context()?,
+        workspace_command.id_prefix_context(),
     );
     let expression = expression.resolve_user_expression(repo, &symbol_resolver)?;
     writeln!(ui.stdout(), "-- Resolved:")?;

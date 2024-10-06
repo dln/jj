@@ -68,7 +68,7 @@ pub(crate) fn cmd_parallelize(
     // The target commits are the commits being parallelized. They are ordered
     // here with children before parents.
     let target_commits: Vec<Commit> = workspace_command
-        .parse_union_revsets(&args.revisions)?
+        .parse_union_revsets(ui, &args.revisions)?
         .evaluate_to_commits()?
         .try_collect()?;
     workspace_command.check_rewritable(target_commits.iter().ids())?;
@@ -106,7 +106,7 @@ pub(crate) fn cmd_parallelize(
         new_child_parents.insert(commit.id().clone(), new_parents);
     }
 
-    tx.mut_repo().transform_descendants(
+    tx.repo_mut().transform_descendants(
         command.settings(),
         target_commits.iter().ids().cloned().collect_vec(),
         |mut rewriter| {

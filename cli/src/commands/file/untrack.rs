@@ -46,11 +46,12 @@ pub(crate) fn cmd_file_untrack(
     let mut workspace_command = command.workspace_helper(ui)?;
     let store = workspace_command.repo().store().clone();
     let matcher = workspace_command
-        .parse_file_patterns(&args.paths)?
+        .parse_file_patterns(ui, &args.paths)?
         .to_matcher();
 
     let mut tx = workspace_command.start_transaction().into_inner();
     let base_ignores = workspace_command.base_ignores()?;
+    let auto_tracking_matcher = workspace_command.auto_tracking_matcher(ui)?;
     let (mut locked_ws, wc_commit) = workspace_command.start_working_copy_mutation()?;
     // Create a new tree without the unwanted files
     let mut tree_builder = MergedTreeBuilder::new(wc_commit.tree_id().clone());
@@ -60,7 +61,7 @@ pub(crate) fn cmd_file_untrack(
     }
     let new_tree_id = tree_builder.write_tree(&store)?;
     let new_commit = tx
-        .mut_repo()
+        .repo_mut()
         .rewrite_commit(command.settings(), &wc_commit)
         .set_tree_id(new_tree_id)
         .write()?;
@@ -68,10 +69,11 @@ pub(crate) fn cmd_file_untrack(
     locked_ws.locked_wc().reset(&new_commit)?;
     // Commit the working copy again so we can inform the user if paths couldn't be
     // untracked because they're not ignored.
-    let wc_tree_id = locked_ws.locked_wc().snapshot(SnapshotOptions {
+    let wc_tree_id = locked_ws.locked_wc().snapshot(&SnapshotOptions {
         base_ignores,
         fsmonitor_settings: command.settings().fsmonitor_settings()?,
         progress: None,
+        start_tracking_matcher: &auto_tracking_matcher,
         max_new_file_size: command.settings().max_new_file_size()?,
     })?;
     if wc_tree_id != *new_commit.tree_id() {
@@ -101,7 +103,7 @@ Make sure they're ignored, then try again.",
             locked_ws.locked_wc().reset(&new_commit)?;
         }
     }
-    let num_rebased = tx.mut_repo().rebase_descendants(command.settings())?;
+    let num_rebased = tx.repo_mut().rebase_descendants(command.settings())?;
     if num_rebased > 0 {
         writeln!(ui.status(), "Rebased {num_rebased} descendant commits")?;
     }

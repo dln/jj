@@ -14,8 +14,6 @@
 
 #![allow(missing_docs)]
 
-use std::cmp::max;
-use std::cmp::min;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -73,34 +71,70 @@ pub fn find_nonword_ranges(text: &[u8]) -> Vec<Range<usize>> {
         .collect()
 }
 
-struct Histogram<'a> {
-    word_to_positions: HashMap<&'a [u8], Vec<usize>>,
-    count_to_words: BTreeMap<usize, Vec<&'a [u8]>>,
+/// Index in a list of word (or token) ranges.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+struct WordPosition(usize);
+
+#[derive(Clone, Debug)]
+struct DiffSource<'input, 'aux> {
+    text: &'input BStr,
+    ranges: &'aux [Range<usize>],
+    /// The number of preceding word ranges excluded from the self `ranges`.
+    global_offset: WordPosition,
 }
 
-impl Histogram<'_> {
-    fn calculate<'a>(
-        text: &'a [u8],
-        ranges: &[Range<usize>],
-        max_occurrences: usize,
-    ) -> Histogram<'a> {
-        let mut word_to_positions: HashMap<&[u8], Vec<usize>> = HashMap::new();
-        for (i, range) in ranges.iter().enumerate() {
-            let positions = word_to_positions.entry(&text[range.clone()]).or_default();
+impl<'input, 'aux> DiffSource<'input, 'aux> {
+    fn new<T: AsRef<[u8]> + ?Sized>(text: &'input T, ranges: &'aux [Range<usize>]) -> Self {
+        DiffSource {
+            text: BStr::new(text),
+            ranges,
+            global_offset: WordPosition(0),
+        }
+    }
+
+    fn narrowed(&self, positions: Range<WordPosition>) -> Self {
+        DiffSource {
+            text: self.text,
+            ranges: &self.ranges[positions.start.0..positions.end.0],
+            global_offset: self.map_to_global(positions.start),
+        }
+    }
+
+    fn range_at(&self, position: WordPosition) -> Range<usize> {
+        self.ranges[position.0].clone()
+    }
+
+    fn map_to_global(&self, position: WordPosition) -> WordPosition {
+        WordPosition(self.global_offset.0 + position.0)
+    }
+}
+
+struct Histogram<'input> {
+    word_to_positions: HashMap<&'input BStr, Vec<WordPosition>>,
+}
+
+impl<'input> Histogram<'input> {
+    fn calculate(source: &DiffSource<'input, '_>, max_occurrences: usize) -> Self {
+        let mut word_to_positions: HashMap<&BStr, Vec<WordPosition>> = HashMap::new();
+        for (i, range) in source.ranges.iter().enumerate() {
+            let word = &source.text[range.clone()];
+            let positions = word_to_positions.entry(word).or_default();
             // Allow one more than max_occurrences, so we can later skip those with more
             // than max_occurrences
             if positions.len() <= max_occurrences {
-                positions.push(i);
+                positions.push(WordPosition(i));
             }
         }
-        let mut count_to_words: BTreeMap<usize, Vec<&[u8]>> = BTreeMap::new();
-        for (word, ranges) in &word_to_positions {
-            count_to_words.entry(ranges.len()).or_default().push(word);
+        Histogram { word_to_positions }
+    }
+
+    fn build_count_to_entries(&self) -> BTreeMap<usize, Vec<(&'input BStr, &Vec<WordPosition>)>> {
+        let mut count_to_entries: BTreeMap<usize, Vec<_>> = BTreeMap::new();
+        for (word, positions) in &self.word_to_positions {
+            let entries = count_to_entries.entry(positions.len()).or_default();
+            entries.push((*word, positions));
         }
-        Histogram {
-            word_to_positions,
-            count_to_words,
-        }
+        count_to_entries
     }
 }
 
@@ -160,182 +194,172 @@ fn find_lcs(input: &[usize]) -> Vec<(usize, usize)> {
     result
 }
 
-/// Finds unchanged ranges among the ones given as arguments. The data between
-/// those ranges is ignored.
-pub(crate) fn unchanged_ranges(
-    left: &[u8],
-    right: &[u8],
-    left_ranges: &[Range<usize>],
-    right_ranges: &[Range<usize>],
-) -> Vec<(Range<usize>, Range<usize>)> {
-    if left_ranges.is_empty() || right_ranges.is_empty() {
-        return vec![];
+/// Finds unchanged word (or token) positions among the ones given as
+/// arguments. The data between those words is ignored.
+fn collect_unchanged_words(
+    found_positions: &mut Vec<(WordPosition, WordPosition)>,
+    left: &DiffSource,
+    right: &DiffSource,
+) {
+    if left.ranges.is_empty() || right.ranges.is_empty() {
+        return;
     }
 
     // Prioritize LCS-based algorithm than leading/trailing matches
-    let result = unchanged_ranges_lcs(left, right, left_ranges, right_ranges);
-    if !result.is_empty() {
-        return result;
+    let old_len = found_positions.len();
+    collect_unchanged_words_lcs(found_positions, left, right);
+    if found_positions.len() != old_len {
+        return;
     }
 
     // Trim leading common ranges (i.e. grow previous unchanged region)
-    let common_leading_len = iter::zip(left_ranges, right_ranges)
-        .take_while(|&(l, r)| left[l.clone()] == right[r.clone()])
+    let common_leading_len = iter::zip(left.ranges, right.ranges)
+        .take_while(|&(l, r)| left.text[l.clone()] == right.text[r.clone()])
         .count();
-    let (left_leading_ranges, left_ranges) = left_ranges.split_at(common_leading_len);
-    let (right_leading_ranges, right_ranges) = right_ranges.split_at(common_leading_len);
+    let left_ranges = &left.ranges[common_leading_len..];
+    let right_ranges = &right.ranges[common_leading_len..];
 
     // Trim trailing common ranges (i.e. grow next unchanged region)
     let common_trailing_len = iter::zip(left_ranges.iter().rev(), right_ranges.iter().rev())
-        .take_while(|&(l, r)| left[l.clone()] == right[r.clone()])
+        .take_while(|&(l, r)| left.text[l.clone()] == right.text[r.clone()])
         .count();
-    let left_trailing_ranges = &left_ranges[(left_ranges.len() - common_trailing_len)..];
-    let right_trailing_ranges = &right_ranges[(right_ranges.len() - common_trailing_len)..];
 
-    itertools::chain(
-        iter::zip(
-            left_leading_ranges.iter().cloned(),
-            right_leading_ranges.iter().cloned(),
-        ),
-        iter::zip(
-            left_trailing_ranges.iter().cloned(),
-            right_trailing_ranges.iter().cloned(),
-        ),
-    )
-    .collect()
+    found_positions.extend(itertools::chain(
+        (0..common_leading_len).map(|i| {
+            (
+                left.map_to_global(WordPosition(i)),
+                right.map_to_global(WordPosition(i)),
+            )
+        }),
+        (1..=common_trailing_len).rev().map(|i| {
+            (
+                left.map_to_global(WordPosition(left.ranges.len() - i)),
+                right.map_to_global(WordPosition(right.ranges.len() - i)),
+            )
+        }),
+    ));
 }
 
-fn unchanged_ranges_lcs(
-    left: &[u8],
-    right: &[u8],
-    left_ranges: &[Range<usize>],
-    right_ranges: &[Range<usize>],
-) -> Vec<(Range<usize>, Range<usize>)> {
+fn collect_unchanged_words_lcs(
+    found_positions: &mut Vec<(WordPosition, WordPosition)>,
+    left: &DiffSource,
+    right: &DiffSource,
+) {
     let max_occurrences = 100;
-    let left_histogram = Histogram::calculate(left, left_ranges, max_occurrences);
-    if *left_histogram.count_to_words.keys().next().unwrap() > max_occurrences {
+    let left_histogram = Histogram::calculate(left, max_occurrences);
+    let left_count_to_entries = left_histogram.build_count_to_entries();
+    if *left_count_to_entries.keys().next().unwrap() > max_occurrences {
         // If there are very many occurrences of all words, then we just give up.
-        return vec![];
+        return;
     }
-    let right_histogram = Histogram::calculate(right, right_ranges, max_occurrences);
+    let right_histogram = Histogram::calculate(right, max_occurrences);
     // Look for words with few occurrences in `left` (could equally well have picked
     // `right`?). If any of them also occur in `right`, then we add the words to
     // the LCS.
-    let Some(uncommon_shared_words) = left_histogram
-        .count_to_words
-        .iter()
-        .map(|(left_count, left_words)| -> Vec<&[u8]> {
-            left_words
+    let Some(uncommon_shared_word_positions) =
+        left_count_to_entries.values().find_map(|left_entries| {
+            let mut both_positions = left_entries
                 .iter()
-                .copied()
-                .filter(|left_word| {
-                    let right_count = right_histogram
-                        .word_to_positions
-                        .get(left_word)
-                        .map_or(0, |right_positions| right_positions.len());
-                    *left_count == right_count
+                .filter_map(|&(word, left_positions)| {
+                    let right_positions = right_histogram.word_to_positions.get(word)?;
+                    (left_positions.len() == right_positions.len())
+                        .then_some((left_positions, right_positions))
                 })
-                .collect()
+                .peekable();
+            both_positions.peek().is_some().then_some(both_positions)
         })
-        .find(|words| !words.is_empty())
     else {
-        return vec![];
+        return;
     };
 
-    // [(index into left_ranges, word, occurrence #)]
-    let mut left_positions = vec![];
-    let mut right_positions = vec![];
-    for uncommon_shared_word in uncommon_shared_words {
-        let left_occurrences = &left_histogram.word_to_positions[uncommon_shared_word];
-        let right_occurrences = &right_histogram.word_to_positions[uncommon_shared_word];
-        assert_eq!(left_occurrences.len(), right_occurrences.len());
-        for occurrence in 0..left_occurrences.len() {
-            left_positions.push((
-                left_occurrences[occurrence],
-                uncommon_shared_word,
-                occurrence,
-            ));
-            right_positions.push((
-                right_occurrences[occurrence],
-                uncommon_shared_word,
-                occurrence,
-            ));
+    // [(index into ranges, serial to identify {word, occurrence #})]
+    let (mut left_positions, mut right_positions): (Vec<_>, Vec<_>) =
+        uncommon_shared_word_positions
+            .flat_map(|(lefts, rights)| iter::zip(lefts, rights))
+            .enumerate()
+            .map(|(serial, (&left_pos, &right_pos))| ((left_pos, serial), (right_pos, serial)))
+            .unzip();
+    left_positions.sort_unstable_by_key(|&(pos, _serial)| pos);
+    right_positions.sort_unstable_by_key(|&(pos, _serial)| pos);
+    let left_index_by_right_index: Vec<usize> = {
+        let mut left_index_map = vec![0; left_positions.len()];
+        for (i, &(_pos, serial)) in left_positions.iter().enumerate() {
+            left_index_map[serial] = i;
         }
-    }
-    left_positions.sort();
-    right_positions.sort();
-    let mut left_position_map = HashMap::new();
-    for (i, (_pos, word, occurrence)) in left_positions.iter().enumerate() {
-        left_position_map.insert((*word, *occurrence), i);
-    }
-    let mut left_index_by_right_index = vec![];
-    for (_pos, word, occurrence) in &right_positions {
-        left_index_by_right_index.push(*left_position_map.get(&(*word, *occurrence)).unwrap());
-    }
+        right_positions
+            .iter()
+            .map(|&(_pos, serial)| left_index_map[serial])
+            .collect()
+    };
 
     let lcs = find_lcs(&left_index_by_right_index);
 
-    // Produce output ranges, recursing into the modified areas between the elements
-    // in the LCS.
-    let mut result = vec![];
-    let mut previous_left_position = 0;
-    let mut previous_right_position = 0;
+    // Produce output word positions, recursing into the modified areas between
+    // the elements in the LCS.
+    let mut previous_left_position = WordPosition(0);
+    let mut previous_right_position = WordPosition(0);
     for (left_index, right_index) in lcs {
-        let left_position = left_positions[left_index].0;
-        let right_position = right_positions[right_index].0;
-        let skipped_left_positions = previous_left_position..left_position;
-        let skipped_right_positions = previous_right_position..right_position;
-        if !skipped_left_positions.is_empty() || !skipped_right_positions.is_empty() {
-            for unchanged_nested_range in unchanged_ranges(
-                left,
-                right,
-                &left_ranges[skipped_left_positions.clone()],
-                &right_ranges[skipped_right_positions.clone()],
-            ) {
-                result.push(unchanged_nested_range);
-            }
-        }
-        result.push((
-            left_ranges[left_position].clone(),
-            right_ranges[right_position].clone(),
+        let (left_position, _) = left_positions[left_index];
+        let (right_position, _) = right_positions[right_index];
+        collect_unchanged_words(
+            found_positions,
+            &left.narrowed(previous_left_position..left_position),
+            &right.narrowed(previous_right_position..right_position),
+        );
+        found_positions.push((
+            left.map_to_global(left_position),
+            right.map_to_global(right_position),
         ));
-        previous_left_position = left_position + 1;
-        previous_right_position = right_position + 1;
+        previous_left_position = WordPosition(left_position.0 + 1);
+        previous_right_position = WordPosition(right_position.0 + 1);
     }
     // Also recurse into range at end (after common ranges).
-    let skipped_left_positions = previous_left_position..left_ranges.len();
-    let skipped_right_positions = previous_right_position..right_ranges.len();
-    if !skipped_left_positions.is_empty() || !skipped_right_positions.is_empty() {
-        for unchanged_nested_range in unchanged_ranges(
-            left,
-            right,
-            &left_ranges[skipped_left_positions],
-            &right_ranges[skipped_right_positions],
-        ) {
-            result.push(unchanged_nested_range);
-        }
-    }
+    collect_unchanged_words(
+        found_positions,
+        &left.narrowed(previous_left_position..WordPosition(left.ranges.len())),
+        &right.narrowed(previous_right_position..WordPosition(right.ranges.len())),
+    );
+}
 
-    result
+/// Intersects two sorted sequences of `(base, other)` word positions by
+/// `base`. `base` positions should refer to the same source text.
+fn intersect_unchanged_words(
+    current_positions: Vec<(WordPosition, Vec<WordPosition>)>,
+    new_positions: &[(WordPosition, WordPosition)],
+) -> Vec<(WordPosition, Vec<WordPosition>)> {
+    itertools::merge_join_by(
+        current_positions,
+        new_positions,
+        |(cur_base_pos, _), (new_base_pos, _)| cur_base_pos.cmp(new_base_pos),
+    )
+    .filter_map(|entry| entry.both())
+    .map(|((base_pos, mut other_positions), &(_, new_other_pos))| {
+        other_positions.push(new_other_pos);
+        (base_pos, other_positions)
+    })
+    .collect()
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 struct UnchangedRange {
-    base_range: Range<usize>,
-    offsets: Vec<isize>,
+    base: Range<usize>,
+    others: Vec<Range<usize>>,
 }
 
 impl UnchangedRange {
-    fn start(&self, side: usize) -> usize {
-        self.base_range
-            .start
-            .wrapping_add(self.offsets[side] as usize)
-    }
-
-    fn end(&self, side: usize) -> usize {
-        self.base_range
-            .end
-            .wrapping_add(self.offsets[side] as usize)
+    /// Translates word positions to byte ranges in the source texts.
+    fn from_word_positions(
+        base_source: &DiffSource,
+        other_sources: &[DiffSource],
+        base_position: WordPosition,
+        other_positions: &[WordPosition],
+    ) -> Self {
+        assert_eq!(other_sources.len(), other_positions.len());
+        let base = base_source.range_at(base_position);
+        let others = iter::zip(other_sources, other_positions)
+            .map(|(source, pos)| source.range_at(*pos))
+            .collect();
+        UnchangedRange { base, others }
     }
 }
 
@@ -347,10 +371,10 @@ impl PartialOrd for UnchangedRange {
 
 impl Ord for UnchangedRange {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.base_range
+        self.base
             .start
-            .cmp(&other.base_range.start)
-            .then_with(|| self.base_range.end.cmp(&other.base_range.end))
+            .cmp(&other.base.start)
+            .then_with(|| self.base.end.cmp(&other.base.end))
     }
 }
 
@@ -360,55 +384,7 @@ impl Ord for UnchangedRange {
 pub struct Diff<'input> {
     base_input: &'input BStr,
     other_inputs: Vec<&'input BStr>,
-    // The key is a range in the base input. The value is the start of each non-base region
-    // relative to the base region's start. By making them relative, they don't need to change
-    // when the base range changes.
     unchanged_regions: Vec<UnchangedRange>,
-}
-
-/// Takes the current regions and intersects it with the new unchanged ranges
-/// from a 2-way diff. The result is a map of unchanged regions with one more
-/// offset in the map's values.
-fn intersect_regions(
-    current_ranges: Vec<UnchangedRange>,
-    new_unchanged_ranges: &[(Range<usize>, Range<usize>)],
-) -> Vec<UnchangedRange> {
-    let mut result = vec![];
-    let mut current_ranges_iter = current_ranges.into_iter().peekable();
-    for (new_base_range, other_range) in new_unchanged_ranges.iter() {
-        assert_eq!(new_base_range.len(), other_range.len());
-        while let Some(UnchangedRange {
-            base_range,
-            offsets,
-        }) = current_ranges_iter.peek()
-        {
-            // No need to look further if we're past the new range.
-            if base_range.start >= new_base_range.end {
-                break;
-            }
-            // Discard any current unchanged regions that don't match between the base and
-            // the new input.
-            if base_range.end <= new_base_range.start {
-                current_ranges_iter.next();
-                continue;
-            }
-            let new_start = max(base_range.start, new_base_range.start);
-            let new_end = min(base_range.end, new_base_range.end);
-            let mut new_offsets = offsets.clone();
-            new_offsets.push(other_range.start.wrapping_sub(new_base_range.start) as isize);
-            result.push(UnchangedRange {
-                base_range: new_start..new_end,
-                offsets: new_offsets,
-            });
-            if base_range.end >= new_base_range.end {
-                // Break without consuming the item; there may be other new ranges that overlap
-                // with it.
-                break;
-            }
-            current_ranges_iter.next();
-        }
-    }
-    result
 }
 
 impl<'input> Diff<'input> {
@@ -448,31 +424,72 @@ impl<'input> Diff<'input> {
         base_token_ranges: &[Range<usize>],
         other_token_ranges: &[Vec<Range<usize>>],
     ) -> Self {
-        // Look for unchanged regions. Initially consider the whole range of the base
-        // input as unchanged (compared to itself). Then diff each other input
-        // against the base. Intersect the previously found ranges with the
-        // unchanged ranges in the diff.
-        let mut unchanged_regions = vec![UnchangedRange {
-            base_range: 0..base_input.len(),
-            offsets: vec![],
-        }];
-        for (i, other_token_ranges) in other_token_ranges.iter().enumerate() {
-            let unchanged_diff_ranges = unchanged_ranges(
-                base_input,
-                other_inputs[i],
-                base_token_ranges,
-                other_token_ranges,
-            );
-            unchanged_regions = intersect_regions(unchanged_regions, &unchanged_diff_ranges);
-        }
-        // Add an empty range at the end to make life easier for hunks().
-        let offsets = other_inputs
-            .iter()
-            .map(|input| input.len().wrapping_sub(base_input.len()) as isize)
+        assert_eq!(other_inputs.len(), other_token_ranges.len());
+        let base_source = DiffSource::new(base_input, base_token_ranges);
+        let other_sources = iter::zip(&other_inputs, other_token_ranges)
+            .map(|(input, token_ranges)| DiffSource::new(input, token_ranges))
             .collect_vec();
+        let mut unchanged_regions = match &*other_sources {
+            // Consider the whole range of the base input as unchanged compared
+            // to itself.
+            [] => {
+                let whole_range = UnchangedRange {
+                    base: 0..base_source.text.len(),
+                    others: vec![],
+                };
+                vec![whole_range]
+            }
+            // Diff each other input against the base. Intersect the previously
+            // found ranges with the ranges in the diff.
+            [first_other_source, tail_other_sources @ ..] => {
+                let mut first_positions = Vec::new();
+                collect_unchanged_words(&mut first_positions, &base_source, first_other_source);
+                if tail_other_sources.is_empty() {
+                    first_positions
+                        .iter()
+                        .map(|&(base_pos, other_pos)| {
+                            UnchangedRange::from_word_positions(
+                                &base_source,
+                                &other_sources,
+                                base_pos,
+                                &[other_pos],
+                            )
+                        })
+                        .collect()
+                } else {
+                    let first_positions = first_positions
+                        .iter()
+                        .map(|&(base_pos, other_pos)| (base_pos, vec![other_pos]))
+                        .collect();
+                    let intersected_positions = tail_other_sources.iter().fold(
+                        first_positions,
+                        |current_positions, other_source| {
+                            let mut new_positions = Vec::new();
+                            collect_unchanged_words(&mut new_positions, &base_source, other_source);
+                            intersect_unchanged_words(current_positions, &new_positions)
+                        },
+                    );
+                    intersected_positions
+                        .iter()
+                        .map(|(base_pos, other_positions)| {
+                            UnchangedRange::from_word_positions(
+                                &base_source,
+                                &other_sources,
+                                *base_pos,
+                                other_positions,
+                            )
+                        })
+                        .collect()
+                }
+            }
+        };
+        // Add an empty range at the end to make life easier for hunks().
         unchanged_regions.push(UnchangedRange {
-            base_range: base_input.len()..base_input.len(),
-            offsets,
+            base: base_input.len()..base_input.len(),
+            others: other_inputs
+                .iter()
+                .map(|input| input.len()..input.len())
+                .collect(),
         });
 
         let mut diff = Self {
@@ -510,24 +527,36 @@ impl<'input> Diff<'input> {
     }
 
     pub fn hunks<'diff>(&'diff self) -> DiffHunkIterator<'diff, 'input> {
-        let previous_offsets = vec![0; self.other_inputs.len()];
         DiffHunkIterator {
             diff: self,
             previous: UnchangedRange {
-                base_range: 0..0,
-                offsets: previous_offsets,
+                base: 0..0,
+                others: vec![0..0; self.other_inputs.len()],
             },
             unchanged_emitted: true,
             unchanged_iter: self.unchanged_regions.iter(),
         }
     }
 
+    /// Returns contents between the `previous` ends and the `current` starts.
+    fn hunk_between<'a>(
+        &'a self,
+        previous: &'a UnchangedRange,
+        current: &'a UnchangedRange,
+    ) -> impl Iterator<Item = &'input BStr> + 'a {
+        itertools::chain(
+            iter::once(&self.base_input[previous.base.end..current.base.start]),
+            itertools::izip!(&self.other_inputs, &previous.others, &current.others)
+                .map(|(input, prev, cur)| &input[prev.end..cur.start]),
+        )
+    }
+
     /// Uses the given tokenizer to split the changed regions into smaller
     /// regions. Then tries to finds unchanged regions among them.
     pub fn refine_changed_regions(&mut self, tokenizer: impl Fn(&[u8]) -> Vec<Range<usize>>) {
         let mut previous = UnchangedRange {
-            base_range: 0..0,
-            offsets: vec![0; self.other_inputs.len()],
+            base: 0..0,
+            others: vec![0..0; self.other_inputs.len()],
         };
         let mut new_unchanged_ranges = vec![];
         for current in self.unchanged_regions.iter() {
@@ -535,30 +564,17 @@ impl<'input> Diff<'input> {
             // create a new Diff instance. Then adjust the start positions and
             // offsets to be valid in the context of the larger Diff instance
             // (`self`).
-            let mut slices =
-                vec![&self.base_input[previous.base_range.end..current.base_range.start]];
-            for i in 0..current.offsets.len() {
-                let changed_range = previous.end(i)..current.start(i);
-                slices.push(&self.other_inputs[i][changed_range]);
-            }
-
-            let refined_diff = Diff::for_tokenizer(slices, &tokenizer);
-
-            for UnchangedRange {
-                base_range,
-                offsets,
-            } in refined_diff.unchanged_regions
-            {
-                let new_base_start = base_range.start + previous.base_range.end;
-                let new_base_end = base_range.end + previous.base_range.end;
-                let offsets = offsets
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, offset)| offset + previous.offsets[i])
-                    .collect_vec();
+            let refined_diff =
+                Diff::for_tokenizer(self.hunk_between(&previous, current), &tokenizer);
+            for refined in &refined_diff.unchanged_regions {
+                let new_base_start = refined.base.start + previous.base.end;
+                let new_base_end = refined.base.end + previous.base.end;
+                let new_others = iter::zip(&refined.others, &previous.others)
+                    .map(|(refi, prev)| (refi.start + prev.end)..(refi.end + prev.end))
+                    .collect();
                 new_unchanged_ranges.push(UnchangedRange {
-                    base_range: new_base_start..new_base_end,
-                    offsets,
+                    base: new_base_start..new_base_end,
+                    others: new_others,
                 });
             }
             previous = current.clone();
@@ -577,12 +593,15 @@ impl<'input> Diff<'input> {
         let mut maybe_previous: Option<UnchangedRange> = None;
         for current in self.unchanged_regions.iter() {
             if let Some(previous) = maybe_previous {
-                if previous.base_range.end == current.base_range.start
-                    && previous.offsets == *current.offsets
+                if previous.base.end == current.base.start
+                    && iter::zip(&previous.others, &current.others)
+                        .all(|(prev, cur)| prev.end == cur.start)
                 {
                     maybe_previous = Some(UnchangedRange {
-                        base_range: previous.base_range.start..current.base_range.end,
-                        offsets: current.offsets.clone(),
+                        base: previous.base.start..current.base.end,
+                        others: iter::zip(&previous.others, &current.others)
+                            .map(|(prev, cur)| prev.start..cur.end)
+                            .collect(),
                     });
                     continue;
                 }
@@ -629,19 +648,17 @@ impl<'diff, 'input> Iterator for DiffHunkIterator<'diff, 'input> {
         loop {
             if !self.unchanged_emitted {
                 self.unchanged_emitted = true;
-                if !self.previous.base_range.is_empty() {
+                if !self.previous.base.is_empty() {
                     return Some(DiffHunk::Matching(
-                        &self.diff.base_input[self.previous.base_range.clone()],
+                        &self.diff.base_input[self.previous.base.clone()],
                     ));
                 }
             }
             if let Some(current) = self.unchanged_iter.next() {
-                let mut slices = vec![
-                    &self.diff.base_input[self.previous.base_range.end..current.base_range.start],
-                ];
-                for (i, input) in self.diff.other_inputs.iter().enumerate() {
-                    slices.push(&input[self.previous.end(i)..current.start(i)]);
-                }
+                let slices = self
+                    .diff
+                    .hunk_between(&self.previous, current)
+                    .collect_vec();
                 self.previous = current.clone();
                 self.unchanged_emitted = false;
                 if slices.iter().any(|slice| !slice.is_empty()) {
@@ -790,14 +807,24 @@ mod tests {
         );
     }
 
+    fn unchanged_ranges(
+        left: &DiffSource,
+        right: &DiffSource,
+    ) -> Vec<(Range<usize>, Range<usize>)> {
+        let mut positions = Vec::new();
+        collect_unchanged_words(&mut positions, left, right);
+        positions
+            .into_iter()
+            .map(|(left_pos, right_pos)| (left.range_at(left_pos), right.range_at(right_pos)))
+            .collect()
+    }
+
     #[test]
     fn test_unchanged_ranges_insert_in_middle() {
         assert_eq!(
             unchanged_ranges(
-                b"a b b c",
-                b"a b X b c",
-                &[0..1, 2..3, 4..5, 6..7],
-                &[0..1, 2..3, 4..5, 6..7, 8..9],
+                &DiffSource::new(b"a b b c", &[0..1, 2..3, 4..5, 6..7]),
+                &DiffSource::new(b"a b X b c", &[0..1, 2..3, 4..5, 6..7, 8..9]),
             ),
             vec![(0..1, 0..1), (2..3, 2..3), (4..5, 6..7), (6..7, 8..9)]
         );
@@ -809,37 +836,29 @@ mod tests {
         // "a"s in the second input. We no longer do.
         assert_eq!(
             unchanged_ranges(
-                b"a a a a",
-                b"a b a c",
-                &[0..1, 2..3, 4..5, 6..7],
-                &[0..1, 2..3, 4..5, 6..7],
+                &DiffSource::new(b"a a a a", &[0..1, 2..3, 4..5, 6..7]),
+                &DiffSource::new(b"a b a c", &[0..1, 2..3, 4..5, 6..7]),
             ),
             vec![(0..1, 0..1)]
         );
         assert_eq!(
             unchanged_ranges(
-                b"a a a a",
-                b"b a c a",
-                &[0..1, 2..3, 4..5, 6..7],
-                &[0..1, 2..3, 4..5, 6..7],
+                &DiffSource::new(b"a a a a", &[0..1, 2..3, 4..5, 6..7]),
+                &DiffSource::new(b"b a c a", &[0..1, 2..3, 4..5, 6..7]),
             ),
             vec![(6..7, 6..7)]
         );
         assert_eq!(
             unchanged_ranges(
-                b"a a a a",
-                b"b a a c",
-                &[0..1, 2..3, 4..5, 6..7],
-                &[0..1, 2..3, 4..5, 6..7],
+                &DiffSource::new(b"a a a a", &[0..1, 2..3, 4..5, 6..7]),
+                &DiffSource::new(b"b a a c", &[0..1, 2..3, 4..5, 6..7]),
             ),
             vec![]
         );
         assert_eq!(
             unchanged_ranges(
-                b"a a a a",
-                b"a b c a",
-                &[0..1, 2..3, 4..5, 6..7],
-                &[0..1, 2..3, 4..5, 6..7],
+                &DiffSource::new(b"a a a a", &[0..1, 2..3, 4..5, 6..7]),
+                &DiffSource::new(b"a b c a", &[0..1, 2..3, 4..5, 6..7]),
             ),
             vec![(0..1, 0..1), (6..7, 6..7)]
         );
@@ -851,119 +870,81 @@ mod tests {
         // "a"s in the second input. We no longer do.
         assert_eq!(
             unchanged_ranges(
-                b"a b a c",
-                b"a a a a",
-                &[0..1, 2..3, 4..5, 6..7],
-                &[0..1, 2..3, 4..5, 6..7],
+                &DiffSource::new(b"a b a c", &[0..1, 2..3, 4..5, 6..7]),
+                &DiffSource::new(b"a a a a", &[0..1, 2..3, 4..5, 6..7]),
             ),
             vec![(0..1, 0..1)]
         );
         assert_eq!(
             unchanged_ranges(
-                b"b a c a",
-                b"a a a a",
-                &[0..1, 2..3, 4..5, 6..7],
-                &[0..1, 2..3, 4..5, 6..7],
+                &DiffSource::new(b"b a c a", &[0..1, 2..3, 4..5, 6..7]),
+                &DiffSource::new(b"a a a a", &[0..1, 2..3, 4..5, 6..7]),
             ),
             vec![(6..7, 6..7)]
         );
         assert_eq!(
             unchanged_ranges(
-                b"b a a c",
-                b"a a a a",
-                &[0..1, 2..3, 4..5, 6..7],
-                &[0..1, 2..3, 4..5, 6..7],
+                &DiffSource::new(b"b a a c", &[0..1, 2..3, 4..5, 6..7]),
+                &DiffSource::new(b"a a a a", &[0..1, 2..3, 4..5, 6..7]),
             ),
             vec![]
         );
         assert_eq!(
             unchanged_ranges(
-                b"a b c a",
-                b"a a a a",
-                &[0..1, 2..3, 4..5, 6..7],
-                &[0..1, 2..3, 4..5, 6..7],
+                &DiffSource::new(b"a b c a", &[0..1, 2..3, 4..5, 6..7]),
+                &DiffSource::new(b"a a a a", &[0..1, 2..3, 4..5, 6..7]),
             ),
             vec![(0..1, 0..1), (6..7, 6..7)]
         );
     }
 
     #[test]
-    fn test_intersect_regions_existing_empty() {
-        let actual = intersect_regions(vec![], &[(20..25, 55..60)]);
-        let expected = vec![];
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn test_intersect_regions_new_ranges_within_existing() {
-        let actual = intersect_regions(
-            vec![UnchangedRange {
-                base_range: 20..70,
-                offsets: vec![3],
-            }],
-            &[(25..30, 35..40), (40..50, 40..50)],
+    fn test_unchanged_ranges_recursion_needed() {
+        // "|" matches first, then "b" matches within the left/right range.
+        assert_eq!(
+            unchanged_ranges(
+                &DiffSource::new(b"a b | b", &[0..1, 2..3, 4..5, 6..7]),
+                &DiffSource::new(b"b c d |", &[0..1, 2..3, 4..5, 6..7]),
+            ),
+            vec![(2..3, 0..1), (4..5, 6..7)]
         );
-        let expected = vec![
-            UnchangedRange {
-                base_range: 25..30,
-                offsets: vec![3, 10],
-            },
-            UnchangedRange {
-                base_range: 40..50,
-                offsets: vec![3, 0],
-            },
-        ];
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn test_intersect_regions_partial_overlap() {
-        let actual = intersect_regions(
-            vec![UnchangedRange {
-                base_range: 20..50,
-                offsets: vec![-3],
-            }],
-            &[(15..25, 5..15), (45..60, 55..70)],
+        assert_eq!(
+            unchanged_ranges(
+                &DiffSource::new(b"| b c d", &[0..1, 2..3, 4..5, 6..7]),
+                &DiffSource::new(b"b | a b", &[0..1, 2..3, 4..5, 6..7]),
+            ),
+            vec![(0..1, 2..3), (2..3, 6..7)]
         );
-        let expected = vec![
-            UnchangedRange {
-                base_range: 20..25,
-                offsets: vec![-3, -10],
-            },
-            UnchangedRange {
-                base_range: 45..50,
-                offsets: vec![-3, 10],
-            },
-        ];
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn test_intersect_regions_new_range_overlaps_multiple_existing() {
-        let actual = intersect_regions(
-            vec![
-                UnchangedRange {
-                    base_range: 20..50,
-                    offsets: vec![3, -8],
-                },
-                UnchangedRange {
-                    base_range: 70..80,
-                    offsets: vec![7, 1],
-                },
-            ],
-            &[(10..100, 5..95)],
+        // "|" matches first, then the middle range is trimmed.
+        assert_eq!(
+            unchanged_ranges(
+                &DiffSource::new(b"| b c |", &[0..1, 2..3, 4..5, 6..7]),
+                &DiffSource::new(b"| b b |", &[0..1, 2..3, 4..5, 6..7]),
+            ),
+            vec![(0..1, 0..1), (2..3, 2..3), (6..7, 6..7)]
         );
-        let expected = vec![
-            UnchangedRange {
-                base_range: 20..50,
-                offsets: vec![3, -8, -5],
-            },
-            UnchangedRange {
-                base_range: 70..80,
-                offsets: vec![7, 1, -5],
-            },
-        ];
-        assert_eq!(actual, expected);
+        assert_eq!(
+            unchanged_ranges(
+                &DiffSource::new(b"| c c |", &[0..1, 2..3, 4..5, 6..7]),
+                &DiffSource::new(b"| b c |", &[0..1, 2..3, 4..5, 6..7]),
+            ),
+            vec![(0..1, 0..1), (4..5, 4..5), (6..7, 6..7)]
+        );
+        // "|" matches first, then "a", then "b".
+        assert_eq!(
+            unchanged_ranges(
+                &DiffSource::new(b"a b c | a", &[0..1, 2..3, 4..5, 6..7, 8..9]),
+                &DiffSource::new(b"b a b |", &[0..1, 2..3, 4..5, 6..7]),
+            ),
+            vec![(0..1, 2..3), (2..3, 4..5), (6..7, 6..7)]
+        );
+        assert_eq!(
+            unchanged_ranges(
+                &DiffSource::new(b"| b a b", &[0..1, 2..3, 4..5, 6..7]),
+                &DiffSource::new(b"a | a b c", &[0..1, 2..3, 4..5, 6..7, 8..9]),
+            ),
+            vec![(0..1, 2..3), (4..5, 4..5), (6..7, 6..7)]
+        );
     }
 
     #[test]

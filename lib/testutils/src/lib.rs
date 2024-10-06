@@ -58,6 +58,7 @@ use jj_lib::tree_builder::TreeBuilder;
 use jj_lib::working_copy::SnapshotError;
 use jj_lib::working_copy::SnapshotOptions;
 use jj_lib::workspace::Workspace;
+use pollster::FutureExt;
 use tempfile::TempDir;
 
 use crate::test_backend::TestBackend;
@@ -121,6 +122,7 @@ pub fn user_settings() -> UserSettings {
 pub struct TestRepo {
     _temp_dir: TempDir,
     pub repo: Arc<ReadonlyRepo>,
+    repo_path: PathBuf,
 }
 
 #[derive(PartialEq, Eq, Copy, Clone)]
@@ -181,6 +183,7 @@ impl TestRepo {
         Self {
             _temp_dir: temp_dir,
             repo,
+            repo_path: repo_dir,
         }
     }
 
@@ -198,13 +201,16 @@ impl TestRepo {
         );
         factories
     }
+
+    pub fn repo_path(&self) -> &Path {
+        &self.repo_path
+    }
 }
 
 pub struct TestWorkspace {
     temp_dir: TempDir,
     pub workspace: Workspace,
     pub repo: Arc<ReadonlyRepo>,
-    settings: UserSettings,
 }
 
 impl TestWorkspace {
@@ -242,7 +248,6 @@ impl TestWorkspace {
             temp_dir,
             workspace,
             repo,
-            settings: settings.clone(),
         }
     }
 
@@ -250,23 +255,32 @@ impl TestWorkspace {
         self.temp_dir.path().join("repo").join("..")
     }
 
+    pub fn repo_path(&self) -> &Path {
+        self.workspace.repo_path()
+    }
+
     /// Snapshots the working copy and returns the tree. Updates the working
     /// copy state on disk, but does not update the working-copy commit (no
     /// new operation).
-    pub fn snapshot(&mut self) -> Result<MergedTree, SnapshotError> {
+    pub fn snapshot_with_options(
+        &mut self,
+        options: &SnapshotOptions,
+    ) -> Result<MergedTree, SnapshotError> {
         let mut locked_ws = self.workspace.start_working_copy_mutation().unwrap();
-        let tree_id = locked_ws.locked_wc().snapshot(SnapshotOptions {
-            max_new_file_size: self.settings.max_new_file_size().unwrap(),
-            ..SnapshotOptions::empty_for_test()
-        })?;
+        let tree_id = locked_ws.locked_wc().snapshot(options)?;
         // arbitrary operation id
         locked_ws.finish(self.repo.op_id().clone()).unwrap();
         Ok(self.repo.store().get_root_tree(&tree_id).unwrap())
     }
+
+    /// Like `snapshot_with_option()` but with default options
+    pub fn snapshot(&mut self) -> Result<MergedTree, SnapshotError> {
+        self.snapshot_with_options(&SnapshotOptions::empty_for_test())
+    }
 }
 
 pub fn load_repo_at_head(settings: &UserSettings, repo_path: &Path) -> Arc<ReadonlyRepo> {
-    RepoLoader::init(settings, repo_path, &TestRepo::default_store_factories())
+    RepoLoader::init_from_file_system(settings, repo_path, &TestRepo::default_store_factories())
         .unwrap()
         .load_at_head(settings)
         .unwrap()
@@ -297,7 +311,10 @@ pub fn read_file(store: &Store, path: &RepoPath, id: &FileId) -> Vec<u8> {
 }
 
 pub fn write_file(store: &Store, path: &RepoPath, contents: &str) -> FileId {
-    store.write_file(path, &mut contents.as_bytes()).unwrap()
+    store
+        .write_file(path, &mut contents.as_bytes())
+        .block_on()
+        .unwrap()
 }
 
 pub fn write_normal_file(
@@ -328,7 +345,11 @@ pub fn write_executable_file(tree_builder: &mut TreeBuilder, path: &RepoPath, co
 }
 
 pub fn write_symlink(tree_builder: &mut TreeBuilder, path: &RepoPath, target: &str) {
-    let id = tree_builder.store().write_symlink(path, target).unwrap();
+    let id = tree_builder
+        .store()
+        .write_symlink(path, target)
+        .block_on()
+        .unwrap();
     tree_builder.set(path.to_owned(), TreeValue::Symlink(id));
 }
 
@@ -387,7 +408,7 @@ pub fn commit_with_tree(store: &Arc<Store>, tree_id: MergedTreeId) -> Commit {
         committer: signature,
         secure_sig: None,
     };
-    store.write_commit(commit, None).unwrap()
+    store.write_commit(commit, None).block_on().unwrap()
 }
 
 pub fn dump_tree(store: &Arc<Store>, tree_id: &MergedTreeId) -> String {

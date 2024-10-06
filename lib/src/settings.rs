@@ -44,14 +44,14 @@ pub struct RepoSettings {
 
 #[derive(Debug, Clone)]
 pub struct GitSettings {
-    pub auto_local_branch: bool,
+    pub auto_local_bookmark: bool,
     pub abandon_unreachable_commits: bool,
 }
 
 impl GitSettings {
     pub fn from_config(config: &config::Config) -> Self {
         GitSettings {
-            auto_local_branch: config.get_bool("git.auto-local-branch").unwrap_or(false),
+            auto_local_bookmark: config.get_bool("git.auto-local-branch").unwrap_or(false),
             abandon_unreachable_commits: config
                 .get_bool("git.abandon-unreachable-commits")
                 .unwrap_or(true),
@@ -62,7 +62,7 @@ impl GitSettings {
 impl Default for GitSettings {
     fn default() -> Self {
         GitSettings {
-            auto_local_branch: false,
+            auto_local_bookmark: false,
             abandon_unreachable_commits: true,
         }
     }
@@ -190,10 +190,14 @@ impl UserSettings {
             .unwrap_or_else(|_| whoami::username())
     }
 
-    pub fn push_branch_prefix(&self) -> String {
+    pub fn push_bookmark_prefix(&self) -> String {
         self.config
-            .get_string("git.push-branch-prefix")
+            .get_string("git.push-bookmark-prefix")
             .unwrap_or_else(|_| "push-".to_string())
+    }
+
+    pub fn push_branch_prefix(&self) -> Option<String> {
+        self.config.get_string("git.push-branch-prefix").ok()
     }
 
     pub fn default_description(&self) -> String {
@@ -207,7 +211,7 @@ impl UserSettings {
     }
 
     pub fn signature(&self) -> Signature {
-        let timestamp = self.timestamp.clone().unwrap_or_else(Timestamp::now);
+        let timestamp = self.timestamp.unwrap_or_else(Timestamp::now);
         Signature {
             name: self.user_name(),
             email: self.user_email(),
@@ -229,28 +233,6 @@ impl UserSettings {
         GitSettings::from_config(&self.config)
     }
 
-    pub fn graph_style(&self) -> String {
-        self.config
-            .get_string("ui.graph.style")
-            .unwrap_or_else(|_| "curved".to_string())
-    }
-
-    pub fn commit_node_template(&self) -> String {
-        self.node_template_for_key(
-            "templates.log_node",
-            "builtin_log_node",
-            "builtin_log_node_ascii",
-        )
-    }
-
-    pub fn op_node_template(&self) -> String {
-        self.node_template_for_key(
-            "templates.op_log_node",
-            "builtin_op_log_node",
-            "builtin_op_log_node_ascii",
-        )
-    }
-
     pub fn max_new_file_size(&self) -> Result<u64, config::ConfigError> {
         let cfg = self
             .config
@@ -267,19 +249,12 @@ impl UserSettings {
     // separate from sign_settings as those two are needed in pretty different
     // places
     pub fn signing_backend(&self) -> Option<String> {
-        self.config.get_string("signing.backend").ok()
+        let backend = self.config.get_string("signing.backend").ok()?;
+        (backend.as_str() != "none").then_some(backend)
     }
 
     pub fn sign_settings(&self) -> SignSettings {
         SignSettings::from_settings(self)
-    }
-
-    fn node_template_for_key(&self, key: &str, fallback: &str, ascii_fallback: &str) -> String {
-        let symbol = self.config.get_string(key);
-        match self.graph_style().as_str() {
-            "ascii" | "ascii-large" => symbol.unwrap_or_else(|_| ascii_fallback.to_owned()),
-            _ => symbol.unwrap_or_else(|_| fallback.to_owned()),
-        }
     }
 }
 

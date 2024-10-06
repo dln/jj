@@ -47,6 +47,7 @@ use jj_lib::working_copy::SnapshotOptions;
 use jj_lib::workspace::default_working_copy_factories;
 use jj_lib::workspace::LockedWorkspace;
 use jj_lib::workspace::Workspace;
+use pollster::FutureExt;
 use test_case::test_case;
 use testutils::commit_with_tree;
 use testutils::create_tree;
@@ -95,7 +96,7 @@ fn test_checkout_file_transitions(backend: TestRepoBackend) {
     let mut test_workspace = TestWorkspace::init_with_backend(&settings, backend);
     let repo = &test_workspace.repo;
     let store = repo.store().clone();
-    let workspace_root = test_workspace.workspace.workspace_root().clone();
+    let workspace_root = test_workspace.workspace.workspace_root().to_owned();
 
     #[derive(Debug, PartialEq, Eq, Clone, Copy)]
     enum Kind {
@@ -189,7 +190,7 @@ fn test_checkout_file_transitions(backend: TestRepoBackend) {
                 )
             }
             Kind::Symlink => {
-                let id = store.write_symlink(path, "target").unwrap();
+                let id = store.write_symlink(path, "target").block_on().unwrap();
                 Merge::normal(TreeValue::Symlink(id))
             }
             Kind::Tree => {
@@ -204,7 +205,7 @@ fn test_checkout_file_transitions(backend: TestRepoBackend) {
             }
             Kind::GitSubmodule => {
                 let mut tx = repo.start_transaction(settings);
-                let id = write_random_commit(tx.mut_repo(), settings).id().clone();
+                let id = write_random_commit(tx.repo_mut(), settings).id().clone();
                 tx.commit("test");
                 Merge::normal(TreeValue::GitSubmodule(id))
             }
@@ -413,7 +414,7 @@ fn test_tree_builder_file_directory_transition() {
     let repo = &test_workspace.repo;
     let store = repo.store();
     let mut ws = test_workspace.workspace;
-    let workspace_root = ws.workspace_root().clone();
+    let workspace_root = ws.workspace_root().to_owned();
     let mut check_out_tree = |tree_id: &TreeId| {
         let tree = repo.store().get_tree(RepoPath::root(), tree_id).unwrap();
         let commit = commit_with_tree(repo.store(), MergedTreeId::Legacy(tree.id().clone()));
@@ -456,7 +457,7 @@ fn test_conflicting_changes_on_disk() {
     let test_workspace = TestWorkspace::init(&settings);
     let repo = &test_workspace.repo;
     let mut ws = test_workspace.workspace;
-    let workspace_root = ws.workspace_root().clone();
+    let workspace_root = ws.workspace_root().to_owned();
 
     // file on disk conflicts with file in target commit
     let file_file_path = RepoPath::from_internal_string("file-file");
@@ -501,7 +502,7 @@ fn test_conflicting_changes_on_disk() {
             updated_files: 0,
             added_files: 3,
             removed_files: 0,
-            skipped_files: 3,
+            skipped_files: 3
         }
     );
 
@@ -525,7 +526,7 @@ fn test_reset() {
     let mut test_workspace = TestWorkspace::init(&settings);
     let repo = &test_workspace.repo;
     let op_id = repo.op_id().clone();
-    let workspace_root = test_workspace.workspace.workspace_root().clone();
+    let workspace_root = test_workspace.workspace.workspace_root().to_owned();
 
     let ignored_path = RepoPath::from_internal_string("ignored");
     let gitignore_path = RepoPath::from_internal_string(".gitignore");
@@ -580,7 +581,7 @@ fn test_checkout_discard() {
     let settings = testutils::user_settings();
     let mut test_workspace = TestWorkspace::init(&settings);
     let repo = test_workspace.repo.clone();
-    let workspace_root = test_workspace.workspace.workspace_root().clone();
+    let workspace_root = test_workspace.workspace.workspace_root().to_owned();
 
     let file1_path = RepoPath::from_internal_string("file1");
     let file2_path = RepoPath::from_internal_string("file2");
@@ -630,7 +631,7 @@ fn test_materialize_snapshot_conflicted_files() {
     let mut test_workspace = TestWorkspace::init(&settings);
     let repo = &test_workspace.repo.clone();
     let ws = &mut test_workspace.workspace;
-    let workspace_root = ws.workspace_root().clone();
+    let workspace_root = ws.workspace_root().to_owned();
 
     // Create tree with 3-sided conflict, with file1 and file2 having different
     // conflicts:
@@ -657,7 +658,7 @@ fn test_materialize_snapshot_conflicted_files() {
             updated_files: 0,
             added_files: 2,
             removed_files: 0,
-            skipped_files: 0,
+            skipped_files: 0
         }
     );
 
@@ -743,7 +744,7 @@ fn test_snapshot_racy_timestamps() {
     let settings = testutils::user_settings();
     let mut test_workspace = TestWorkspace::init(&settings);
     let repo = &test_workspace.repo;
-    let workspace_root = test_workspace.workspace.workspace_root().clone();
+    let workspace_root = test_workspace.workspace.workspace_root().to_owned();
 
     let file_path = workspace_root.join("file");
     let mut previous_tree_id = repo.store().empty_merged_tree_id();
@@ -755,7 +756,7 @@ fn test_snapshot_racy_timestamps() {
             .unwrap();
         let new_tree_id = locked_ws
             .locked_wc()
-            .snapshot(SnapshotOptions::empty_for_test())
+            .snapshot(&SnapshotOptions::empty_for_test())
             .unwrap();
         assert_ne!(new_tree_id, previous_tree_id);
         previous_tree_id = new_tree_id;
@@ -769,7 +770,7 @@ fn test_snapshot_special_file() {
     // disk.
     let settings = testutils::user_settings();
     let mut test_workspace = TestWorkspace::init(&settings);
-    let workspace_root = test_workspace.workspace.workspace_root().clone();
+    let workspace_root = test_workspace.workspace.workspace_root().to_owned();
     let store = test_workspace.repo.store();
     let ws = &mut test_workspace.workspace;
 
@@ -789,7 +790,7 @@ fn test_snapshot_special_file() {
     let mut locked_ws = ws.start_working_copy_mutation().unwrap();
     let tree_id = locked_ws
         .locked_wc()
-        .snapshot(SnapshotOptions::empty_for_test())
+        .snapshot(&SnapshotOptions::empty_for_test())
         .unwrap();
     locked_ws.finish(OperationId::from_hex("abc123")).unwrap();
     let tree = store.get_root_tree(&tree_id).unwrap();
@@ -827,7 +828,7 @@ fn test_gitignores() {
 
     let settings = testutils::user_settings();
     let mut test_workspace = TestWorkspace::init(&settings);
-    let workspace_root = test_workspace.workspace.workspace_root().clone();
+    let workspace_root = test_workspace.workspace.workspace_root().to_owned();
 
     let gitignore_path = RepoPath::from_internal_string(".gitignore");
     let added_path = RepoPath::from_internal_string("added");
@@ -888,7 +889,7 @@ fn test_gitignores_in_ignored_dir() {
     let settings = testutils::user_settings();
     let mut test_workspace = TestWorkspace::init(&settings);
     let op_id = test_workspace.repo.op_id().clone();
-    let workspace_root = test_workspace.workspace.workspace_root().clone();
+    let workspace_root = test_workspace.workspace.workspace_root().to_owned();
 
     let gitignore_path = RepoPath::from_internal_string(".gitignore");
     let nested_gitignore_path = RepoPath::from_internal_string("ignored/.gitignore");
@@ -933,7 +934,7 @@ fn test_gitignores_checkout_never_overwrites_ignored() {
     let settings = testutils::user_settings();
     let mut test_workspace = TestWorkspace::init(&settings);
     let repo = &test_workspace.repo;
-    let workspace_root = test_workspace.workspace.workspace_root().clone();
+    let workspace_root = test_workspace.workspace.workspace_root().to_owned();
 
     // Write an ignored file called "modified" to disk
     let gitignore_path = RepoPath::from_internal_string(".gitignore");
@@ -964,7 +965,7 @@ fn test_gitignores_ignored_directory_already_tracked() {
 
     let settings = testutils::user_settings();
     let mut test_workspace = TestWorkspace::init(&settings);
-    let workspace_root = test_workspace.workspace.workspace_root().clone();
+    let workspace_root = test_workspace.workspace.workspace_root().to_owned();
     let repo = test_workspace.repo.clone();
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1061,7 +1062,7 @@ fn test_dotgit_ignored() {
     let settings = testutils::user_settings();
     let mut test_workspace = TestWorkspace::init(&settings);
     let store = test_workspace.repo.store().clone();
-    let workspace_root = test_workspace.workspace.workspace_root().clone();
+    let workspace_root = test_workspace.workspace.workspace_root().to_owned();
 
     // Test with a .git/ directory (with a file in, since we don't write empty
     // trees)
@@ -1095,7 +1096,7 @@ fn test_gitsubmodule() {
     let mut test_workspace = TestWorkspace::init_with_backend(&settings, TestRepoBackend::Git);
     let repo = &test_workspace.repo;
     let store = repo.store().clone();
-    let workspace_root = test_workspace.workspace.workspace_root().clone();
+    let workspace_root = test_workspace.workspace.workspace_root().to_owned();
 
     let mut tree_builder = store.tree_builder(store.empty_tree_id().clone());
 
@@ -1112,7 +1113,7 @@ fn test_gitsubmodule() {
     );
 
     let mut tx = repo.start_transaction(&settings);
-    let submodule_id = write_random_commit(tx.mut_repo(), &settings).id().clone();
+    let submodule_id = write_random_commit(tx.repo_mut(), &settings).id().clone();
     tx.commit("create submodule commit");
 
     tree_builder.set(
@@ -1152,7 +1153,7 @@ fn test_existing_directory_symlink() {
     let settings = testutils::user_settings();
     let mut test_workspace = TestWorkspace::init(&settings);
     let repo = &test_workspace.repo;
-    let workspace_root = test_workspace.workspace.workspace_root().clone();
+    let workspace_root = test_workspace.workspace.workspace_root().to_owned();
 
     // Creates a symlink in working directory, and a tree that will add a file under
     // the symlinked directory.
@@ -1179,7 +1180,7 @@ fn test_fsmonitor() {
     let settings = testutils::user_settings();
     let mut test_workspace = TestWorkspace::init(&settings);
     let repo = &test_workspace.repo;
-    let workspace_root = test_workspace.workspace.workspace_root().clone();
+    let workspace_root = test_workspace.workspace.workspace_root().to_owned();
 
     let ws = &mut test_workspace.workspace;
     assert_eq!(
@@ -1203,7 +1204,7 @@ fn test_fsmonitor() {
         let fs_paths = paths.iter().map(|p| p.to_fs_path(Path::new(""))).collect();
         locked_ws
             .locked_wc()
-            .snapshot(SnapshotOptions {
+            .snapshot(&SnapshotOptions {
                 fsmonitor_settings: FsmonitorSettings::Test {
                     changed_files: fs_paths,
                 },
@@ -1270,31 +1271,28 @@ fn test_fsmonitor() {
 
 #[test]
 fn test_snapshot_max_new_file_size() {
-    let settings = UserSettings::from_config(
-        testutils::base_config()
-            .add_source(config::File::from_str(
-                "snapshot.max-new-file-size = \"1KiB\"",
-                config::FileFormat::Toml,
-            ))
-            .build()
-            .unwrap(),
-    );
+    let settings = testutils::user_settings();
     let mut test_workspace = TestWorkspace::init(&settings);
-    let workspace_root = test_workspace.workspace.workspace_root().clone();
+    let workspace_root = test_workspace.workspace.workspace_root().to_owned();
     let small_path = RepoPath::from_internal_string("small");
     let large_path = RepoPath::from_internal_string("large");
-    std::fs::write(small_path.to_fs_path(&workspace_root), vec![0; 1024]).unwrap();
+    let limit: usize = 1024;
+    std::fs::write(small_path.to_fs_path(&workspace_root), vec![0; limit]).unwrap();
+    let options = SnapshotOptions {
+        max_new_file_size: limit as u64,
+        ..SnapshotOptions::empty_for_test()
+    };
     test_workspace
-        .snapshot()
+        .snapshot_with_options(&options)
         .expect("files exactly matching the size limit should succeed");
-    std::fs::write(small_path.to_fs_path(&workspace_root), vec![0; 1024 + 1]).unwrap();
+    std::fs::write(small_path.to_fs_path(&workspace_root), vec![0; limit + 1]).unwrap();
     test_workspace
-        .snapshot()
+        .snapshot_with_options(&options)
         .expect("existing files may grow beyond the size limit");
     // A new file of 1KiB + 1 bytes should fail
-    std::fs::write(large_path.to_fs_path(&workspace_root), vec![0; 1024 + 1]).unwrap();
+    std::fs::write(large_path.to_fs_path(&workspace_root), vec![0; limit + 1]).unwrap();
     let err = test_workspace
-        .snapshot()
+        .snapshot_with_options(&options)
         .expect_err("new files beyond the size limit should fail");
     assert!(
         matches!(err, SnapshotError::NewFileTooLarge { .. }),

@@ -36,7 +36,7 @@ fn test_log_with_no_template() {
     let repo_path = test_env.env_root().join("repo");
 
     let stderr = test_env.jj_cmd_cli_error(&repo_path, &["log", "-T"]);
-    insta::assert_snapshot!(stderr, @r###"
+    insta::assert_snapshot!(stderr, @r#"
     error: a value is required for '--template <TEMPLATE>' but none was supplied
 
     For more information, try '--help'.
@@ -55,7 +55,7 @@ fn test_log_with_no_template() {
     - description_placeholder
     - email_placeholder
     - name_placeholder
-    "###);
+    "#);
 }
 
 #[test]
@@ -351,7 +351,7 @@ fn test_log_shortest_accessors() {
 
     std::fs::write(repo_path.join("file"), "original file\n").unwrap();
     test_env.jj_cmd_ok(&repo_path, &["describe", "-m", "initial"]);
-    test_env.jj_cmd_ok(&repo_path, &["branch", "c", "original"]);
+    test_env.jj_cmd_ok(&repo_path, &["bookmark", "c", "original"]);
     insta::assert_snapshot!(
         render("original", r#"format_id(change_id) ++ " " ++ format_id(commit_id)"#),
         @"q[pvuntsmwlqt] e[0e22b9fae75]");
@@ -456,7 +456,7 @@ fn test_log_bad_short_prefixes() {
       | ^---
       |
       = expected <identifier> or <expression>
-    For help, see https://github.com/martinvonz/jj/blob/main/docs/config.md.
+    For help, see https://martinvonz.github.io/jj/latest/config/.
     "###);
 }
 
@@ -474,7 +474,7 @@ fn test_log_prefix_highlight_styled() {
               change_id.shortest({0}),
               description.first_line(),
               commit_id.shortest({0}),
-              branches,
+              bookmarks,
             )
             "###,
             len.map(|l| l.to_string()).unwrap_or_default()
@@ -483,7 +483,7 @@ fn test_log_prefix_highlight_styled() {
 
     std::fs::write(repo_path.join("file"), "original file\n").unwrap();
     test_env.jj_cmd_ok(&repo_path, &["describe", "-m", "initial"]);
-    test_env.jj_cmd_ok(&repo_path, &["branch", "c", "original"]);
+    test_env.jj_cmd_ok(&repo_path, &["bookmark", "c", "original"]);
     insta::assert_snapshot!(
         test_env.jj_cmd_success(&repo_path, &["log", "-r", "original", "-T", &prefix_format(Some(12))]),
         @r###"
@@ -611,13 +611,13 @@ fn test_log_prefix_highlight_counts_hidden_commits() {
       format_id(change_id),
       description.first_line(),
       format_id(commit_id),
-      branches,
+      bookmarks,
     )
     "#;
 
     std::fs::write(repo_path.join("file"), "original file\n").unwrap();
     test_env.jj_cmd_ok(&repo_path, &["describe", "-m", "initial"]);
-    test_env.jj_cmd_ok(&repo_path, &["branch", "c", "original"]);
+    test_env.jj_cmd_ok(&repo_path, &["bookmark", "c", "original"]);
     insta::assert_snapshot!(
         test_env.jj_cmd_success(&repo_path, &["log", "-r", "all()", "-T", prefix_format]),
         @r###"
@@ -873,7 +873,7 @@ fn test_log_filtered_by_path() {
     ~
     "###);
 
-    // file() revset doesn't filter the diff.
+    // files() revset doesn't filter the diff.
     let stdout = test_env.jj_cmd_success(
         &repo_path,
         &[
@@ -881,7 +881,7 @@ fn test_log_filtered_by_path() {
             "-T",
             "description",
             "-s",
-            "-rfile(file2)",
+            "-rfiles(file2)",
             "--no-graph",
         ],
     );
@@ -1097,21 +1097,21 @@ fn test_multiple_revsets() {
     let repo_path = test_env.env_root().join("repo");
     for name in ["foo", "bar", "baz"] {
         test_env.jj_cmd_ok(&repo_path, &["new", "-m", name]);
-        test_env.jj_cmd_ok(&repo_path, &["branch", "create", name]);
+        test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", name]);
     }
 
     // Default revset should be overridden if one or more -r options are specified.
     test_env.add_config(r#"revsets.log = "root()""#);
 
     insta::assert_snapshot!(
-        test_env.jj_cmd_success(&repo_path, &["log", "-T", "branches", "-rfoo"]),
+        test_env.jj_cmd_success(&repo_path, &["log", "-T", "bookmarks", "-rfoo"]),
         @r###"
     ○  foo
     │
     ~
     "###);
     insta::assert_snapshot!(
-        test_env.jj_cmd_success(&repo_path, &["log", "-T", "branches", "-rfoo", "-rbar", "-rbaz"]),
+        test_env.jj_cmd_success(&repo_path, &["log", "-T", "bookmarks", "-rfoo", "-rbar", "-rbaz"]),
         @r###"
     @  baz
     ○  bar
@@ -1120,7 +1120,7 @@ fn test_multiple_revsets() {
     ~
     "###);
     insta::assert_snapshot!(
-        test_env.jj_cmd_success(&repo_path, &["log", "-T", "branches", "-rfoo", "-rfoo"]),
+        test_env.jj_cmd_success(&repo_path, &["log", "-T", "bookmarks", "-rfoo", "-rfoo"]),
         @r###"
     ○  foo
     │
@@ -1184,15 +1184,21 @@ fn test_graph_styles() {
     let repo_path = test_env.env_root().join("repo");
 
     test_env.jj_cmd_ok(&repo_path, &["commit", "-m", "initial"]);
-    test_env.jj_cmd_ok(&repo_path, &["commit", "-m", "main branch 1"]);
-    test_env.jj_cmd_ok(&repo_path, &["describe", "-m", "main branch 2"]);
+    test_env.jj_cmd_ok(&repo_path, &["commit", "-m", "main bookmark 1"]);
+    test_env.jj_cmd_ok(&repo_path, &["describe", "-m", "main bookmark 2"]);
     test_env.jj_cmd_ok(
         &repo_path,
-        &["new", "-m", "side branch\nwith\nlong\ndescription"],
+        &["new", "-m", "side bookmark\nwith\nlong\ndescription"],
     );
     test_env.jj_cmd_ok(
         &repo_path,
-        &["new", "-m", "merge", r#"description("main branch 1")"#, "@"],
+        &[
+            "new",
+            "-m",
+            "merge",
+            r#"description("main bookmark 1")"#,
+            "@",
+        ],
     );
 
     // Default (curved) style
@@ -1200,13 +1206,13 @@ fn test_graph_styles() {
     insta::assert_snapshot!(stdout, @r###"
     @    merge
     ├─╮
-    │ ○  side branch
+    │ ○  side bookmark
     │ │  with
     │ │  long
     │ │  description
-    │ ○  main branch 2
+    │ ○  main bookmark 2
     ├─╯
-    ○  main branch 1
+    ○  main bookmark 1
     ○  initial
     ◆
     "###);
@@ -1217,13 +1223,13 @@ fn test_graph_styles() {
     insta::assert_snapshot!(stdout, @r###"
     @    merge
     |\
-    | o  side branch
+    | o  side bookmark
     | |  with
     | |  long
     | |  description
-    | o  main branch 2
+    | o  main bookmark 2
     |/
-    o  main branch 1
+    o  main bookmark 1
     o  initial
     +
     "###);
@@ -1235,14 +1241,14 @@ fn test_graph_styles() {
     @     merge
     |\
     | \
-    |  o  side branch
+    |  o  side bookmark
     |  |  with
     |  |  long
     |  |  description
-    |  o  main branch 2
+    |  o  main bookmark 2
     | /
     |/
-    o  main branch 1
+    o  main bookmark 1
     o  initial
     +
     "###);
@@ -1253,13 +1259,13 @@ fn test_graph_styles() {
     insta::assert_snapshot!(stdout, @r###"
     @    merge
     ├─╮
-    │ ○  side branch
+    │ ○  side bookmark
     │ │  with
     │ │  long
     │ │  description
-    │ ○  main branch 2
+    │ ○  main bookmark 2
     ├─╯
-    ○  main branch 1
+    ○  main bookmark 1
     ○  initial
     ◆
     "###);
@@ -1270,15 +1276,25 @@ fn test_graph_styles() {
     insta::assert_snapshot!(stdout, @r###"
     @    merge
     ├─┐
-    │ ○  side branch
+    │ ○  side bookmark
     │ │  with
     │ │  long
     │ │  description
-    │ ○  main branch 2
+    │ ○  main bookmark 2
     ├─┘
-    ○  main branch 1
+    ○  main bookmark 1
     ○  initial
     ◆
+    "###);
+
+    // Invalid style name
+    let stderr = test_env.jj_cmd_failure(
+        &repo_path,
+        &["log", "--config-toml=ui.graph.style='unknown'"],
+    );
+    insta::assert_snapshot!(stderr, @r###"
+    Config error: enum GraphStyle does not have variant constructor unknown
+    For help, see https://martinvonz.github.io/jj/latest/config/.
     "###);
 }
 
@@ -1301,36 +1317,36 @@ fn test_log_word_wrap() {
         get_stdout_string(&assert)
     };
 
-    test_env.jj_cmd_ok(&repo_path, &["commit", "-m", "main branch 1"]);
-    test_env.jj_cmd_ok(&repo_path, &["describe", "-m", "main branch 2"]);
+    test_env.jj_cmd_ok(&repo_path, &["commit", "-m", "main bookmark 1"]);
+    test_env.jj_cmd_ok(&repo_path, &["describe", "-m", "main bookmark 2"]);
     test_env.jj_cmd_ok(&repo_path, &["new", "-m", "side"]);
     test_env.jj_cmd_ok(&repo_path, &["new", "-m", "merge", "@--", "@"]);
 
     // ui.log-word-wrap option applies to both graph/no-graph outputs
     insta::assert_snapshot!(render(&["log", "-r@"], 40, false), @r###"
-    @  mzvwutvl test.user@example.com 2001-02-03 08:05:11 044c0400
+    @  mzvwutvl test.user@example.com 2001-02-03 08:05:11 f3efbd00
     │  (empty) merge
     ~
     "###);
     insta::assert_snapshot!(render(&["log", "-r@"], 40, true), @r###"
     @  mzvwutvl test.user@example.com
-    │  2001-02-03 08:05:11 044c0400
+    │  2001-02-03 08:05:11 f3efbd00
     ~  (empty) merge
     "###);
     insta::assert_snapshot!(render(&["log", "--no-graph", "-r@"], 40, false), @r###"
-    mzvwutvl test.user@example.com 2001-02-03 08:05:11 044c0400
+    mzvwutvl test.user@example.com 2001-02-03 08:05:11 f3efbd00
     (empty) merge
     "###);
     insta::assert_snapshot!(render(&["log", "--no-graph", "-r@"], 40, true), @r###"
     mzvwutvl test.user@example.com
-    2001-02-03 08:05:11 044c0400
+    2001-02-03 08:05:11 f3efbd00
     (empty) merge
     "###);
 
     // Color labels should be preserved
     insta::assert_snapshot!(render(&["log", "-r@", "--color=always"], 40, true), @r###"
     [1m[38;5;2m@[0m  [1m[38;5;13mm[38;5;8mzvwutvl[39m [38;5;3mtest.user@example.com[39m[0m
-    │  [1m[38;5;14m2001-02-03 08:05:11[39m [38;5;12m04[38;5;8m4c0400[39m[0m
+    │  [1m[38;5;14m2001-02-03 08:05:11[39m [38;5;12mf[38;5;8m3efbd00[39m[0m
     ~  [1m[38;5;10m(empty)[39m merge[0m
     "###);
 
@@ -1363,7 +1379,7 @@ fn test_log_word_wrap() {
     │  test.user@example.com
     ~  2001-02-03
        08:05:11
-       044c0400
+       f3efbd00
        (empty)
        merge
     "###);
@@ -1372,7 +1388,7 @@ fn test_log_word_wrap() {
     │  test.user@example.com
     ~  2001-02-03
        08:05:11
-       044c0400
+       f3efbd00
        (empty)
        merge
     "###);
@@ -1433,13 +1449,19 @@ fn test_elided() {
     let repo_path = test_env.env_root().join("repo");
 
     test_env.jj_cmd_ok(&repo_path, &["describe", "-m", "initial"]);
-    test_env.jj_cmd_ok(&repo_path, &["new", "-m", "main branch 1"]);
-    test_env.jj_cmd_ok(&repo_path, &["new", "-m", "main branch 2"]);
-    test_env.jj_cmd_ok(&repo_path, &["new", "@--", "-m", "side branch 1"]);
-    test_env.jj_cmd_ok(&repo_path, &["new", "-m", "side branch 2"]);
+    test_env.jj_cmd_ok(&repo_path, &["new", "-m", "main bookmark 1"]);
+    test_env.jj_cmd_ok(&repo_path, &["new", "-m", "main bookmark 2"]);
+    test_env.jj_cmd_ok(&repo_path, &["new", "@--", "-m", "side bookmark 1"]);
+    test_env.jj_cmd_ok(&repo_path, &["new", "-m", "side bookmark 2"]);
     test_env.jj_cmd_ok(
         &repo_path,
-        &["new", "-m", "merge", r#"description("main branch 2")"#, "@"],
+        &[
+            "new",
+            "-m",
+            "merge",
+            r#"description("main bookmark 2")"#,
+            "@",
+        ],
     );
 
     let get_log = |revs: &str| -> String {
@@ -1453,13 +1475,13 @@ fn test_elided() {
     insta::assert_snapshot!(get_log("::"), @r###"
     @    merge
     ├─╮
-    │ ○  side branch 2
+    │ ○  side bookmark 2
     │ │
-    │ ○  side branch 1
+    │ ○  side bookmark 1
     │ │
-    ○ │  main branch 2
+    ○ │  main bookmark 2
     │ │
-    ○ │  main branch 1
+    ○ │  main bookmark 1
     ├─╯
     ○  initial
     │
@@ -1472,9 +1494,9 @@ fn test_elided() {
     insta::assert_snapshot!(get_log("@ | @- | description(initial)"), @r###"
     @    merge
     ├─╮
-    │ ○  side branch 2
+    │ ○  side bookmark 2
     │ ╷
-    ○ ╷  main branch 2
+    ○ ╷  main bookmark 2
     ├─╯
     ○  initial
     │
@@ -1484,9 +1506,9 @@ fn test_elided() {
     // Elide shared commits. It's unclear that a revision was skipped on the right
     // side (#1252).
     insta::assert_snapshot!(get_log("@-- | root()"), @r###"
-    ○  side branch 1
+    ○  side bookmark 1
     ╷
-    ╷ ○  main branch 1
+    ╷ ○  main bookmark 1
     ╭─╯
     ◆
     "###);
@@ -1498,10 +1520,10 @@ fn test_elided() {
     insta::assert_snapshot!(get_log("@ | @- | description(initial)"), @r###"
     @    merge
     ├─╮
-    │ ○  side branch 2
+    │ ○  side bookmark 2
     │ │
     │ ~  (elided revisions)
-    ○ │  main branch 2
+    ○ │  main bookmark 2
     │ │
     ~ │  (elided revisions)
     ├─╯
@@ -1513,10 +1535,10 @@ fn test_elided() {
     // Elide shared commits. To keep the implementation simple, it still gets
     // rendered as two synthetic nodes.
     insta::assert_snapshot!(get_log("@-- | root()"), @r###"
-    ○  side branch 1
+    ○  side bookmark 1
     │
     ~  (elided revisions)
-    │ ○  main branch 1
+    │ ○  main bookmark 1
     │ │
     │ ~  (elided revisions)
     ├─╯
@@ -1532,13 +1554,19 @@ fn test_log_with_custom_symbols() {
     let repo_path = test_env.env_root().join("repo");
 
     test_env.jj_cmd_ok(&repo_path, &["describe", "-m", "initial"]);
-    test_env.jj_cmd_ok(&repo_path, &["new", "-m", "main branch 1"]);
-    test_env.jj_cmd_ok(&repo_path, &["new", "-m", "main branch 2"]);
-    test_env.jj_cmd_ok(&repo_path, &["new", "@--", "-m", "side branch 1"]);
-    test_env.jj_cmd_ok(&repo_path, &["new", "-m", "side branch 2"]);
+    test_env.jj_cmd_ok(&repo_path, &["new", "-m", "main bookmark 1"]);
+    test_env.jj_cmd_ok(&repo_path, &["new", "-m", "main bookmark 2"]);
+    test_env.jj_cmd_ok(&repo_path, &["new", "@--", "-m", "side bookmark 1"]);
+    test_env.jj_cmd_ok(&repo_path, &["new", "-m", "side bookmark 2"]);
     test_env.jj_cmd_ok(
         &repo_path,
-        &["new", "-m", "merge", r#"description("main branch 2")"#, "@"],
+        &[
+            "new",
+            "-m",
+            "merge",
+            r#"description("main bookmark 2")"#,
+            "@",
+        ],
     );
 
     let get_log = |revs: &str| -> String {
@@ -1558,10 +1586,10 @@ fn test_log_with_custom_symbols() {
     insta::assert_snapshot!(get_log("@ | @- | description(initial) | root()"), @r###"
     $    merge
     ├─╮
-    │ ┝  side branch 2
+    │ ┝  side bookmark 2
     │ │
     │ 🮀  (elided revisions)
-    ┝ │  main branch 2
+    ┝ │  main bookmark 2
     │ │
     🮀 │  (elided revisions)
     ├─╯
@@ -1581,10 +1609,10 @@ fn test_log_with_custom_symbols() {
     insta::assert_snapshot!(get_log("@ | @- | description(initial) | root()"), @r###"
     $    merge
     |\
-    | *  side branch 2
+    | *  side bookmark 2
     | |
     | :  (elided revisions)
-    * |  main branch 2
+    * |  main bookmark 2
     | |
     : |  (elided revisions)
     |/

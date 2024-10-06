@@ -47,12 +47,12 @@ fn test_unpublished_operation() {
     let test_repo = TestRepo::init();
     let repo = &test_repo.repo;
 
-    let op_heads_dir = repo.repo_path().join("op_heads").join("heads");
+    let op_heads_dir = test_repo.repo_path().join("op_heads").join("heads");
     let op_id0 = repo.op_id().clone();
     assert_eq!(list_dir(&op_heads_dir), vec![repo.op_id().hex()]);
 
     let mut tx1 = repo.start_transaction(&settings);
-    write_random_commit(tx1.mut_repo(), &settings);
+    write_random_commit(tx1.repo_mut(), &settings);
     let unpublished_op = tx1.write("transaction 1");
     let op_id1 = unpublished_op.operation().id().clone();
     assert_ne!(op_id1, op_id0);
@@ -69,19 +69,19 @@ fn test_consecutive_operations() {
     let test_repo = TestRepo::init();
     let repo = &test_repo.repo;
 
-    let op_heads_dir = repo.repo_path().join("op_heads").join("heads");
+    let op_heads_dir = test_repo.repo_path().join("op_heads").join("heads");
     let op_id0 = repo.op_id().clone();
     assert_eq!(list_dir(&op_heads_dir), vec![repo.op_id().hex()]);
 
     let mut tx1 = repo.start_transaction(&settings);
-    write_random_commit(tx1.mut_repo(), &settings);
+    write_random_commit(tx1.repo_mut(), &settings);
     let op_id1 = tx1.commit("transaction 1").operation().id().clone();
     assert_ne!(op_id1, op_id0);
     assert_eq!(list_dir(&op_heads_dir), vec![op_id1.hex()]);
 
     let repo = repo.reload_at_head(&settings).unwrap();
     let mut tx2 = repo.start_transaction(&settings);
-    write_random_commit(tx2.mut_repo(), &settings);
+    write_random_commit(tx2.repo_mut(), &settings);
     let op_id2 = tx2.commit("transaction 2").operation().id().clone();
     assert_ne!(op_id2, op_id0);
     assert_ne!(op_id2, op_id1);
@@ -101,12 +101,12 @@ fn test_concurrent_operations() {
     let test_repo = TestRepo::init();
     let repo = &test_repo.repo;
 
-    let op_heads_dir = repo.repo_path().join("op_heads").join("heads");
+    let op_heads_dir = test_repo.repo_path().join("op_heads").join("heads");
     let op_id0 = repo.op_id().clone();
     assert_eq!(list_dir(&op_heads_dir), vec![repo.op_id().hex()]);
 
     let mut tx1 = repo.start_transaction(&settings);
-    write_random_commit(tx1.mut_repo(), &settings);
+    write_random_commit(tx1.repo_mut(), &settings);
     let op_id1 = tx1.commit("transaction 1").operation().id().clone();
     assert_ne!(op_id1, op_id0);
     assert_eq!(list_dir(&op_heads_dir), vec![op_id1.hex()]);
@@ -114,7 +114,7 @@ fn test_concurrent_operations() {
     // After both transactions have committed, we should have two op-heads on disk,
     // since they were run in parallel.
     let mut tx2 = repo.start_transaction(&settings);
-    write_random_commit(tx2.mut_repo(), &settings);
+    write_random_commit(tx2.repo_mut(), &settings);
     let op_id2 = tx2.commit("transaction 2").operation().id().clone();
     assert_ne!(op_id2, op_id0);
     assert_ne!(op_id2, op_id1);
@@ -146,16 +146,16 @@ fn test_isolation() {
     let repo = &test_repo.repo;
 
     let mut tx = repo.start_transaction(&settings);
-    let initial = create_random_commit(tx.mut_repo(), &settings)
+    let initial = create_random_commit(tx.repo_mut(), &settings)
         .set_parents(vec![repo.store().root_commit_id().clone()])
         .write()
         .unwrap();
     let repo = tx.commit("test");
 
     let mut tx1 = repo.start_transaction(&settings);
-    let mut_repo1 = tx1.mut_repo();
+    let mut_repo1 = tx1.repo_mut();
     let mut tx2 = repo.start_transaction(&settings);
-    let mut_repo2 = tx2.mut_repo();
+    let mut_repo2 = tx2.repo_mut();
 
     assert_heads(repo.as_ref(), vec![initial.id()]);
     assert_heads(mut_repo1, vec![initial.id()]);
@@ -218,7 +218,7 @@ fn test_reparent_range_linear() {
     // 0 (initial)
     let random_tx = |repo: &Arc<ReadonlyRepo>| {
         let mut tx = repo.start_transaction(&settings);
-        write_random_commit(tx.mut_repo(), &settings);
+        write_random_commit(tx.repo_mut(), &settings);
         tx
     };
     let repo_a = random_tx(&repo_0).commit("op A");
@@ -263,7 +263,7 @@ fn test_reparent_range_linear() {
 }
 
 #[test]
-fn test_reparent_range_branchy() {
+fn test_reparent_range_bookmarky() {
     let settings = testutils::user_settings();
     let test_repo = TestRepo::init();
     let repo_0 = test_repo.repo;
@@ -279,7 +279,7 @@ fn test_reparent_range_branchy() {
         parents.try_into().unwrap()
     }
 
-    // Set up branchy operation graph:
+    // Set up bookmarky operation graph:
     // G
     // |\
     // | F
@@ -292,7 +292,7 @@ fn test_reparent_range_branchy() {
     // 0 (initial)
     let random_tx = |repo: &Arc<ReadonlyRepo>| {
         let mut tx = repo.start_transaction(&settings);
-        write_random_commit(tx.mut_repo(), &settings);
+        write_random_commit(tx.repo_mut(), &settings);
         tx
     };
     let repo_a = random_tx(&repo_0).commit("op A");
@@ -601,10 +601,10 @@ fn test_resolve_op_parents_children() {
 fn test_gc() {
     let settings = stable_op_id_settings();
     let test_repo = TestRepo::init();
+    let op_dir = test_repo.repo_path().join("op_store").join("operations");
+    let view_dir = test_repo.repo_path().join("op_store").join("views");
     let repo_0 = test_repo.repo;
     let op_store = repo_0.op_store();
-    let op_dir = repo_0.repo_path().join("op_store").join("operations");
-    let view_dir = repo_0.repo_path().join("op_store").join("views");
 
     // Set up operation graph:
     //
@@ -619,7 +619,7 @@ fn test_gc() {
     let empty_tx = |repo: &Arc<ReadonlyRepo>| repo.start_transaction(&settings);
     let random_tx = |repo: &Arc<ReadonlyRepo>| {
         let mut tx = repo.start_transaction(&settings);
-        write_random_commit(tx.mut_repo(), &settings);
+        write_random_commit(tx.repo_mut(), &settings);
         tx
     };
     let repo_a = random_tx(&repo_0).commit("op A");

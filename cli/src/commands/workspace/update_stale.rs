@@ -35,7 +35,7 @@ use crate::ui::Ui;
 /// Update a workspace that has become stale
 ///
 /// For information about stale working copies, see
-/// https://github.com/martinvonz/jj/blob/main/docs/working-copy.md.
+/// https://martinvonz.github.io/jj/latest/working-copy/.
 #[derive(clap::Args, Clone, Debug)]
 pub struct WorkspaceUpdateStaleArgs {}
 
@@ -119,7 +119,7 @@ fn create_and_check_out_recovery_commit(
         workspace_command.unchecked_start_working_copy_mutation()?;
     let commit_id = commit.id();
 
-    let mut_repo = tx.mut_repo();
+    let mut_repo = tx.repo_mut();
     let new_commit = mut_repo
         .new_commit(
             command.settings(),

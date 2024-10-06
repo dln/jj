@@ -35,6 +35,7 @@ use futures::Stream;
 use futures::TryStreamExt;
 use itertools::EitherOrBoth;
 use itertools::Itertools;
+use pollster::FutureExt;
 
 use crate::backend;
 use crate::backend::BackendResult;
@@ -450,9 +451,10 @@ fn merge_trees(merge: &Merge<Tree>) -> BackendResult<Merge<Tree>> {
     // any conflicts.
     let mut new_tree = backend::Tree::default();
     let mut conflicts = vec![];
+    // TODO: Merge values concurrently
     for (basename, path_merge) in all_merged_tree_entries(merge) {
         let path = dir.join(basename);
-        let path_merge = merge_tree_values(store, &path, &path_merge)?;
+        let path_merge = merge_tree_values(store, &path, &path_merge).block_on()?;
         match path_merge.into_resolved() {
             Ok(value) => {
                 new_tree.set_or_remove(basename, value);
@@ -463,7 +465,7 @@ fn merge_trees(merge: &Merge<Tree>) -> BackendResult<Merge<Tree>> {
         };
     }
     if conflicts.is_empty() {
-        let new_tree_id = store.write_tree(dir, new_tree)?;
+        let new_tree_id = store.write_tree(dir, new_tree).block_on()?;
         Ok(Merge::resolved(new_tree_id))
     } else {
         // For each side of the conflict, overwrite the entries in `new_tree` with the
@@ -475,7 +477,7 @@ fn merge_trees(merge: &Merge<Tree>) -> BackendResult<Merge<Tree>> {
             for (basename, path_conflict) in &mut conflicts {
                 new_tree.set_or_remove(basename, path_conflict.next().unwrap());
             }
-            let tree = store.write_tree(dir, new_tree.clone())?;
+            let tree = store.write_tree(dir, new_tree.clone()).block_on()?;
             new_trees.push(tree);
         }
         Ok(Merge::from_vec(new_trees))
@@ -486,10 +488,10 @@ fn merge_trees(merge: &Merge<Tree>) -> BackendResult<Merge<Tree>> {
 /// Ok(Merge::normal(value)) if the conflict was resolved, and
 /// Ok(Merge::absent()) if the path should be removed. Returns the
 /// conflict unmodified if it cannot be resolved automatically.
-fn merge_tree_values(
+async fn merge_tree_values(
     store: &Arc<Store>,
     path: &RepoPath,
-    values: &MergedTreeVal,
+    values: &MergedTreeVal<'_>,
 ) -> BackendResult<MergedTreeValue> {
     if let Some(resolved) = values.resolve_trivial() {
         return Ok(Merge::resolved(resolved.cloned()));
@@ -503,7 +505,7 @@ fn merge_tree_values(
         Ok(merged_tree
             .map(|tree| (tree.id() != empty_tree_id).then(|| TreeValue::Tree(tree.id().clone()))))
     } else {
-        let maybe_resolved = try_resolve_file_values(store, path, values)?;
+        let maybe_resolved = try_resolve_file_values(store, path, values).await?;
         Ok(maybe_resolved.unwrap_or_else(|| values.cloned()))
     }
 }
@@ -511,7 +513,7 @@ fn merge_tree_values(
 /// Tries to resolve file conflicts by merging the file contents. Treats missing
 /// files as empty. If the file conflict cannot be resolved, returns the passed
 /// `values` unmodified.
-pub fn resolve_file_values(
+pub async fn resolve_file_values(
     store: &Arc<Store>,
     path: &RepoPath,
     values: MergedTreeValue,
@@ -520,11 +522,11 @@ pub fn resolve_file_values(
         return Ok(Merge::resolved(resolved.clone()));
     }
 
-    let maybe_resolved = try_resolve_file_values(store, path, &values)?;
+    let maybe_resolved = try_resolve_file_values(store, path, &values).await?;
     Ok(maybe_resolved.unwrap_or(values))
 }
 
-fn try_resolve_file_values<T: Borrow<TreeValue>>(
+async fn try_resolve_file_values<T: Borrow<TreeValue>>(
     store: &Arc<Store>,
     path: &RepoPath,
     values: &Merge<Option<T>>,
@@ -536,7 +538,7 @@ fn try_resolve_file_values<T: Borrow<TreeValue>>(
         .simplify();
     // No fast path for simplified.is_resolved(). If it could be resolved, it would
     // have been caught by values.resolve_trivial() above.
-    if let Some(resolved) = try_resolve_file_conflict(store, path, &simplified)? {
+    if let Some(resolved) = try_resolve_file_conflict(store, path, &simplified).await? {
         Ok(Some(Merge::normal(resolved)))
     } else {
         // Failed to merge the files, or the paths are not files
@@ -799,13 +801,13 @@ impl Iterator for TreeDiffIterator<'_> {
                         return Some(TreeDiffEntry {
                             path,
                             values: Err(before_err),
-                        })
+                        });
                     }
                     (_, Err(after_err)) => {
                         return Some(TreeDiffEntry {
                             path,
                             values: Err(after_err),
-                        })
+                        });
                     }
                 };
                 let subdir =

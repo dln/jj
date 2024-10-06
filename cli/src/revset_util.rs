@@ -28,6 +28,7 @@ use jj_lib::revset::DefaultSymbolResolver;
 use jj_lib::revset::Revset;
 use jj_lib::revset::RevsetAliasesMap;
 use jj_lib::revset::RevsetCommitRef;
+use jj_lib::revset::RevsetDiagnostics;
 use jj_lib::revset::RevsetEvaluationError;
 use jj_lib::revset::RevsetExpression;
 use jj_lib::revset::RevsetExtensions;
@@ -201,23 +202,15 @@ pub fn default_symbol_resolver<'a>(
 /// Parses user-configured expression defining the heads of the immutable set.
 /// Includes the root commit.
 pub fn parse_immutable_heads_expression(
+    diagnostics: &mut RevsetDiagnostics,
     context: &RevsetParseContext,
 ) -> Result<Rc<RevsetExpression>, RevsetParseError> {
     let (_, _, immutable_heads_str) = context
         .aliases_map()
         .get_function(USER_IMMUTABLE_HEADS, 0)
         .unwrap();
-    let heads = revset::parse(immutable_heads_str, context)?;
+    let heads = revset::parse(diagnostics, immutable_heads_str, context)?;
     Ok(heads.union(&RevsetExpression::root()))
-}
-
-/// Parses user-configured expression defining the immutable set.
-pub fn parse_immutable_expression(
-    context: &RevsetParseContext,
-) -> Result<Rc<RevsetExpression>, RevsetParseError> {
-    // Negated ancestors expression `~::(<heads> | root())` is slightly easier
-    // to optimize than negated union `~(::<heads> | root())`.
-    Ok(parse_immutable_heads_expression(context)?.ancestors())
 }
 
 pub(super) fn evaluate_revset_to_single_commit<'a>(
@@ -284,18 +277,18 @@ fn format_multiple_revisions_error(
             "Some of these commits have the same change id. Abandon one of them with `jj abandon \
              -r <REVISION>`.",
         );
-    } else if let RevsetExpression::CommitRef(RevsetCommitRef::Symbol(branch_name)) = expression {
-        // Separate hint if there's a conflicted branch
+    } else if let RevsetExpression::CommitRef(RevsetCommitRef::Symbol(bookmark_name)) = expression {
+        // Separate hint if there's a conflicted bookmark
         cmd_err.add_formatted_hint_with(|formatter| {
             writeln!(
                 formatter,
-                "Branch {branch_name} resolved to multiple revisions because it's conflicted."
+                "Bookmark {bookmark_name} resolved to multiple revisions because it's conflicted."
             )?;
             writeln!(formatter, "It resolved to these revisions:")?;
             write_commits_summary(formatter)
         });
         cmd_err.add_hint(format!(
-            "Set which revision the branch points to with `jj branch set {branch_name} -r \
+            "Set which revision the bookmark points to with `jj bookmark set {bookmark_name} -r \
              <REVISION>`.",
         ));
     } else {

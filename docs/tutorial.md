@@ -2,7 +2,7 @@
 
 >  **Hint:** This tutorial has become somewhat out of date. Many people find
 >   the alternative (not quite finished) [tutorial by Steve
->   Klabnik](https://steveklabnik.github.io/jujutsu-tutorial/) helpful. 
+>   Klabnik](https://steveklabnik.github.io/jujutsu-tutorial/) helpful.
 
 This text assumes that the reader is familiar with Git.
 
@@ -123,9 +123,9 @@ typically depends on how done you are with the change; if the change is almost
 done, it makes sense to use `jj new` so you can easily review your adjustments
 with `jj diff` before running `jj squash`.
 
-To view how a change has evolved over time, we can use `jj obslog` to see each
-recorded change for the current commit. This records changes to the working
-copy, message, squashes, rebases, etc.
+To view how a change has evolved over time, we can use `jj evolog` to see each
+recorded change for the current commit. This records changes to the working copy,
+message, squashes, rebases, etc.
 
 ## The log command and "revsets"
 
@@ -160,12 +160,12 @@ included in the graph. We can use the `--revisions`/`-r` flag to select a
 different set of revisions to list. The flag accepts a ["revset"](revsets.md),
 which is an expression in a simple language for specifying revisions. For
 example, `@` refers to the working-copy commit, `root()` refers to the root
-commit, `branches()` refers to all commits pointed to by branches. We can
-combine expressions with `|` for union, `&` for intersection and `~` for
-difference. For example:
+commit, `bookmarks()` refers to all commits pointed to by bookmarks (similar to
+Git's branches). We can combine expressions with `|` for union, `&` for
+intersection and `~` for difference. For example:
 
 ```shell
-$ jj log -r '@ | root() | branches()'
+$ jj log -r '@ | root() | bookmarks()'
 @  mpqrykyp martinvonz@google.com 2023-02-12 15:00:22.000 -08:00 aef4df99
 ╷  (empty) (no description set)
 ◉  orrkosyo octocat@nowhere.com 2012-03-06 15:06:50.000 -08:00 master 7fd1a60b
@@ -193,7 +193,7 @@ commits. We use `jj new` with the `--message`/`-m` option to set change
 descriptions (commit messages) right away.
 
 ```shell
-# Start creating a chain of commits off of the `master` branch
+# Start creating a chain of commits off of the `master` bookmark
 $ jj new master -m A; echo a > file1
 Working copy now at: nuvyytnq 00a2aeed (empty) A
 Parent commit      : orrkosyo 7fd1a60b master | (empty) Merge pull request #6 from Spaceghost/patch-1
@@ -507,7 +507,6 @@ line. Unlike `jj squash -i`, which left the content state of the commit
 unchanged, `jj diffedit` (typically) results in a different state, which means
 that descendant commits may have conflicts.
 
-Other commands for rewriting contents of existing commits are `jj split`, `jj
-unsquash -i`. Now that you've seen how `jj squash -i` and `jj diffedit` work,
-you can hopefully figure out how those work (with the help of the instructions
-in the diff).
+Another command for rewriting contents of existing commits is `jj split`. Now that
+you've seen how `jj squash -i` and `jj diffedit` work, you can hopefully figure out
+how it works (with the help of the instructions in the diff).

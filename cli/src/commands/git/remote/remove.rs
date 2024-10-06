@@ -20,7 +20,7 @@ use crate::command_error::CommandError;
 use crate::git_util::get_git_repo;
 use crate::ui::Ui;
 
-/// Remove a Git remote and forget its branches
+/// Remove a Git remote and forget its bookmarks
 #[derive(clap::Args, Clone, Debug)]
 pub struct GitRemoteRemoveArgs {
     /// The remote's name
@@ -36,8 +36,8 @@ pub fn cmd_git_remote_remove(
     let repo = workspace_command.repo();
     let git_repo = get_git_repo(repo.store())?;
     let mut tx = workspace_command.start_transaction();
-    git::remove_remote(tx.mut_repo(), &git_repo, &args.remote)?;
-    if tx.mut_repo().has_changes() {
+    git::remove_remote(tx.repo_mut(), &git_repo, &args.remote)?;
+    if tx.repo().has_changes() {
         tx.finish(ui, format!("remove git remote {}", &args.remote))
     } else {
         Ok(()) // Do not print "Nothing changed."

@@ -17,6 +17,134 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed bugs
 
+
+## [0.22.0] - 2024-10-02
+
+### Breaking changes
+
+* Fixing [#4239](https://github.com/martinvonz/jj/issues/4239) means the
+  ordering of some messages have changed.
+
+* Invalid `ui.graph.style` configuration is now an error.
+
+* The builtin template `branch_list` has been renamed to `bookmark_list` as part
+  of the `jj branch` deprecation.
+
+### Deprecations
+
+* `jj branch` has been deprecated in favor of `jj bookmark`.
+
+  **Rationale:** Jujutsu's branches don't behave like Git branches, which a
+  confused many newcomers, as they expected a similar behavior given the name.
+  We've renamed them to "bookmarks" to match the actual behavior, as we think
+  that describes them better, and they also behave similar to Mercurial's
+  bookmarks.
+
+* `jj obslog` is now called `jj evolution-log`/`jj evolog`. `jj obslog` remains
+  as an alias.
+
+* `jj unsquash` has been deprecated in favor of `jj squash` and
+  `jj diffedit --restore-descendants`.
+
+  **Rationale:** `jj squash` can be used in interactive mode to pull
+  changes from one commit to another, including from a parent commit
+  to a child commit. For fine-grained dependent diffs, such as when
+  the parent and the child commits must successively modify the same
+  location in a file, `jj diffedit --restore-descendants` can be used
+  to set the parent commit to the desired content without altering the
+  content of the child commit.
+
+* The `git.push-branch-prefix` config has been deprecated in favor of
+  `git.push-bookmark-prefix`.
+
+* `conflict()` and `file()` revsets have been renamed to `conflicts()` and `files()`
+  respectively. The old names are still around and will be removed in a future
+  release.
+
+### New features
+
+* The new config option `snapshot.auto-track` lets you automatically track only
+  the specified paths (all paths by default). Use the new `jj file track`
+  command to manually tracks path that were not automatically tracked. There is
+  no way to list untracked files yet. Use `git status` in a colocated workspace
+  as a workaround.
+  [#323](https://github.com/martinvonz/jj/issues/323)
+
+* `jj fix` now allows fixing unchanged files with the `--include-unchanged-files` flag. This
+  can be used to more easily introduce automatic formatting changes in a new
+  commit separate from other changes.
+
+* `jj workspace add` now accepts a `--sparse-patterns=<MODE>` option, which
+  allows control of the sparse patterns for a newly created workspace: `copy`
+  (inherit from parent; default), `full` (full working copy), or `empty` (the
+  empty working copy).
+
+* New command `jj workspace rename` that can rename the current workspace.
+
+* `jj op log` gained an option to include operation diffs.
+
+* `jj git clone` now accepts a `--remote <REMOTE NAME>` option, which
+  allows to set a name for the remote instead of using the default
+  `origin`.
+
+* `jj op undo` now reports information on the operation that has been undone.
+
+* `jj squash`: the `-k` flag can be used as a shorthand for `--keep-emptied`.
+
+* CommitId / ChangeId template types now support `.normal_hex()`.
+
+* `jj commit` and `jj describe` now accept `--author` option allowing to quickly change
+  author of given commit.
+
+* `jj diffedit`, `jj abandon`, and `jj restore` now accept a `--restore-descendants`
+  flag. When used, descendants of the edited or deleted commits will keep their original
+  content.
+
+* `jj git fetch -b <remote-git-branch-name>` will now warn if the branch(es)
+   can not be found in any of the specified/configured remotes.
+
+* `jj split` now lets the user select all changes in interactive mode. This may be used
+  to keeping all changes into the first commit while keeping the current commit
+  description for the second commit (the newly created empty one).
+
+* Author and committer names are now yellow by default.
+
+### Fixed bugs
+
+* Update working copy before reporting changes. This prevents errors during reporting
+  from leaving the working copy in a stale state.
+
+* Fixed panic when parsing invalid conflict markers of a particular form.
+  ([#2611](https://github.com/martinvonz/jj/pull/2611))
+
+* Editing a hidden commit now makes it visible.
+
+* The `present()` revset now suppresses missing working copy error. For example,
+  `present(@)` evaluates to `none()` if the current workspace has no
+  working-copy commit.
+
+### Contributors
+
+Thanks to the people who made this release happen!
+
+* Austin Seipp (@thoughtpolice)
+* Danny Hooper (@hooper)
+* Emily Shaffer (@nasamuffin)
+* Essien Ita Essien (@essiene)
+* Ethan Brierley (@eopb)
+* Ilya Grigoriev (@ilyagr)
+* Kevin Liao (@kevincliao)
+* Lukas Wirth (@Veykril)
+* Martin von Zweigbergk (@martinvonz)
+* Mateusz Mikuła (@mati865)
+* mlcui (@mlcui-corp)
+* Philip Metzger (@PhilipMetzger)
+* Samuel Tardieu (@samueltardieu)
+* Stephen Jennings (@jennings)
+* Tyler Goffinet (@qubitz)
+* Vamsi Avula (@avamsi)
+* Yuya Nishihara (@yuja)
+
 ## [0.21.0] - 2024-09-04
 
 ### Breaking changes
@@ -45,7 +173,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 * A tilde (`~`) at the start of the path will now be expanded to the user's home
   directory when configuring a `signing.key` for SSH commit signing.
-  
+
 * When reconfiguring the author, warn that the working copy won't be updated
 
 ### Fixed bugs
@@ -145,7 +273,7 @@ Thanks to the people who made this release happen!
 
 * `jj backout` can now back out multiple commits at once.
 
-* `jj git clone some/nested/path` now creates the full directory tree for 
+* `jj git clone some/nested/path` now creates the full directory tree for
    nested destination paths if they don't exist.
 
 * String patterns now support case‐insensitive matching by suffixing any

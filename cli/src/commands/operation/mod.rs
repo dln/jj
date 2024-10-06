@@ -40,7 +40,7 @@ use crate::ui::Ui;
 /// Commands for working with the operation log
 ///
 /// For information about the operation log, see
-/// https://github.com/martinvonz/jj/blob/main/docs/operation-log.md.
+/// https://martinvonz.github.io/jj/latest/operation-log/.
 #[derive(Subcommand, Clone, Debug)]
 pub enum OperationCommand {
     Abandon(OperationAbandonArgs),
@@ -68,10 +68,10 @@ pub fn cmd_operation(
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
 enum UndoWhatToRestore {
-    /// The jj repo state and local branches
+    /// The jj repo state and local bookmarks
     Repo,
-    /// The remote-tracking branches. Do not restore these if you'd like to push
-    /// after the undo
+    /// The remote-tracking bookmarks. Do not restore these if you'd like to
+    /// push after the undo
     RemoteTracking,
 }
 
@@ -96,7 +96,7 @@ fn view_with_desired_portions_restored(
     };
     jj_lib::op_store::View {
         head_ids: repo_source.head_ids.clone(),
-        local_branches: repo_source.local_branches.clone(),
+        local_bookmarks: repo_source.local_bookmarks.clone(),
         tags: repo_source.tags.clone(),
         remote_views: remote_source.remote_views.clone(),
         git_refs: current_view.git_refs.clone(),

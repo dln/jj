@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use itertools::Itertools as _;
 use jj_lib::backend::BackendError;
+use jj_lib::dsl_util::Diagnostics;
 use jj_lib::fileset::FilePatternParseError;
 use jj_lib::fileset::FilesetParseError;
 use jj_lib::fileset::FilesetParseErrorKind;
@@ -46,6 +47,7 @@ use jj_lib::revset::RevsetParseErrorKind;
 use jj_lib::revset::RevsetResolutionError;
 use jj_lib::signing::SignInitError;
 use jj_lib::str_util::StringPatternParseError;
+use jj_lib::view::RenameWorkspaceError;
 use jj_lib::working_copy::ResetError;
 use jj_lib::working_copy::SnapshotError;
 use jj_lib::working_copy::WorkingCopyStateError;
@@ -261,6 +263,12 @@ impl From<EditCommitError> for CommandError {
 impl From<CheckOutCommitError> for CommandError {
     fn from(err: CheckOutCommitError) -> Self {
         internal_error_with_message("Failed to check out a commit", err)
+    }
+}
+
+impl From<RenameWorkspaceError> for CommandError {
+    fn from(err: RenameWorkspaceError) -> Self {
+        user_error_with_message("Failed to rename a workspace", err)
     }
 }
 
@@ -725,7 +733,7 @@ fn try_handle_command_result(
             print_error(ui, "Config error: ", err, hints)?;
             writeln!(
                 ui.stderr_formatter().labeled("hint"),
-                "For help, see https://github.com/martinvonz/jj/blob/main/docs/config.md."
+                "For help, see https://martinvonz.github.io/jj/latest/config/."
             )?;
             Ok(ExitCode::from(1))
         }
@@ -827,4 +835,21 @@ fn handle_clap_error(ui: &mut Ui, err: &clap::Error, hints: &[ErrorHint]) -> io:
     write!(ui.stderr(), "{clap_str}")?;
     print_error_hints(ui, hints)?;
     Ok(ExitCode::from(2))
+}
+
+/// Prints diagnostic messages emitted during parsing.
+pub fn print_parse_diagnostics<T: error::Error>(
+    ui: &Ui,
+    context_message: &str,
+    diagnostics: &Diagnostics<T>,
+) -> io::Result<()> {
+    for diag in diagnostics {
+        writeln!(ui.warning_default(), "{context_message}")?;
+        for err in iter::successors(Some(diag as &dyn error::Error), |err| err.source()) {
+            writeln!(ui.stderr(), "{err}")?;
+        }
+        // If we add support for multiple error diagnostics, we might have to do
+        // find_source_parse_error_hint() and print it here.
+    }
+    Ok(())
 }

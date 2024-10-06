@@ -22,7 +22,9 @@ use std::hash::Hasher;
 use std::io::Read;
 use std::sync::Arc;
 
+use futures::future::try_join_all;
 use itertools::Itertools;
+use pollster::FutureExt;
 use tracing::instrument;
 
 use crate::backend;
@@ -330,7 +332,7 @@ pub fn merge_trees(side1_tree: &Tree, base_tree: &Tree, side2_tree: &Tree) -> Ba
             new_tree.set_or_remove(basename, new_value);
         }
     }
-    store.write_tree(dir, new_tree)
+    store.write_tree(dir, new_tree).block_on()
 }
 
 /// Returns `Some(TreeId)` if this is a directory or missing. If it's missing,
@@ -396,7 +398,8 @@ fn merge_tree_value(
                 Err(conflict) => {
                     let conflict_borrowed = conflict.map(|value| value.as_ref());
                     if let Some(tree_value) =
-                        try_resolve_file_conflict(store, &filename, &conflict_borrowed)?
+                        try_resolve_file_conflict(store, &filename, &conflict_borrowed)
+                            .block_on()?
                     {
                         Some(tree_value)
                     } else {
@@ -413,10 +416,10 @@ fn merge_tree_value(
 ///
 /// The input `conflict` is supposed to be simplified. It shouldn't contain
 /// non-file values that cancel each other.
-pub fn try_resolve_file_conflict(
+pub async fn try_resolve_file_conflict(
     store: &Store,
     filename: &RepoPath,
-    conflict: &MergedTreeVal,
+    conflict: &MergedTreeVal<'_>,
 ) -> BackendResult<Option<TreeValue>> {
     // If there are any non-file or any missing parts in the conflict, we can't
     // merge it. We check early so we don't waste time reading file contents if
@@ -455,23 +458,25 @@ pub fn try_resolve_file_conflict(
     //    cannot
     let file_id_conflict = file_id_conflict.simplify();
 
-    let contents: Merge<Vec<u8>> =
-        file_id_conflict.try_map(|&file_id| -> BackendResult<Vec<u8>> {
-            let mut content = vec![];
-            store
-                .read_file(filename, file_id)?
-                .read_to_end(&mut content)
-                .map_err(|err| BackendError::ReadObject {
-                    object_type: file_id.object_type(),
-                    hash: file_id.hex(),
-                    source: err.into(),
-                })?;
-            Ok(content)
-        })?;
+    let content_futures = file_id_conflict.into_iter().map(|file_id| async {
+        let mut content = vec![];
+        let mut reader = store.read_file_async(filename, file_id).await?;
+        reader
+            .read_to_end(&mut content)
+            .map_err(|err| BackendError::ReadObject {
+                object_type: file_id.object_type(),
+                hash: file_id.hex(),
+                source: err.into(),
+            })?;
+        BackendResult::Ok(content)
+    });
+    let contents = Merge::from_vec(try_join_all(content_futures).await?);
     let merge_result = files::merge(&contents);
     match merge_result {
         MergeResult::Resolved(merged_content) => {
-            let id = store.write_file(filename, &mut merged_content.as_slice())?;
+            let id = store
+                .write_file(filename, &mut merged_content.as_slice())
+                .await?;
             Ok(Some(TreeValue::File { id, executable }))
         }
         MergeResult::Conflict(_) => Ok(None),

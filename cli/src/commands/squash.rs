@@ -27,6 +27,7 @@ use crate::cli_util::DiffSelector;
 use crate::cli_util::RevisionArg;
 use crate::cli_util::WorkspaceCommandTransaction;
 use crate::command_error::user_error;
+use crate::command_error::user_error_with_hint;
 use crate::command_error::CommandError;
 use crate::description_util::combine_messages;
 use crate::description_util::join_message_paragraphs;
@@ -47,7 +48,7 @@ use crate::ui::Ui;
 /// parent(s), and `--keep-emptied` is not set, it will be abandoned. Without
 /// `--interactive` or paths, the source revision will always be empty.
 ///
-/// If the source became empty and both the source and destination had a
+/// If the source was abandoned and both the source and destination had a
 /// non-empty description, you will be asked for the combined description. If
 /// either was empty, then the other one will be used.
 ///
@@ -81,7 +82,7 @@ pub(crate) struct SquashArgs {
     #[arg(conflicts_with_all = ["interactive", "tool"], value_hint = clap::ValueHint::AnyPath)]
     paths: Vec<String>,
     /// The source revision will not be abandoned
-    #[arg(long)]
+    #[arg(long, short)]
     keep_emptied: bool,
 }
 
@@ -97,14 +98,14 @@ pub(crate) fn cmd_squash(
     let destination;
     if !args.from.is_empty() || args.into.is_some() {
         sources = if args.from.is_empty() {
-            workspace_command.parse_revset(&RevisionArg::AT)?
+            workspace_command.parse_revset(ui, &RevisionArg::AT)?
         } else {
-            workspace_command.parse_union_revsets(&args.from)?
+            workspace_command.parse_union_revsets(ui, &args.from)?
         }
         .evaluate_to_commits()?
         .try_collect()?;
-        destination =
-            workspace_command.resolve_single_rev(args.into.as_ref().unwrap_or(&RevisionArg::AT))?;
+        destination = workspace_command
+            .resolve_single_rev(ui, args.into.as_ref().unwrap_or(&RevisionArg::AT))?;
         if sources.iter().any(|source| source.id() == destination.id()) {
             return Err(user_error("Source and destination cannot be the same"));
         }
@@ -114,17 +115,20 @@ pub(crate) fn cmd_squash(
         sources.reverse();
     } else {
         let source = workspace_command
-            .resolve_single_rev(args.revision.as_ref().unwrap_or(&RevisionArg::AT))?;
+            .resolve_single_rev(ui, args.revision.as_ref().unwrap_or(&RevisionArg::AT))?;
         let mut parents: Vec<_> = source.parents().try_collect()?;
         if parents.len() != 1 {
-            return Err(user_error("Cannot squash merge commits"));
+            return Err(user_error_with_hint(
+                "Cannot squash merge commits without a specified destination",
+                "Use `--into` to specify which parent to squash into",
+            ));
         }
         sources = vec![source];
         destination = parents.pop().unwrap();
     }
 
     let matcher = workspace_command
-        .parse_file_patterns(&args.paths)?
+        .parse_file_patterns(ui, &args.paths)?
         .to_matcher();
     let diff_selector =
         workspace_command.diff_selector(ui, args.tool.as_deref(), args.interactive)?;
@@ -248,7 +252,7 @@ from the source will be moved into the destination.
             if no_rev_arg
                 && tx
                     .base_workspace_helper()
-                    .parse_revset(&RevisionArg::from(only_path.to_owned()))
+                    .parse_revset(ui, &RevisionArg::from(only_path.to_owned()))
                     .is_ok()
             {
                 writeln!(
@@ -264,13 +268,13 @@ from the source will be moved into the destination.
 
     for source in &source_commits {
         if source.abandon {
-            tx.mut_repo()
+            tx.repo_mut()
                 .record_abandoned_commit(source.commit.id().clone());
         } else {
             let source_tree = source.commit.tree()?;
             // Apply the reverse of the selected changes onto the source
             let new_source_tree = source_tree.merge(&source.selected_tree, &source.parent_tree)?;
-            tx.mut_repo()
+            tx.repo_mut()
                 .rewrite_commit(settings, source.commit)
                 .set_tree_id(new_source_tree.id().clone())
                 .write()?;
@@ -286,9 +290,9 @@ from the source will be moved into the destination.
         // rewritten sources. Otherwise it will likely already have the content
         // changes we're moving, so applying them will have no effect and the
         // changes will disappear.
-        let rebase_map = tx.mut_repo().rebase_descendants_return_map(settings)?;
+        let rebase_map = tx.repo_mut().rebase_descendants_return_map(settings)?;
         let rebased_destination_id = rebase_map.get(destination.id()).unwrap().clone();
-        rewritten_destination = tx.mut_repo().store().get_commit(&rebased_destination_id)?;
+        rewritten_destination = tx.repo().store().get_commit(&rebased_destination_id)?;
     }
     // Apply the selected changes onto the destination
     let mut destination_tree = rewritten_destination.tree()?;
@@ -303,7 +307,12 @@ from the source will be moved into the destination.
                 .iter()
                 .filter_map(|source| source.abandon.then_some(source.commit))
                 .collect_vec();
-            combine_messages(tx.base_repo(), &abandoned_commits, destination, settings)?
+            combine_messages(
+                tx.base_workspace_helper(),
+                &abandoned_commits,
+                destination,
+                settings,
+            )?
         }
     };
     let mut predecessors = vec![destination.id().clone()];
@@ -312,7 +321,7 @@ from the source will be moved into the destination.
             .iter()
             .map(|source| source.commit.id().clone()),
     );
-    tx.mut_repo()
+    tx.repo_mut()
         .rewrite_commit(settings, &rewritten_destination)
         .set_tree_id(destination_tree.id().clone())
         .set_predecessors(predecessors)
