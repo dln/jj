@@ -2,6 +2,7 @@
 # all aliases from here.
 [aliases]
 amend = ["squash"]
+b = ["bookmark"]
 co = ["checkout"]
 unamend = ["unsquash"]
 
@@ -13,6 +14,7 @@ max-inline-alternation = 3
 allow-filesets = true
 always-allow-large-revsets = false
 diff-instructions = true
+graph.style = "curved"
 paginate = "auto"
 pager = { command = ["less", "-FRX"], env = { LESSCHARSET = "utf-8" } }
 log-word-wrap = false
@@ -23,3 +25,4 @@ edit = false
 
 [snapshot]
 max-new-file-size = "1MiB"
+auto-track = "all()"

@@ -31,6 +31,7 @@ use jj_lib::object_id::ObjectId;
 use jj_lib::repo::Repo;
 use jj_lib::revset::FunctionCallNode;
 use jj_lib::revset::PartialSymbolResolver;
+use jj_lib::revset::RevsetDiagnostics;
 use jj_lib::revset::RevsetExpression;
 use jj_lib::revset::RevsetFilterExtension;
 use jj_lib::revset::RevsetFilterPredicate;
@@ -121,7 +122,7 @@ impl CommitTemplateLanguageExtension for HexCounter {
         let mut table = CommitTemplateBuildFnTable::empty();
         table.commit_methods.insert(
             "has_most_digits",
-            |language, _build_context, property, call| {
+            |language, _diagnostics, _build_context, property, call| {
                 call.expect_no_arguments()?;
                 let most_digits = language
                     .cache_extension::<MostDigitsInId>()
@@ -134,7 +135,7 @@ impl CommitTemplateLanguageExtension for HexCounter {
         );
         table.commit_methods.insert(
             "num_digits_in_id",
-            |_language, _build_context, property, call| {
+            |_language, _diagnostics, _build_context, property, call| {
                 call.expect_no_arguments()?;
                 Ok(L::wrap_integer(
                     property.map(|commit| num_digits_in_id(commit.id())),
@@ -143,7 +144,7 @@ impl CommitTemplateLanguageExtension for HexCounter {
         );
         table.commit_methods.insert(
             "num_char_in_id",
-            |_language, _build_context, property, call| {
+            |_language, _diagnostics, _build_context, property, call| {
                 let [string_arg] = call.expect_exact_arguments()?;
                 let char_arg =
                     template_parser::expect_string_literal_with(string_arg, |string, span| {
@@ -185,6 +186,7 @@ impl RevsetFilterExtension for EvenDigitsFilter {
 }
 
 fn even_digits(
+    _diagnostics: &mut RevsetDiagnostics,
     function: &FunctionCallNode,
     _context: &RevsetParseContext,
 ) -> Result<Rc<RevsetExpression>, RevsetParseError> {

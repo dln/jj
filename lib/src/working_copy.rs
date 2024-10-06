@@ -28,6 +28,8 @@ use crate::commit::Commit;
 use crate::fsmonitor::FsmonitorSettings;
 use crate::gitignore::GitIgnoreError;
 use crate::gitignore::GitIgnoreFile;
+use crate::matchers::EverythingMatcher;
+use crate::matchers::Matcher;
 use crate::op_store::OperationId;
 use crate::op_store::WorkspaceId;
 use crate::repo_path::RepoPath;
@@ -100,10 +102,13 @@ pub trait LockedWorkingCopy {
     fn old_tree_id(&self) -> &MergedTreeId;
 
     /// Snapshot the working copy and return the tree id.
-    fn snapshot(&mut self, options: SnapshotOptions) -> Result<MergedTreeId, SnapshotError>;
+    fn snapshot(&mut self, options: &SnapshotOptions) -> Result<MergedTreeId, SnapshotError>;
 
     /// Check out the specified commit in the working copy.
     fn check_out(&mut self, commit: &Commit) -> Result<CheckoutStats, CheckoutError>;
+
+    /// Update the workspace name.
+    fn rename_workspace(&mut self, new_workspace_name: WorkspaceId);
 
     /// Update to another commit without touching the files in the working copy.
     fn reset(&mut self, commit: &Commit) -> Result<(), ResetError>;
@@ -180,6 +185,7 @@ pub enum SnapshotError {
 
 /// Options used when snapshotting the working copy. Some of them may be ignored
 /// by some `WorkingCopy` implementations.
+#[derive(Clone)]
 pub struct SnapshotOptions<'a> {
     /// The `.gitignore`s to use while snapshotting. The typically come from the
     /// user's configured patterns combined with per-repo patterns.
@@ -193,6 +199,9 @@ pub struct SnapshotOptions<'a> {
     pub fsmonitor_settings: FsmonitorSettings,
     /// A callback for the UI to display progress.
     pub progress: Option<&'a SnapshotProgress<'a>>,
+    /// For new files that are not already tracked, start tracking them if they
+    /// match this.
+    pub start_tracking_matcher: &'a dyn Matcher,
     /// The size of the largest file that should be allowed to become tracked
     /// (already tracked files are always snapshotted). If there are larger
     /// files in the working copy, then `LockedWorkingCopy::snapshot()` may
@@ -208,6 +217,7 @@ impl SnapshotOptions<'_> {
             base_ignores: GitIgnoreFile::empty(),
             fsmonitor_settings: FsmonitorSettings::None,
             progress: None,
+            start_tracking_matcher: &EverythingMatcher,
             max_new_file_size: u64::MAX,
         }
     }

@@ -34,19 +34,19 @@ use jj_lib::repo::ReadonlyRepo;
 use jj_lib::repo::Repo;
 use jj_lib::revset;
 use jj_lib::revset::RevsetIteratorExt as _;
-use jj_lib::rewrite::rebase_to_dest_parent;
 
 use crate::cli_util::short_change_hash;
-use crate::cli_util::short_operation_hash;
 use crate::cli_util::CommandHelper;
 use crate::cli_util::LogContentFormat;
-use crate::command_error::user_error;
 use crate::command_error::CommandError;
+use crate::commit_templater::CommitTemplateLanguage;
+use crate::diff_util::diff_formats_for_log;
 use crate::diff_util::DiffFormatArgs;
 use crate::diff_util::DiffRenderer;
 use crate::formatter::Formatter;
 use crate::graphlog::get_graphlog;
 use crate::graphlog::Edge;
+use crate::graphlog::GraphStyle;
 use crate::templater::TemplateRenderer;
 use crate::ui::Ui;
 
@@ -82,8 +82,8 @@ pub fn cmd_op_diff(
     args: &OperationDiffArgs,
 ) -> Result<(), CommandError> {
     let workspace_command = command.workspace_helper(ui)?;
-    let repo = workspace_command.repo();
-    let repo_loader = &repo.loader();
+    let workspace_env = workspace_command.env();
+    let repo_loader = workspace_command.workspace().repo_loader();
     let from_op;
     let to_op;
     if args.from.is_some() || args.to.is_some() {
@@ -92,76 +92,58 @@ pub fn cmd_op_diff(
     } else {
         to_op = workspace_command.resolve_single_op(args.operation.as_deref().unwrap_or("@"))?;
         let to_op_parents: Vec<_> = to_op.parents().try_collect()?;
-        if to_op_parents.is_empty() {
-            return Err(user_error("Cannot diff operation with no parents"));
-        }
         from_op = repo_loader.merge_operations(command.settings(), to_op_parents, None)?;
     }
+    let graph_style = GraphStyle::from_settings(command.settings())?;
     let with_content_format = LogContentFormat::new(ui, command.settings())?;
 
     let from_repo = repo_loader.load_at(&from_op)?;
     let to_repo = repo_loader.load_at(&to_op)?;
 
     // Create a new transaction starting from `to_repo`.
-    let mut workspace_command =
-        command.for_temporary_repo(ui, command.load_workspace()?, to_repo.clone())?;
-    let mut tx = workspace_command.start_transaction();
+    let mut tx = to_repo.start_transaction(command.settings());
     // Merge index from `from_repo` to `to_repo`, so commits in `from_repo` are
     // accessible.
-    tx.mut_repo().merge_index(&from_repo);
-    let diff_renderer = tx
-        .base_workspace_helper()
-        .diff_renderer_for_log(&args.diff_format, args.patch)?;
-    let commit_summary_template = tx.commit_summary_template();
+    tx.repo_mut().merge_index(&from_repo);
+    let merged_repo = tx.repo();
 
+    let diff_renderer = {
+        let formats = diff_formats_for_log(command.settings(), &args.diff_format, args.patch)?;
+        let path_converter = workspace_env.path_converter();
+        (!formats.is_empty()).then(|| DiffRenderer::new(merged_repo, path_converter, formats))
+    };
+    let id_prefix_context = workspace_env.new_id_prefix_context();
+    let commit_summary_template = {
+        let language = workspace_env.commit_template_language(merged_repo, &id_prefix_context);
+        let text = command
+            .settings()
+            .config()
+            .get_string("templates.commit_summary")?;
+        workspace_env.parse_template(ui, &language, &text, CommitTemplateLanguage::wrap_commit)?
+    };
+
+    let op_summary_template = workspace_command.operation_summary_template();
     ui.request_pager();
-    ui.stdout_formatter().with_label("op_log", |formatter| {
+    let mut formatter = ui.stdout_formatter();
+    formatter.with_label("op_log", |formatter| {
         write!(formatter, "From operation ")?;
-        write!(
-            formatter.labeled("id"),
-            "{}",
-            short_operation_hash(from_op.id()),
-        )?;
-        write!(formatter, ": ")?;
-        write!(
-            formatter.labeled("description"),
-            "{}",
-            if from_op.id() == from_op.op_store().root_operation_id() {
-                "root()"
-            } else {
-                &from_op.metadata().description
-            }
-        )?;
+        op_summary_template.format(&from_op, &mut *formatter)?;
         writeln!(formatter)?;
         write!(formatter, "  To operation ")?;
-        write!(
-            formatter.labeled("id"),
-            "{}",
-            short_operation_hash(to_op.id()),
-        )?;
-        write!(formatter, ": ")?;
-        write!(
-            formatter.labeled("description"),
-            "{}",
-            if to_op.id() == to_op.op_store().root_operation_id() {
-                "root()"
-            } else {
-                &to_op.metadata().description
-            }
-        )?;
+        op_summary_template.format(&to_op, &mut *formatter)?;
         writeln!(formatter)
     })?;
 
     show_op_diff(
         ui,
-        command,
-        tx.repo(),
+        formatter.as_mut(),
+        merged_repo,
         &from_repo,
         &to_repo,
         &commit_summary_template,
-        !args.no_graph,
+        (!args.no_graph).then_some(graph_style),
         &with_content_format,
-        diff_renderer,
+        diff_renderer.as_ref(),
     )
 }
 
@@ -171,15 +153,15 @@ pub fn cmd_op_diff(
 /// into it.
 #[allow(clippy::too_many_arguments)]
 pub fn show_op_diff(
-    ui: &mut Ui,
-    command: &CommandHelper,
+    ui: &Ui,
+    formatter: &mut dyn Formatter,
     current_repo: &dyn Repo,
     from_repo: &Arc<ReadonlyRepo>,
     to_repo: &Arc<ReadonlyRepo>,
     commit_summary_template: &TemplateRenderer<Commit>,
-    show_graph: bool,
+    graph_style: Option<GraphStyle>,
     with_content_format: &LogContentFormat,
-    diff_renderer: Option<DiffRenderer>,
+    diff_renderer: Option<&DiffRenderer>,
 ) -> Result<(), CommandError> {
     let changes = compute_operation_commits_diff(current_repo, from_repo, to_repo)?;
 
@@ -209,14 +191,13 @@ pub fn show_op_diff(
         |change_id: &ChangeId| change_parents.get(change_id).unwrap().clone(),
     );
 
-    let mut formatter = ui.stdout_formatter();
-    let formatter = formatter.as_mut();
-
     if !ordered_change_ids.is_empty() {
         writeln!(formatter)?;
-        writeln!(formatter, "Changed commits:")?;
-        if show_graph {
-            let mut graph = get_graphlog(command.settings(), formatter.raw());
+        with_content_format.write(formatter, |formatter| {
+            writeln!(formatter, "Changed commits:")
+        })?;
+        if let Some(graph_style) = graph_style {
+            let mut graph = get_graphlog(graph_style, formatter.raw());
 
             let graph_iter =
                 TopoGroupedGraphIterator::new(ordered_change_ids.iter().map(|change_id| {
@@ -236,34 +217,28 @@ pub fn show_op_diff(
                     .iter()
                     .map(|edge| Edge::Direct(edge.target.clone()))
                     .collect_vec();
-                let graph_width = || graph.width(&change_id, &edges);
 
                 let mut buffer = vec![];
-                with_content_format.write_graph_text(
-                    ui.new_formatter(&mut buffer).as_mut(),
-                    |formatter| {
-                        write_modified_change_summary(
-                            formatter,
-                            commit_summary_template,
-                            &change_id,
-                            modified_change,
-                        )
-                    },
-                    graph_width,
-                )?;
+                let within_graph = with_content_format.sub_width(graph.width(&change_id, &edges));
+                within_graph.write(ui.new_formatter(&mut buffer).as_mut(), |formatter| {
+                    write_modified_change_summary(
+                        formatter,
+                        commit_summary_template,
+                        &change_id,
+                        modified_change,
+                    )
+                })?;
                 if !buffer.ends_with(b"\n") {
                     buffer.push(b'\n');
                 }
                 if let Some(diff_renderer) = &diff_renderer {
                     let mut formatter = ui.new_formatter(&mut buffer);
-                    let width = usize::saturating_sub(ui.term_width(), graph_width());
                     show_change_diff(
                         ui,
                         formatter.as_mut(),
-                        current_repo,
                         diff_renderer,
                         modified_change,
-                        width,
+                        within_graph.width(),
                     )?;
                 }
 
@@ -279,53 +254,52 @@ pub fn show_op_diff(
         } else {
             for change_id in ordered_change_ids {
                 let modified_change = changes.get(&change_id).unwrap();
-                write_modified_change_summary(
-                    formatter,
-                    commit_summary_template,
-                    &change_id,
-                    modified_change,
-                )?;
-                if let Some(diff_renderer) = &diff_renderer {
-                    let width = ui.term_width();
-                    show_change_diff(
-                        ui,
+                with_content_format.write(formatter, |formatter| {
+                    write_modified_change_summary(
                         formatter,
-                        current_repo,
-                        diff_renderer,
+                        commit_summary_template,
+                        &change_id,
                         modified_change,
-                        width,
-                    )?;
+                    )
+                })?;
+                if let Some(diff_renderer) = &diff_renderer {
+                    let width = with_content_format.width();
+                    show_change_diff(ui, formatter, diff_renderer, modified_change, width)?;
                 }
             }
         }
     }
 
-    let changed_local_branches = diff_named_ref_targets(
-        from_repo.view().local_branches(),
-        to_repo.view().local_branches(),
+    let changed_local_bookmarks = diff_named_ref_targets(
+        from_repo.view().local_bookmarks(),
+        to_repo.view().local_bookmarks(),
     )
     .collect_vec();
-    if !changed_local_branches.is_empty() {
+    if !changed_local_bookmarks.is_empty() {
         writeln!(formatter)?;
-        writeln!(formatter, "Changed local branches:")?;
-        for (name, (from_target, to_target)) in changed_local_branches {
-            writeln!(formatter, "{}:", name)?;
-            write_ref_target_summary(
-                formatter,
-                current_repo,
-                commit_summary_template,
-                to_target,
-                true,
-                None,
-            )?;
-            write_ref_target_summary(
-                formatter,
-                current_repo,
-                commit_summary_template,
-                from_target,
-                false,
-                None,
-            )?;
+        with_content_format.write(formatter, |formatter| {
+            writeln!(formatter, "Changed local bookmarks:")
+        })?;
+        for (name, (from_target, to_target)) in changed_local_bookmarks {
+            with_content_format.write(formatter, |formatter| {
+                writeln!(formatter, "{}:", name)?;
+                write_ref_target_summary(
+                    formatter,
+                    current_repo,
+                    commit_summary_template,
+                    to_target,
+                    true,
+                    None,
+                )?;
+                write_ref_target_summary(
+                    formatter,
+                    current_repo,
+                    commit_summary_template,
+                    from_target,
+                    false,
+                    None,
+                )
+            })?;
         }
     }
 
@@ -333,62 +307,68 @@ pub fn show_op_diff(
         diff_named_ref_targets(from_repo.view().tags(), to_repo.view().tags()).collect_vec();
     if !changed_tags.is_empty() {
         writeln!(formatter)?;
-        writeln!(formatter, "Changed tags:")?;
+        with_content_format.write(formatter, |formatter| writeln!(formatter, "Changed tags:"))?;
         for (name, (from_target, to_target)) in changed_tags {
-            writeln!(formatter, "{}:", name)?;
-            write_ref_target_summary(
-                formatter,
-                current_repo,
-                commit_summary_template,
-                to_target,
-                true,
-                None,
-            )?;
-            write_ref_target_summary(
-                formatter,
-                current_repo,
-                commit_summary_template,
-                from_target,
-                false,
-                None,
-            )?;
+            with_content_format.write(formatter, |formatter| {
+                writeln!(formatter, "{}:", name)?;
+                write_ref_target_summary(
+                    formatter,
+                    current_repo,
+                    commit_summary_template,
+                    to_target,
+                    true,
+                    None,
+                )?;
+                write_ref_target_summary(
+                    formatter,
+                    current_repo,
+                    commit_summary_template,
+                    from_target,
+                    false,
+                    None,
+                )
+            })?;
         }
         writeln!(formatter)?;
     }
 
-    let changed_remote_branches = diff_named_remote_refs(
-        from_repo.view().all_remote_branches(),
-        to_repo.view().all_remote_branches(),
+    let changed_remote_bookmarks = diff_named_remote_refs(
+        from_repo.view().all_remote_bookmarks(),
+        to_repo.view().all_remote_bookmarks(),
     )
     // Skip updates to the local git repo, since they should typically be covered in
     // local branches.
     .filter(|((_, remote_name), _)| *remote_name != REMOTE_NAME_FOR_LOCAL_GIT_REPO)
     .collect_vec();
-    if !changed_remote_branches.is_empty() {
+    if !changed_remote_bookmarks.is_empty() {
         writeln!(formatter)?;
-        writeln!(formatter, "Changed remote branches:")?;
+        with_content_format.write(formatter, |formatter| {
+            writeln!(formatter, "Changed remote bookmarks:")
+        })?;
         let get_remote_ref_prefix = |remote_ref: &RemoteRef| match remote_ref.state {
             RemoteRefState::New => "untracked",
             RemoteRefState::Tracking => "tracked",
         };
-        for ((name, remote_name), (from_ref, to_ref)) in changed_remote_branches {
-            writeln!(formatter, "{}@{}:", name, remote_name)?;
-            write_ref_target_summary(
-                formatter,
-                current_repo,
-                commit_summary_template,
-                &to_ref.target,
-                true,
-                Some(get_remote_ref_prefix(to_ref)),
-            )?;
-            write_ref_target_summary(
-                formatter,
-                current_repo,
-                commit_summary_template,
-                &from_ref.target,
-                false,
-                Some(get_remote_ref_prefix(from_ref)),
-            )?;
+        for ((name, remote_name), (from_ref, to_ref)) in changed_remote_bookmarks {
+            with_content_format.write(formatter, |formatter| {
+                writeln!(formatter, "{}@{}:", name, remote_name)?;
+                write_ref_target_summary(
+                    formatter,
+                    current_repo,
+                    commit_summary_template,
+                    &to_ref.target,
+                    true,
+                    Some(get_remote_ref_prefix(to_ref)),
+                )?;
+                write_ref_target_summary(
+                    formatter,
+                    current_repo,
+                    commit_summary_template,
+                    &from_ref.target,
+                    false,
+                    Some(get_remote_ref_prefix(from_ref)),
+                )
+            })?;
         }
     }
 
@@ -563,7 +543,6 @@ fn compute_operation_commits_diff(
 fn show_change_diff(
     ui: &Ui,
     formatter: &mut dyn Formatter,
-    repo: &dyn Repo,
     diff_renderer: &DiffRenderer,
     change: &ModifiedChange,
     width: usize,
@@ -572,15 +551,12 @@ fn show_change_diff(
         (predecessors @ ([] | [_]), [commit]) => {
             // New or modified change. If the modification involved a rebase,
             // show diffs from the rebased tree.
-            let predecessor_tree = rebase_to_dest_parent(repo, predecessors, commit)?;
-            let tree = commit.tree()?;
-            diff_renderer.show_diff(
+            diff_renderer.show_inter_diff(
                 ui,
                 formatter,
-                &predecessor_tree,
-                &tree,
+                predecessors,
+                commit,
                 &EverythingMatcher,
-                &Default::default(),
                 width,
             )?;
         }

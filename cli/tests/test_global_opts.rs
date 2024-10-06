@@ -89,9 +89,9 @@ fn test_no_subcommand() {
     assert_eq!(stdout, test_env.jj_cmd_success(&repo_path, &["log"]));
 
     // Command argument that looks like a command name.
-    test_env.jj_cmd_ok(&repo_path, &["branch", "create", "help"]);
-    test_env.jj_cmd_ok(&repo_path, &["branch", "create", "log"]);
-    test_env.jj_cmd_ok(&repo_path, &["branch", "create", "show"]);
+    test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", "help"]);
+    test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", "log"]);
+    test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", "show"]);
     // TODO: test_env.jj_cmd_ok(&repo_path, &["-r", "help"])
     insta::assert_snapshot!(test_env.jj_cmd_success(&repo_path, &["-r", "log"]), @r###"
     @  qpvuntsm test.user@example.com 2001-02-03 08:05:07 help log show 230dd059
@@ -549,7 +549,7 @@ fn test_invalid_config() {
     let stderr = test_env.jj_cmd_failure(test_env.env_root(), &["init", "repo"]);
     insta::assert_snapshot!(stderr.replace('\\', "/"), @r###"
     Config error: expected newline, found an identifier at line 1 column 10 in config/config0002.toml
-    For help, see https://github.com/martinvonz/jj/blob/main/docs/config.md.
+    For help, see https://martinvonz.github.io/jj/latest/config/.
     "###);
 }
 
@@ -568,9 +568,8 @@ fn test_no_user_configured() {
     insta::assert_snapshot!(get_stderr_string(&assert), @r###"
     Working copy now at: qpvuntsm 7a7d6016 (empty) without name
     Parent commit      : zzzzzzzz 00000000 (empty) (no description set)
-    Warning: Name and email not configured. Until configured, your commits will be created with the empty identity, and can't be pushed to remotes. To configure, run:
+    Warning: Name not configured. Until configured, your commits will be created with the empty identity, and can't be pushed to remotes. To configure, run:
       jj config set --user user.name "Some One"
-      jj config set --user user.email "someone@example.com"
     "###);
     let assert = test_env
         .jj_cmd(&repo_path, &["describe", "-m", "without email"])
@@ -579,6 +578,18 @@ fn test_no_user_configured() {
         .success();
     insta::assert_snapshot!(get_stderr_string(&assert), @r###"
     Working copy now at: qpvuntsm 906f8b89 (empty) without email
+    Parent commit      : zzzzzzzz 00000000 (empty) (no description set)
+    Warning: Email not configured. Until configured, your commits will be created with the empty identity, and can't be pushed to remotes. To configure, run:
+      jj config set --user user.email "someone@example.com"
+    "###);
+    let assert = test_env
+        .jj_cmd(&repo_path, &["describe", "-m", "without name and email"])
+        .env_remove("JJ_USER")
+        .env_remove("JJ_EMAIL")
+        .assert()
+        .success();
+    insta::assert_snapshot!(get_stderr_string(&assert), @r###"
+    Working copy now at: qpvuntsm 57d3a489 (empty) without name and email
     Parent commit      : zzzzzzzz 00000000 (empty) (no description set)
     Warning: Name and email not configured. Until configured, your commits will be created with the empty identity, and can't be pushed to remotes. To configure, run:
       jj config set --user user.name "Some One"
@@ -592,17 +603,17 @@ fn test_help() {
     let test_env = TestEnvironment::default();
 
     let stdout = test_env.jj_cmd_success(test_env.env_root(), &["diffedit", "-h"]);
-    insta::assert_snapshot!(stdout, @r###"
+    insta::assert_snapshot!(stdout, @r#"
     Touch up the content changes in a revision with a diff editor
 
     Usage: jj diffedit [OPTIONS]
 
     Options:
-      -r, --revision <REVISION>  The revision to touch up. Defaults to @ if neither --to nor --from are
-                                 specified
-          --from <FROM>          Show changes from this revision. Defaults to @ if --to is specified
-          --to <TO>              Edit changes in this revision. Defaults to @ if --from is specified
+      -r, --revision <REVISION>  The revision to touch up
+          --from <FROM>          Show changes from this revision
+          --to <TO>              Edit changes in this revision
           --tool <NAME>          Specify diff editor to be used
+          --restore-descendants  Preserve the content (not the diff) when rebasing descendants
       -h, --help                 Print help (see more with '--help')
 
     Global Options:
@@ -615,7 +626,7 @@ fn test_help() {
           --quiet                        Silence non-primary command output
           --no-pager                     Disable the pager
           --config-toml <TOML>           Additional configuration options (can be repeated)
-    "###);
+    "#);
 }
 
 #[test]

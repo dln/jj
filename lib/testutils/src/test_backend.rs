@@ -57,6 +57,10 @@ const CHANGE_ID_LENGTH: usize = 16;
 static BACKEND_DATA: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<TestBackendData>>>>> =
     OnceLock::new();
 
+// Keyed by canonical store path. Since we just use the path as a key, we can't
+// rely on on the file system to resolve two different uncanonicalized paths to
+// the same real path (as we would if we just used the path with `std::fs`
+// functions).
 fn backend_data() -> &'static Mutex<HashMap<PathBuf, Arc<Mutex<TestBackendData>>>> {
     BACKEND_DATA.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -95,7 +99,7 @@ impl TestBackend {
         backend_data()
             .lock()
             .unwrap()
-            .insert(store_path.to_path_buf(), data.clone());
+            .insert(store_path.canonicalize().unwrap(), data.clone());
         TestBackend {
             root_commit_id,
             root_change_id,
@@ -108,7 +112,7 @@ impl TestBackend {
         let data = backend_data()
             .lock()
             .unwrap()
-            .get(store_path)
+            .get(&store_path.canonicalize().unwrap())
             .unwrap()
             .clone();
         let root_commit_id = CommitId::from_bytes(&[0; HASH_LENGTH]);
@@ -189,7 +193,11 @@ impl Backend for TestBackend {
         }
     }
 
-    fn write_file(&self, path: &RepoPath, contents: &mut dyn Read) -> BackendResult<FileId> {
+    async fn write_file(
+        &self,
+        path: &RepoPath,
+        contents: &mut (dyn Read + Send),
+    ) -> BackendResult<FileId> {
         let mut bytes = Vec::new();
         contents.read_to_end(&mut bytes).unwrap();
         let id = FileId::new(get_hash(&bytes));
@@ -218,7 +226,7 @@ impl Backend for TestBackend {
         }
     }
 
-    fn write_symlink(&self, path: &RepoPath, target: &str) -> BackendResult<SymlinkId> {
+    async fn write_symlink(&self, path: &RepoPath, target: &str) -> BackendResult<SymlinkId> {
         let id = SymlinkId::new(get_hash(target.as_bytes()));
         self.locked_data()
             .symlinks
@@ -248,7 +256,7 @@ impl Backend for TestBackend {
         }
     }
 
-    fn write_tree(&self, path: &RepoPath, contents: &Tree) -> BackendResult<TreeId> {
+    async fn write_tree(&self, path: &RepoPath, contents: &Tree) -> BackendResult<TreeId> {
         let id = TreeId::new(get_hash(contents));
         self.locked_data()
             .trees
@@ -302,7 +310,7 @@ impl Backend for TestBackend {
         }
     }
 
-    fn write_commit(
+    async fn write_commit(
         &self,
         mut contents: Commit,
         mut sign_with: Option<&mut SigningFn>,

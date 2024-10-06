@@ -21,10 +21,15 @@
 "divergent prefix" = { fg = "red", underline = true }
 "hidden prefix" = "default"
 
-"email" = "yellow"
-"username" = "yellow"
+"author" = "yellow"
+"committer" = "yellow"
 "timestamp" = "cyan"
 "working_copies" = "green"
+"bookmark" = "magenta"
+"bookmarks" = "magenta"
+"local_bookmarks" = "magenta"
+"remote_bookmarks" = "magenta"
+#  TODO: Remove *branch* in jj 0.28+
 "branch" = "magenta"
 "branches" = "magenta"
 "local_branches" = "magenta"
@@ -49,9 +54,15 @@
 "working_copy change_id" = "bright magenta"
 # We do not use bright yellow because of how it looks on xterm's default theme.
 # https://github.com/martinvonz/jj/issues/528
-"working_copy email" = "yellow"
+"working_copy author" = "yellow"
+"working_copy committer" = "yellow"
 "working_copy timestamp" = "bright cyan"
 "working_copy working_copies" = "bright green"
+"working_copy bookmark" = "bright magenta"
+"working_copy bookmarks" = "bright magenta"
+"working_copy local_bookmarks" = "bright magenta"
+"working_copy remote_bookmarks" = "bright magenta"
+#  TODO: Remove *branch* in jj 0.28+
 "working_copy branch" = "bright magenta"
 "working_copy branches" = "bright magenta"
 "working_copy local_branches" = "bright magenta"

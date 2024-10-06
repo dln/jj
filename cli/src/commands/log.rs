@@ -20,6 +20,8 @@ use jj_lib::repo::Repo;
 use jj_lib::revset::RevsetExpression;
 use jj_lib::revset::RevsetFilterPredicate;
 use jj_lib::revset::RevsetIteratorExt;
+use jj_lib::settings::ConfigResultExt as _;
+use jj_lib::settings::UserSettings;
 use tracing::instrument;
 
 use crate::cli_util::format_template;
@@ -31,6 +33,7 @@ use crate::commit_templater::CommitTemplateLanguage;
 use crate::diff_util::DiffFormatArgs;
 use crate::graphlog::get_graphlog;
 use crate::graphlog::Edge;
+use crate::graphlog::GraphStyle;
 use crate::ui::Ui;
 
 /// Show revision history
@@ -43,9 +46,10 @@ use crate::ui::Ui;
 /// rendered as a synthetic node labeled "(elided revisions)".
 #[derive(clap::Args, Clone, Debug)]
 pub(crate) struct LogArgs {
-    /// Which revisions to show. If no paths nor revisions are specified, this
-    /// defaults to the `revsets.log` setting, or `@ |
-    /// ancestors(immutable_heads().., 2) | trunk()` if it is not set.
+    /// Which revisions to show
+    ///
+    /// If no paths nor revisions are specified, this defaults to the
+    /// `revsets.log` setting.
     #[arg(long, short)]
     revisions: Vec<RevisionArg>,
     /// Show revisions modifying the given paths
@@ -72,7 +76,7 @@ pub(crate) struct LogArgs {
     no_graph: bool,
     /// Render each revision using the given template
     ///
-    /// For the syntax, see https://github.com/martinvonz/jj/blob/main/docs/templates.md
+    /// For the syntax, see https://martinvonz.github.io/jj/latest/templates/
     #[arg(long, short = 'T')]
     template: Option<String>,
     /// Show patch
@@ -90,17 +94,17 @@ pub(crate) fn cmd_log(
 ) -> Result<(), CommandError> {
     let workspace_command = command.workspace_helper(ui)?;
 
-    let fileset_expression = workspace_command.parse_file_patterns(&args.paths)?;
+    let fileset_expression = workspace_command.parse_file_patterns(ui, &args.paths)?;
     let revset_expression = {
         // only use default revset if neither revset nor path are specified
         let mut expression = if args.revisions.is_empty() && args.paths.is_empty() {
             workspace_command
-                .parse_revset(&RevisionArg::from(command.settings().default_revset()))?
+                .parse_revset(ui, &RevisionArg::from(command.settings().default_revset()))?
         } else if !args.revisions.is_empty() {
-            workspace_command.parse_union_revsets(&args.revisions)?
+            workspace_command.parse_union_revsets(ui, &args.revisions)?
         } else {
             // a path was specified so we use all() and add path filter later
-            workspace_command.attach_revset_evaluator(RevsetExpression::all())?
+            workspace_command.attach_revset_evaluator(RevsetExpression::all())
         };
         if !args.paths.is_empty() {
             // Beware that args.paths = ["root:."] is not identical to []. The
@@ -117,6 +121,7 @@ pub(crate) fn cmd_log(
 
     let store = repo.store();
     let diff_renderer = workspace_command.diff_renderer_for_log(&args.diff_format, args.patch)?;
+    let graph_style = GraphStyle::from_settings(command.settings())?;
 
     let use_elided_nodes = command
         .settings()
@@ -127,13 +132,14 @@ pub(crate) fn cmd_log(
     let template;
     let node_template;
     {
-        let language = workspace_command.commit_template_language()?;
+        let language = workspace_command.commit_template_language();
         let template_string = match &args.template {
             Some(value) => value.to_string(),
             None => command.settings().config().get_string("templates.log")?,
         };
         template = workspace_command
             .parse_template(
+                ui,
                 &language,
                 &template_string,
                 CommitTemplateLanguage::wrap_commit,
@@ -141,8 +147,9 @@ pub(crate) fn cmd_log(
             .labeled("log");
         node_template = workspace_command
             .parse_template(
+                ui,
                 &language,
-                &command.settings().commit_node_template(),
+                &get_node_template(graph_style, command.settings())?,
                 CommitTemplateLanguage::wrap_commit_opt,
             )?
             .labeled("node");
@@ -162,7 +169,7 @@ pub(crate) fn cmd_log(
         let limit = args.limit.or(args.deprecated_limit).unwrap_or(usize::MAX);
 
         if !args.no_graph {
-            let mut graph = get_graphlog(command.settings(), formatter.raw());
+            let mut graph = get_graphlog(graph_style, formatter.raw());
             let forward_iter = TopoGroupedGraphIterator::new(revset.iter_graph());
             let iter: Box<dyn Iterator<Item = _>> = if args.reversed {
                 Box::new(ReverseGraphIterator::new(forward_iter))
@@ -201,24 +208,22 @@ pub(crate) fn cmd_log(
                 let mut buffer = vec![];
                 let key = (commit_id, false);
                 let commit = store.get_commit(&key.0)?;
-                let graph_width = || graph.width(&key, &graphlog_edges);
-                with_content_format.write_graph_text(
-                    ui.new_formatter(&mut buffer).as_mut(),
-                    |formatter| template.format(&commit, formatter),
-                    graph_width,
-                )?;
+                let within_graph =
+                    with_content_format.sub_width(graph.width(&key, &graphlog_edges));
+                within_graph.write(ui.new_formatter(&mut buffer).as_mut(), |formatter| {
+                    template.format(&commit, formatter)
+                })?;
                 if !buffer.ends_with(b"\n") {
                     buffer.push(b'\n');
                 }
                 if let Some(renderer) = &diff_renderer {
                     let mut formatter = ui.new_formatter(&mut buffer);
-                    let width = usize::saturating_sub(ui.term_width(), graph_width());
                     renderer.show_patch(
                         ui,
                         formatter.as_mut(),
                         &commit,
                         matcher.as_ref(),
-                        width,
+                        within_graph.width(),
                     )?;
                 }
 
@@ -234,11 +239,11 @@ pub(crate) fn cmd_log(
                     let real_key = (elided_key.0.clone(), false);
                     let edges = [Edge::Direct(real_key)];
                     let mut buffer = vec![];
-                    with_content_format.write_graph_text(
-                        ui.new_formatter(&mut buffer).as_mut(),
-                        |formatter| writeln!(formatter.labeled("elided"), "(elided revisions)"),
-                        || graph.width(&elided_key, &edges),
-                    )?;
+                    let within_graph =
+                        with_content_format.sub_width(graph.width(&elided_key, &edges));
+                    within_graph.write(ui.new_formatter(&mut buffer).as_mut(), |formatter| {
+                        writeln!(formatter.labeled("elided"), "(elided revisions)")
+                    })?;
                     let node_symbol = format_template(ui, &None, &node_template);
                     graph.add_node(
                         &elided_key,
@@ -279,7 +284,7 @@ pub(crate) fn cmd_log(
             )?;
         } else if revset.is_empty()
             && workspace_command
-                .parse_revset(&RevisionArg::from(only_path.to_owned()))
+                .parse_revset(ui, &RevisionArg::from(only_path.to_owned()))
                 .is_ok()
         {
             writeln!(
@@ -291,4 +296,20 @@ pub(crate) fn cmd_log(
     }
 
     Ok(())
+}
+
+pub fn get_node_template(
+    style: GraphStyle,
+    settings: &UserSettings,
+) -> Result<String, config::ConfigError> {
+    let symbol = settings
+        .config()
+        .get_string("templates.log_node")
+        .optional()?;
+    let default = if style.is_ascii() {
+        "builtin_log_node_ascii"
+    } else {
+        "builtin_log_node"
+    };
+    Ok(symbol.unwrap_or_else(|| default.to_owned()))
 }

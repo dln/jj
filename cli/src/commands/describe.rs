@@ -17,6 +17,7 @@ use std::io;
 use std::io::Read;
 
 use itertools::Itertools;
+use jj_lib::backend::Signature;
 use jj_lib::commit::CommitIteratorExt;
 use jj_lib::object_id::ObjectId;
 use tracing::instrument;
@@ -30,6 +31,7 @@ use crate::description_util::edit_description;
 use crate::description_util::edit_multiple_descriptions;
 use crate::description_util::join_message_paragraphs;
 use crate::description_util::ParsedBulkEditMessage;
+use crate::text_util::parse_author;
 use crate::ui::Ui;
 
 /// Update the change description or other metadata
@@ -72,6 +74,16 @@ pub(crate) struct DescribeArgs {
     /// $ JJ_USER='Foo Bar' JJ_EMAIL=foo@bar.com jj describe --reset-author
     #[arg(long)]
     reset_author: bool,
+    /// Set author to the provided string
+    ///
+    /// This changes author name and email while retaining author
+    /// timestamp for non-discardable commits.
+    #[arg(
+        long,
+        conflicts_with = "reset_author",
+        value_parser = parse_author
+    )]
+    author: Option<(String, String)>,
 }
 
 #[instrument(skip_all)]
@@ -82,7 +94,7 @@ pub(crate) fn cmd_describe(
 ) -> Result<(), CommandError> {
     let mut workspace_command = command.workspace_helper(ui)?;
     let commits: Vec<_> = workspace_command
-        .parse_union_revsets(&args.revisions)?
+        .parse_union_revsets(ui, &args.revisions)?
         .evaluate_to_commits()?
         .try_collect()?; // in reverse topological order
     if commits.is_empty() {
@@ -123,14 +135,13 @@ pub(crate) fn cmd_describe(
             })
             .collect()
     } else {
-        let repo = tx.base_repo().clone();
         let temp_commits: Vec<(_, _)> = commits
             .iter()
             // Edit descriptions in topological order
             .rev()
             .map(|commit| -> Result<_, CommandError> {
                 let mut commit_builder = tx
-                    .mut_repo()
+                    .repo_mut()
                     .rewrite_commit(command.settings(), commit)
                     .detach();
                 if commit_builder.description().is_empty() {
@@ -140,14 +151,23 @@ pub(crate) fn cmd_describe(
                     let new_author = commit_builder.committer().clone();
                     commit_builder.set_author(new_author);
                 }
+                if let Some((name, email)) = args.author.clone() {
+                    let new_author = Signature {
+                        name,
+                        email,
+                        timestamp: commit_builder.author().timestamp,
+                    };
+                    commit_builder.set_author(new_author);
+                }
                 let temp_commit = commit_builder.write_hidden()?;
                 Ok((commit.id(), temp_commit))
             })
             .try_collect()?;
 
         if let [(_, temp_commit)] = &*temp_commits {
-            let template = description_template(&tx, "", temp_commit)?;
-            let description = edit_description(&repo, &template, command.settings())?;
+            let template = description_template(ui, &tx, "", temp_commit)?;
+            let description =
+                edit_description(tx.base_workspace_helper(), &template, command.settings())?;
 
             vec![(&commits[0], description)]
         } else {
@@ -156,7 +176,7 @@ pub(crate) fn cmd_describe(
                 missing,
                 duplicates,
                 unexpected,
-            } = edit_multiple_descriptions(&mut tx, &repo, &temp_commits, command.settings())?;
+            } = edit_multiple_descriptions(ui, &tx, &temp_commits, command.settings())?;
             if !missing.is_empty() {
                 return Err(user_error(format!(
                     "The description for the following commits were not found in the edited \
@@ -194,13 +214,14 @@ pub(crate) fn cmd_describe(
     // `transform_descendants` below unnecessarily.
     let commit_descriptions: HashMap<_, _> = commit_descriptions
         .into_iter()
-        .filter_map(|(commit, new_description)| {
-            if *new_description == *commit.description() && !args.reset_author {
-                None
-            } else {
-                Some((commit.id(), new_description))
-            }
+        .filter(|(commit, new_description)| {
+            new_description != commit.description()
+                || args.reset_author
+                || args.author.as_ref().is_some_and(|(name, email)| {
+                    name != &commit.author().name || email != &commit.author().email
+                })
         })
+        .map(|(commit, new_description)| (commit.id(), new_description))
         .collect();
 
     let mut num_described = 0;
@@ -210,7 +231,7 @@ pub(crate) fn cmd_describe(
     // being rewritten, using `MutRepo::transform_descendants` prevents us from
     // rewriting the same commit multiple times, and adding additional entries
     // in the predecessor chain.
-    tx.mut_repo().transform_descendants(
+    tx.repo_mut().transform_descendants(
         command.settings(),
         commit_descriptions
             .keys()
@@ -225,6 +246,14 @@ pub(crate) fn cmd_describe(
                     let new_author = commit_builder.committer().clone();
                     commit_builder = commit_builder.set_author(new_author);
                 }
+                if let Some((name, email)) = args.author.clone() {
+                    let new_author = Signature {
+                        name,
+                        email,
+                        timestamp: commit_builder.author().timestamp,
+                    };
+                    commit_builder = commit_builder.set_author(new_author);
+                }
                 num_described += 1;
             } else {
                 num_rebased += 1;
@@ -234,10 +263,10 @@ pub(crate) fn cmd_describe(
         },
     )?;
     if num_described > 1 {
-        writeln!(ui.status(), "Updated {} commits", num_described)?;
+        writeln!(ui.status(), "Updated {num_described} commits")?;
     }
     if num_rebased > 0 {
-        writeln!(ui.status(), "Rebased {} descendant commits", num_rebased)?;
+        writeln!(ui.status(), "Rebased {num_rebased} descendant commits")?;
     }
     tx.finish(ui, tx_description)?;
     Ok(())

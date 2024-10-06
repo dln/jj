@@ -25,9 +25,10 @@ use jj_lib::repo::ReadonlyRepo;
 use jj_lib::repo::Repo;
 use jj_lib::workspace::Workspace;
 
-use crate::cli_util::print_trackable_remote_branches;
+use crate::cli_util::print_trackable_remote_bookmarks;
 use crate::cli_util::start_repo_transaction;
 use crate::cli_util::CommandHelper;
+use crate::cli_util::WorkspaceCommandHelper;
 use crate::command_error::cli_error;
 use crate::command_error::user_error_with_hint;
 use crate::command_error::user_error_with_message;
@@ -171,19 +172,19 @@ pub fn do_init(
             let mut workspace_command = command.for_workable_repo(ui, workspace, repo)?;
             maybe_add_gitignore(&workspace_command)?;
             workspace_command.maybe_snapshot(ui)?;
-            maybe_set_repository_level_trunk_alias(ui, workspace_command.repo())?;
+            maybe_set_repository_level_trunk_alias(ui, &workspace_command)?;
             if !workspace_command.working_copy_shared_with_git() {
                 let mut tx = workspace_command.start_transaction();
-                jj_lib::git::import_head(tx.mut_repo())?;
-                if let Some(git_head_id) = tx.mut_repo().view().git_head().as_normal().cloned() {
-                    let git_head_commit = tx.mut_repo().store().get_commit(&git_head_id)?;
+                jj_lib::git::import_head(tx.repo_mut())?;
+                if let Some(git_head_id) = tx.repo().view().git_head().as_normal().cloned() {
+                    let git_head_commit = tx.repo().store().get_commit(&git_head_id)?;
                     tx.check_out(&git_head_commit)?;
                 }
-                if tx.mut_repo().has_changes() {
+                if tx.repo().has_changes() {
                     tx.finish(ui, "import git head")?;
                 }
             }
-            print_trackable_remote_branches(ui, workspace_command.repo().view())?;
+            print_trackable_remote_bookmarks(ui, workspace_command.repo().view())?;
         }
         GitInitMode::Internal => {
             Workspace::init_internal_git(command.settings(), workspace_root)?;
@@ -208,20 +209,20 @@ fn init_git_refs(
     let mut git_settings = command.settings().git_settings();
     git_settings.abandon_unreachable_commits = false;
     let stats = git::import_some_refs(
-        tx.mut_repo(),
+        tx.repo_mut(),
         &git_settings,
         // Initial import shouldn't fail because of reserved remote name.
         |ref_name| !git::is_reserved_git_remote_ref(ref_name),
     )?;
-    if !tx.mut_repo().has_changes() {
+    if !tx.repo().has_changes() {
         return Ok(repo);
     }
     print_git_import_stats(ui, tx.repo(), &stats, false)?;
     if colocated {
-        // If git.auto-local-branch = true, local branches could be created for
+        // If git.auto-local-branch = true, local bookmarks could be created for
         // the imported remote branches.
-        let failed_branches = git::export_refs(tx.mut_repo())?;
-        print_failed_git_export(ui, &failed_branches)?;
+        let failed_refs = git::export_refs(tx.repo_mut())?;
+        print_failed_git_export(ui, &failed_refs)?;
     }
     let repo = tx.commit("import git refs");
     writeln!(
@@ -234,9 +235,9 @@ fn init_git_refs(
 // Set repository level `trunk()` alias to the default branch for "origin".
 pub fn maybe_set_repository_level_trunk_alias(
     ui: &Ui,
-    repo: &Arc<ReadonlyRepo>,
+    workspace_command: &WorkspaceCommandHelper,
 ) -> Result<(), CommandError> {
-    let git_repo = get_git_repo(repo.store())?;
+    let git_repo = get_git_repo(workspace_command.repo().store())?;
     if let Ok(reference) = git_repo.find_reference("refs/remotes/origin/HEAD") {
         if let Some(reference_name) = reference.symbolic_target() {
             if let Some(RefName::RemoteBranch {
@@ -244,7 +245,7 @@ pub fn maybe_set_repository_level_trunk_alias(
                 ..
             }) = parse_git_ref(reference_name)
             {
-                let config_path = repo.repo_path().join("config.toml");
+                let config_path = workspace_command.repo_path().join("config.toml");
                 write_config_value_to_file(
                     &ConfigNamePathBuf::from_iter(["revset-aliases", "trunk()"]),
                     format!("{default_branch}@origin").into(),

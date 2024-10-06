@@ -33,11 +33,11 @@ fn create_commit(
     for (name, content) in files {
         std::fs::write(repo_path.join(name), content).unwrap();
     }
-    test_env.jj_cmd_ok(repo_path, &["branch", "create", name]);
+    test_env.jj_cmd_ok(repo_path, &["bookmark", "create", name]);
 }
 
 fn get_log_output(test_env: &TestEnvironment, repo_path: &Path) -> String {
-    test_env.jj_cmd_success(repo_path, &["log", "-T", "branches"])
+    test_env.jj_cmd_success(repo_path, &["log", "-T", "bookmarks"])
 }
 
 #[test]
@@ -216,19 +216,19 @@ fn test_chmod_file_dir_deletion_conflicts() {
     );
     insta::assert_snapshot!(stdout, @"");
     insta::assert_snapshot!(stderr, @r###"
-    New conflicts appeared in these commits:
-      kmkuslsw 1b2ef84c file_deletion | (conflict) file_deletion
-    To resolve the conflicts, start by updating to it:
-      jj new kmkuslswpqwq
-    Then use `jj resolve`, or edit the conflict markers in the file directly.
-    Once the conflicts are resolved, you may want to inspect the result with `jj diff`.
-    Then run `jj squash` to move the resolution into the conflicted commit.
     Working copy now at: kmkuslsw 1b2ef84c file_deletion | (conflict) file_deletion
     Parent commit      : zsuskuln c51c9c55 file | file
     Parent commit      : royxmykx 6b18b3c1 deletion | deletion
     Added 0 files, modified 1 files, removed 0 files
     There are unresolved conflicts at these paths:
     file    2-sided conflict including 1 deletion and an executable
+    New conflicts appeared in these commits:
+      kmkuslsw 1b2ef84c file_deletion | (conflict) file_deletion
+    To resolve the conflicts, start by updating to it:
+      jj new kmkuslsw
+    Then use `jj resolve`, or edit the conflict markers in the file directly.
+    Once the conflicts are resolved, you may want to inspect the result with `jj diff`.
+    Then run `jj squash` to move the resolution into the conflicted commit.
     "###);
     let stdout = test_env.jj_cmd_success(&repo_path, &["debug", "tree", "-r=file_deletion"]);
     insta::assert_snapshot!(stdout,

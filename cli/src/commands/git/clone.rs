@@ -54,6 +54,9 @@ pub struct GitCloneArgs {
     /// doesn't exist.
     #[arg(value_hint = clap::ValueHint::DirPath)]
     destination: Option<String>,
+    /// Name of the newly created remote
+    #[arg(long = "remote", default_value = "origin")]
+    remote_name: String,
     /// Whether or not to colocate the Jujutsu repo with the git repo
     #[arg(long)]
     colocate: bool,
@@ -97,10 +100,10 @@ pub fn cmd_git_clone(
     command: &CommandHelper,
     args: &GitCloneArgs,
 ) -> Result<(), CommandError> {
+    let remote_name = &args.remote_name;
     if command.global_args().at_operation.is_some() {
         return Err(cli_error("--at-op is not respected"));
     }
-    let remote_name = "origin";
     let source = absolute_git_source(command.cwd(), &args.source);
     let wc_path_str = args
         .destination
@@ -158,7 +161,7 @@ pub fn cmd_git_clone(
     let (mut workspace_command, stats) = clone_result?;
     if let Some(default_branch) = &stats.default_branch {
         // Set repository level `trunk()` alias to the default remote branch.
-        let config_path = workspace_command.repo().repo_path().join("config.toml");
+        let config_path = workspace_command.repo_path().join("config.toml");
         write_config_value_to_file(
             &ConfigNamePathBuf::from_iter(["revset-aliases", "trunk()"]),
             format!("{default_branch}@{remote_name}").into(),
@@ -172,13 +175,13 @@ pub fn cmd_git_clone(
         let default_branch_remote_ref = workspace_command
             .repo()
             .view()
-            .get_remote_branch(default_branch, remote_name);
+            .get_remote_bookmark(default_branch, remote_name);
         if let Some(commit_id) = default_branch_remote_ref.target.as_normal().cloned() {
             let mut checkout_tx = workspace_command.start_transaction();
-            // For convenience, create local branch as Git would do.
+            // For convenience, create local bookmark as Git would do.
             checkout_tx
-                .mut_repo()
-                .track_remote_branch(default_branch, remote_name);
+                .repo_mut()
+                .track_remote_bookmark(default_branch, remote_name);
             if let Ok(commit) = checkout_tx.repo().store().get_commit(&commit_id) {
                 checkout_tx.check_out(&commit)?;
             }
@@ -214,7 +217,7 @@ fn do_git_clone(
 
     let stats = with_remote_git_callbacks(ui, None, |cb| {
         git::fetch(
-            fetch_tx.mut_repo(),
+            fetch_tx.repo_mut(),
             &git_repo,
             remote_name,
             &[StringPattern::everything()],

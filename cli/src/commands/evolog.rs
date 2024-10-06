@@ -16,10 +16,9 @@ use itertools::Itertools;
 use jj_lib::commit::Commit;
 use jj_lib::dag_walk::topo_order_reverse_ok;
 use jj_lib::matchers::EverythingMatcher;
-use jj_lib::repo::Repo;
-use jj_lib::rewrite::rebase_to_dest_parent;
 use tracing::instrument;
 
+use super::log::get_node_template;
 use crate::cli_util::format_template;
 use crate::cli_util::CommandHelper;
 use crate::cli_util::LogContentFormat;
@@ -27,20 +26,17 @@ use crate::cli_util::RevisionArg;
 use crate::command_error::CommandError;
 use crate::commit_templater::CommitTemplateLanguage;
 use crate::diff_util::DiffFormatArgs;
-use crate::diff_util::DiffRenderer;
-use crate::formatter::Formatter;
 use crate::graphlog::get_graphlog;
 use crate::graphlog::Edge;
+use crate::graphlog::GraphStyle;
 use crate::ui::Ui;
 
 /// Show how a change has evolved over time
 ///
 /// Lists the previous commits which a change has pointed to. The current commit
 /// of a change evolves when the change is updated, rebased, etc.
-///
-/// Name is derived from Merciual's obsolescence markers.
 #[derive(clap::Args, Clone, Debug)]
-pub(crate) struct ObslogArgs {
+pub(crate) struct EvologArgs {
     #[arg(long, short, default_value = "@")]
     revision: RevisionArg,
     /// Limit number of revisions to show
@@ -59,7 +55,7 @@ pub(crate) struct ObslogArgs {
     no_graph: bool,
     /// Render each revision using the given template
     ///
-    /// For the syntax, see https://github.com/martinvonz/jj/blob/main/docs/templates.md
+    /// For the syntax, see https://martinvonz.github.io/jj/latest/templates/
     #[arg(long, short = 'T')]
     template: Option<String>,
     /// Show patch compared to the previous version of this change
@@ -74,29 +70,30 @@ pub(crate) struct ObslogArgs {
 }
 
 #[instrument(skip_all)]
-pub(crate) fn cmd_obslog(
+pub(crate) fn cmd_evolog(
     ui: &mut Ui,
     command: &CommandHelper,
-    args: &ObslogArgs,
+    args: &EvologArgs,
 ) -> Result<(), CommandError> {
     let workspace_command = command.workspace_helper(ui)?;
-    let repo = workspace_command.repo().as_ref();
 
-    let start_commit = workspace_command.resolve_single_rev(&args.revision)?;
+    let start_commit = workspace_command.resolve_single_rev(ui, &args.revision)?;
 
     let diff_renderer = workspace_command.diff_renderer_for_log(&args.diff_format, args.patch)?;
+    let graph_style = GraphStyle::from_settings(command.settings())?;
     let with_content_format = LogContentFormat::new(ui, command.settings())?;
 
     let template;
     let node_template;
     {
-        let language = workspace_command.commit_template_language()?;
+        let language = workspace_command.commit_template_language();
         let template_string = match &args.template {
             Some(value) => value.to_string(),
             None => command.settings().config().get_string("templates.log")?,
         };
         template = workspace_command
             .parse_template(
+                ui,
                 &language,
                 &template_string,
                 CommitTemplateLanguage::wrap_commit,
@@ -104,8 +101,9 @@ pub(crate) fn cmd_obslog(
             .labeled("log");
         node_template = workspace_command
             .parse_template(
+                ui,
                 &language,
-                &command.settings().commit_node_template(),
+                &get_node_template(graph_style, command.settings())?,
                 CommitTemplateLanguage::wrap_commit_opt,
             )?
             .labeled("node");
@@ -144,26 +142,32 @@ pub(crate) fn cmd_obslog(
         commits.truncate(n);
     }
     if !args.no_graph {
-        let mut graph = get_graphlog(command.settings(), formatter.raw());
+        let mut graph = get_graphlog(graph_style, formatter.raw());
         for commit in commits {
-            let mut edges = vec![];
-            for predecessor in commit.predecessors() {
-                edges.push(Edge::Direct(predecessor?.id().clone()));
-            }
-            let graph_width = || graph.width(commit.id(), &edges);
+            let edges = commit
+                .predecessor_ids()
+                .iter()
+                .map(|id| Edge::Direct(id.clone()))
+                .collect_vec();
             let mut buffer = vec![];
-            with_content_format.write_graph_text(
-                ui.new_formatter(&mut buffer).as_mut(),
-                |formatter| template.format(&commit, formatter),
-                graph_width,
-            )?;
+            let within_graph = with_content_format.sub_width(graph.width(commit.id(), &edges));
+            within_graph.write(ui.new_formatter(&mut buffer).as_mut(), |formatter| {
+                template.format(&commit, formatter)
+            })?;
             if !buffer.ends_with(b"\n") {
                 buffer.push(b'\n');
             }
             if let Some(renderer) = &diff_renderer {
+                let predecessors: Vec<_> = commit.predecessors().try_collect()?;
                 let mut formatter = ui.new_formatter(&mut buffer);
-                let width = usize::saturating_sub(ui.term_width(), graph_width());
-                show_predecessor_patch(ui, repo, renderer, formatter.as_mut(), &commit, width)?;
+                renderer.show_inter_diff(
+                    ui,
+                    formatter.as_mut(),
+                    &predecessors,
+                    &commit,
+                    &EverythingMatcher,
+                    within_graph.width(),
+                )?;
             }
             let node_symbol = format_template(ui, &Some(commit.clone()), &node_template);
             graph.add_node(
@@ -178,34 +182,19 @@ pub(crate) fn cmd_obslog(
             with_content_format
                 .write(formatter, |formatter| template.format(&commit, formatter))?;
             if let Some(renderer) = &diff_renderer {
+                let predecessors: Vec<_> = commit.predecessors().try_collect()?;
                 let width = ui.term_width();
-                show_predecessor_patch(ui, repo, renderer, formatter, &commit, width)?;
+                renderer.show_inter_diff(
+                    ui,
+                    formatter,
+                    &predecessors,
+                    &commit,
+                    &EverythingMatcher,
+                    width,
+                )?;
             }
         }
     }
 
-    Ok(())
-}
-
-fn show_predecessor_patch(
-    ui: &Ui,
-    repo: &dyn Repo,
-    renderer: &DiffRenderer,
-    formatter: &mut dyn Formatter,
-    commit: &Commit,
-    width: usize,
-) -> Result<(), CommandError> {
-    let predecessors: Vec<_> = commit.predecessors().try_collect()?;
-    let predecessor_tree = rebase_to_dest_parent(repo, &predecessors, commit)?;
-    let tree = commit.tree()?;
-    renderer.show_diff(
-        ui,
-        formatter,
-        &predecessor_tree,
-        &tree,
-        &EverythingMatcher,
-        &Default::default(),
-        width,
-    )?;
     Ok(())
 }

@@ -76,7 +76,7 @@ impl Transaction {
         &self.mut_repo
     }
 
-    pub fn mut_repo(&mut self) -> &mut MutableRepo {
+    pub fn repo_mut(&mut self) -> &mut MutableRepo {
         &mut self.mut_repo
     }
 
@@ -92,7 +92,7 @@ impl Transaction {
         let base_repo = repo_loader.load_at(&ancestor_op)?;
         let other_repo = repo_loader.load_at(&other_op)?;
         self.parent_ops.push(other_op);
-        let merged_repo = self.mut_repo();
+        let merged_repo = self.repo_mut();
         merged_repo.merge(&base_repo, &other_repo);
         Ok(())
     }
@@ -150,7 +150,7 @@ pub fn create_op_metadata(
     let start_time = user_settings
         .operation_timestamp()
         .unwrap_or_else(Timestamp::now);
-    let end_time = start_time.clone();
+    let end_time = start_time;
     let hostname = user_settings.operation_hostname();
     let username = user_settings.operation_username();
     OperationMetadata {

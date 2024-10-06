@@ -23,13 +23,13 @@ fn test_squash() {
     test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "repo"]);
     let repo_path = test_env.env_root().join("repo");
 
-    test_env.jj_cmd_ok(&repo_path, &["branch", "create", "a"]);
+    test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", "a"]);
     std::fs::write(repo_path.join("file1"), "a\n").unwrap();
     test_env.jj_cmd_ok(&repo_path, &["new"]);
-    test_env.jj_cmd_ok(&repo_path, &["branch", "create", "b"]);
+    test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", "b"]);
     std::fs::write(repo_path.join("file1"), "b\n").unwrap();
     test_env.jj_cmd_ok(&repo_path, &["new"]);
-    test_env.jj_cmd_ok(&repo_path, &["branch", "create", "c"]);
+    test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", "c"]);
     std::fs::write(repo_path.join("file1"), "c\n").unwrap();
     // Test the setup
     insta::assert_snapshot!(get_log_output(&test_env, &repo_path), @r###"
@@ -85,10 +85,10 @@ fn test_squash() {
     test_env.jj_cmd_ok(&repo_path, &["undo"]);
     test_env.jj_cmd_ok(&repo_path, &["edit", "b"]);
     test_env.jj_cmd_ok(&repo_path, &["new"]);
-    test_env.jj_cmd_ok(&repo_path, &["branch", "create", "d"]);
+    test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", "d"]);
     std::fs::write(repo_path.join("file2"), "d\n").unwrap();
     test_env.jj_cmd_ok(&repo_path, &["new", "c", "d"]);
-    test_env.jj_cmd_ok(&repo_path, &["branch", "create", "e"]);
+    test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", "e"]);
     insta::assert_snapshot!(get_log_output(&test_env, &repo_path), @r###"
     @    41219719ab5f e (empty)
     ├─╮
@@ -100,9 +100,10 @@ fn test_squash() {
     ◆  000000000000 (empty)
     "###);
     let stderr = test_env.jj_cmd_failure(&repo_path, &["squash"]);
-    insta::assert_snapshot!(stderr, @r###"
-    Error: Cannot squash merge commits
-    "###);
+    insta::assert_snapshot!(stderr, @r#"
+    Error: Cannot squash merge commits without a specified destination
+    Hint: Use `--into` to specify which parent to squash into
+    "#);
 
     // Can squash into a merge commit
     test_env.jj_cmd_ok(&repo_path, &["new", "e"]);
@@ -136,15 +137,15 @@ fn test_squash_partial() {
     test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "repo"]);
     let repo_path = test_env.env_root().join("repo");
 
-    test_env.jj_cmd_ok(&repo_path, &["branch", "create", "a"]);
+    test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", "a"]);
     std::fs::write(repo_path.join("file1"), "a\n").unwrap();
     std::fs::write(repo_path.join("file2"), "a\n").unwrap();
     test_env.jj_cmd_ok(&repo_path, &["new"]);
-    test_env.jj_cmd_ok(&repo_path, &["branch", "create", "b"]);
+    test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", "b"]);
     std::fs::write(repo_path.join("file1"), "b\n").unwrap();
     std::fs::write(repo_path.join("file2"), "b\n").unwrap();
     test_env.jj_cmd_ok(&repo_path, &["new"]);
-    test_env.jj_cmd_ok(&repo_path, &["branch", "create", "c"]);
+    test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", "c"]);
     std::fs::write(repo_path.join("file1"), "c\n").unwrap();
     std::fs::write(repo_path.join("file2"), "c\n").unwrap();
     // Test the setup
@@ -282,13 +283,13 @@ fn test_squash_keep_emptied() {
     test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "repo"]);
     let repo_path = test_env.env_root().join("repo");
 
-    test_env.jj_cmd_ok(&repo_path, &["branch", "create", "a"]);
+    test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", "a"]);
     std::fs::write(repo_path.join("file1"), "a\n").unwrap();
     test_env.jj_cmd_ok(&repo_path, &["new"]);
-    test_env.jj_cmd_ok(&repo_path, &["branch", "create", "b"]);
+    test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", "b"]);
     std::fs::write(repo_path.join("file1"), "b\n").unwrap();
     test_env.jj_cmd_ok(&repo_path, &["new"]);
-    test_env.jj_cmd_ok(&repo_path, &["branch", "create", "c"]);
+    test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", "c"]);
     std::fs::write(repo_path.join("file1"), "c\n").unwrap();
     // Test the setup
 
@@ -336,25 +337,25 @@ fn test_squash_from_to() {
     //
     // When moving changes between e.g. C and F, we should not get unrelated changes
     // from B and D.
-    test_env.jj_cmd_ok(&repo_path, &["branch", "create", "a"]);
+    test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", "a"]);
     std::fs::write(repo_path.join("file1"), "a\n").unwrap();
     std::fs::write(repo_path.join("file2"), "a\n").unwrap();
     std::fs::write(repo_path.join("file3"), "a\n").unwrap();
     test_env.jj_cmd_ok(&repo_path, &["new"]);
-    test_env.jj_cmd_ok(&repo_path, &["branch", "create", "b"]);
+    test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", "b"]);
     std::fs::write(repo_path.join("file3"), "b\n").unwrap();
     test_env.jj_cmd_ok(&repo_path, &["new"]);
-    test_env.jj_cmd_ok(&repo_path, &["branch", "create", "c"]);
+    test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", "c"]);
     std::fs::write(repo_path.join("file1"), "c\n").unwrap();
     test_env.jj_cmd_ok(&repo_path, &["edit", "a"]);
     test_env.jj_cmd_ok(&repo_path, &["new"]);
-    test_env.jj_cmd_ok(&repo_path, &["branch", "create", "d"]);
+    test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", "d"]);
     std::fs::write(repo_path.join("file3"), "d\n").unwrap();
     test_env.jj_cmd_ok(&repo_path, &["new"]);
-    test_env.jj_cmd_ok(&repo_path, &["branch", "create", "e"]);
+    test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", "e"]);
     std::fs::write(repo_path.join("file2"), "e\n").unwrap();
     test_env.jj_cmd_ok(&repo_path, &["new"]);
-    test_env.jj_cmd_ok(&repo_path, &["branch", "create", "f"]);
+    test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", "f"]);
     std::fs::write(repo_path.join("file2"), "f\n").unwrap();
     // Test the setup
     insta::assert_snapshot!(get_log_output(&test_env, &repo_path), @r###"
@@ -468,20 +469,20 @@ fn test_squash_from_to_partial() {
     // D B
     // |/
     // A
-    test_env.jj_cmd_ok(&repo_path, &["branch", "create", "a"]);
+    test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", "a"]);
     std::fs::write(repo_path.join("file1"), "a\n").unwrap();
     std::fs::write(repo_path.join("file2"), "a\n").unwrap();
     std::fs::write(repo_path.join("file3"), "a\n").unwrap();
     test_env.jj_cmd_ok(&repo_path, &["new"]);
-    test_env.jj_cmd_ok(&repo_path, &["branch", "create", "b"]);
+    test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", "b"]);
     std::fs::write(repo_path.join("file3"), "b\n").unwrap();
     test_env.jj_cmd_ok(&repo_path, &["new"]);
-    test_env.jj_cmd_ok(&repo_path, &["branch", "create", "c"]);
+    test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", "c"]);
     std::fs::write(repo_path.join("file1"), "c\n").unwrap();
     std::fs::write(repo_path.join("file2"), "c\n").unwrap();
     test_env.jj_cmd_ok(&repo_path, &["edit", "a"]);
     test_env.jj_cmd_ok(&repo_path, &["new"]);
-    test_env.jj_cmd_ok(&repo_path, &["branch", "create", "d"]);
+    test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", "d"]);
     std::fs::write(repo_path.join("file3"), "d\n").unwrap();
     // Test the setup
     insta::assert_snapshot!(get_log_output(&test_env, &repo_path), @r###"
@@ -650,22 +651,22 @@ fn test_squash_from_multiple() {
     //  \|/
     //   A
     let file = repo_path.join("file");
-    test_env.jj_cmd_ok(&repo_path, &["branch", "create", "a"]);
+    test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", "a"]);
     std::fs::write(&file, "a\n").unwrap();
     test_env.jj_cmd_ok(&repo_path, &["new"]);
-    test_env.jj_cmd_ok(&repo_path, &["branch", "create", "b"]);
+    test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", "b"]);
     std::fs::write(&file, "b\n").unwrap();
     test_env.jj_cmd_ok(&repo_path, &["new", "@-"]);
-    test_env.jj_cmd_ok(&repo_path, &["branch", "create", "c"]);
+    test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", "c"]);
     std::fs::write(&file, "c\n").unwrap();
     test_env.jj_cmd_ok(&repo_path, &["new", "@-"]);
-    test_env.jj_cmd_ok(&repo_path, &["branch", "create", "d"]);
+    test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", "d"]);
     std::fs::write(&file, "d\n").unwrap();
     test_env.jj_cmd_ok(&repo_path, &["new", "all:visible_heads()"]);
-    test_env.jj_cmd_ok(&repo_path, &["branch", "create", "e"]);
+    test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", "e"]);
     std::fs::write(&file, "e\n").unwrap();
     test_env.jj_cmd_ok(&repo_path, &["new"]);
-    test_env.jj_cmd_ok(&repo_path, &["branch", "create", "f"]);
+    test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", "f"]);
     std::fs::write(&file, "f\n").unwrap();
     // Test the setup
     insta::assert_snapshot!(get_log_output(&test_env, &repo_path), @r###"
@@ -687,15 +688,15 @@ fn test_squash_from_multiple() {
     insta::assert_snapshot!(stdout, @"");
     insta::assert_snapshot!(stderr, @r###"
     Rebased 2 descendant commits
+    Working copy now at: kpqxywon 3e25ee21 f | (no description set)
+    Parent commit      : yostqsxw abb5a4ea e | (no description set)
     New conflicts appeared in these commits:
       yqosqzyt 98759deb d | (conflict) (no description set)
     To resolve the conflicts, start by updating to it:
-      jj new yqosqzytrlsw
+      jj new yqosqzyt
     Then use `jj resolve`, or edit the conflict markers in the file directly.
     Once the conflicts are resolved, you may want to inspect the result with `jj diff`.
     Then run `jj squash` to move the resolution into the conflicted commit.
-    Working copy now at: kpqxywon 3e25ee21 f | (no description set)
-    Parent commit      : yostqsxw abb5a4ea e | (no description set)
     "###);
     insta::assert_snapshot!(get_log_output(&test_env, &repo_path), @r###"
     @  3e25ee211f3f f
@@ -769,27 +770,27 @@ fn test_squash_from_multiple_partial() {
     //   A
     let file1 = repo_path.join("file1");
     let file2 = repo_path.join("file2");
-    test_env.jj_cmd_ok(&repo_path, &["branch", "create", "a"]);
+    test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", "a"]);
     std::fs::write(&file1, "a\n").unwrap();
     std::fs::write(&file2, "a\n").unwrap();
     test_env.jj_cmd_ok(&repo_path, &["new"]);
-    test_env.jj_cmd_ok(&repo_path, &["branch", "create", "b"]);
+    test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", "b"]);
     std::fs::write(&file1, "b\n").unwrap();
     std::fs::write(&file2, "b\n").unwrap();
     test_env.jj_cmd_ok(&repo_path, &["new", "@-"]);
-    test_env.jj_cmd_ok(&repo_path, &["branch", "create", "c"]);
+    test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", "c"]);
     std::fs::write(&file1, "c\n").unwrap();
     std::fs::write(&file2, "c\n").unwrap();
     test_env.jj_cmd_ok(&repo_path, &["new", "@-"]);
-    test_env.jj_cmd_ok(&repo_path, &["branch", "create", "d"]);
+    test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", "d"]);
     std::fs::write(&file1, "d\n").unwrap();
     std::fs::write(&file2, "d\n").unwrap();
     test_env.jj_cmd_ok(&repo_path, &["new", "all:visible_heads()"]);
-    test_env.jj_cmd_ok(&repo_path, &["branch", "create", "e"]);
+    test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", "e"]);
     std::fs::write(&file1, "e\n").unwrap();
     std::fs::write(&file2, "e\n").unwrap();
     test_env.jj_cmd_ok(&repo_path, &["new"]);
-    test_env.jj_cmd_ok(&repo_path, &["branch", "create", "f"]);
+    test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", "f"]);
     std::fs::write(&file1, "f\n").unwrap();
     std::fs::write(&file2, "f\n").unwrap();
     // Test the setup
@@ -812,15 +813,15 @@ fn test_squash_from_multiple_partial() {
     insta::assert_snapshot!(stdout, @"");
     insta::assert_snapshot!(stderr, @r###"
     Rebased 2 descendant commits
+    Working copy now at: kpqxywon 056dc38b f | (no description set)
+    Parent commit      : yostqsxw 45069475 e | (no description set)
     New conflicts appeared in these commits:
       yqosqzyt b91b1157 d | (conflict) (no description set)
     To resolve the conflicts, start by updating to it:
-      jj new yqosqzytrlsw
+      jj new yqosqzyt
     Then use `jj resolve`, or edit the conflict markers in the file directly.
     Once the conflicts are resolved, you may want to inspect the result with `jj diff`.
     Then run `jj squash` to move the resolution into the conflicted commit.
-    Working copy now at: kpqxywon 056dc38b f | (no description set)
-    Parent commit      : yostqsxw 45069475 e | (no description set)
     "###);
     insta::assert_snapshot!(get_log_output(&test_env, &repo_path), @r###"
     @  056dc38bf286 f
@@ -965,7 +966,7 @@ fn test_squash_from_multiple_partial_no_op() {
     let stdout = test_env.jj_cmd_success(
         &repo_path,
         &[
-            "obslog",
+            "evolog",
             "-T",
             r#"separate(" ", commit_id.short(), description)"#,
         ],
@@ -1004,7 +1005,7 @@ fn get_log_output(test_env: &TestEnvironment, repo_path: &Path) -> String {
     let template = r#"separate(
         " ",
         commit_id.short(),
-        branches,
+        bookmarks,
         description,
         if(empty, "(empty)")
     )"#;

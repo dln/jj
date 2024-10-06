@@ -2,7 +2,7 @@
     "$schema": "http://json-schema.org/draft-07/schema",
     "title": "Jujutsu config",
     "type": "object",
-    "description": "User configuration for Jujutsu VCS. See https://github.com/martinvonz/jj/blob/main/docs/config.md for details",
+    "description": "User configuration for Jujutsu VCS. See https://martinvonz.github.io/jj/latest/config/ for details",
     "properties": {
         "user": {
             "type": "object",
@@ -125,7 +125,7 @@
                     "description": "Options for rendering revision graphs from jj log etc",
                     "properties": {
                         "style": {
-                            "description": "Style of connectors/markings used to render the graph. See https://github.com/martinvonz/jj/blob/main/docs/config.md#graph-style",
+                            "description": "Style of connectors/markings used to render the graph. See https://martinvonz.github.io/jj/latest/config/#graph-style",
                             "enum": [
                                 "curved",
                                 "square",
@@ -229,7 +229,7 @@
                         "committer",
                         "working_copies",
                         "current_working_copy",
-                        "branches",
+                        "bookmarks",
                         "tags",
                         "git_refs",
                         "is_git_head",
@@ -299,7 +299,7 @@
             "properties": {
                 "auto-local-branch": {
                     "type": "boolean",
-                    "description": "Whether jj creates a local branch with the same name when it imports a remote-tracking branch from git. See https://github.com/martinvonz/jj/blob/main/docs/config.md#automatic-local-branch-creation",
+                    "description": "Whether jj creates a local bookmark with the same name when it imports a remote-tracking branch from git. See https://martinvonz.github.io/jj/latest/config/#automatic-local-bookmark-creation",
                     "default": false
                 },
                 "abandon-unreachable-commits": {
@@ -307,9 +307,9 @@
                     "description": "Whether jj should abandon commits that became unreachable in Git.",
                     "default": true
                 },
-                "push-branch-prefix": {
+                "push-bookmark-prefix": {
                     "type": "string",
-                    "description": "Prefix used when pushing a change ID as a new branch",
+                    "description": "Prefix used when pushing a bookmark based on a change ID",
                     "default": "push-"
                 },
                 "fetch": {
@@ -371,7 +371,7 @@
                     },
                     "merge-tool-edits-conflict-markers": {
                         "type": "boolean",
-                        "description": "Whether to populate the output file with conflict markers before starting the merge tool. See https://github.com/martinvonz/jj/blob/main/docs/config.md#editing-conflict-markers-with-a-tool-or-a-text-editor",
+                        "description": "Whether to populate the output file with conflict markers before starting the merge tool. See https://martinvonz.github.io/jj/latest/config/#editing-conflict-markers-with-a-tool-or-a-text-editor",
                         "default": false
                     }
                 }
@@ -389,7 +389,7 @@
                 "log": {
                     "type": "string",
                     "description": "Default set of revisions to show when no explicit revset is given for jj log and similar commands",
-                    "default": "@ | ancestors(immutable_heads().., 2) | trunk()"
+                    "default": "present(@) | ancestors(immutable_heads().., 2) | trunk()"
                 },
                 "short-prefixes": {
                     "type": "string",
@@ -448,18 +448,18 @@
         },
         "experimental-advance-branches": {
             "type": "object",
-            "description": "Settings controlling the 'advance-branches' feature which moves branches forward when new commits are created.",
+            "description": "Settings controlling the 'advance-branches' feature which moves bookmarks forward when new commits are created.",
             "properties": {
                 "enabled-branches": {
                     "type": "array",
-                    "description": "Patterns used to identify branches which may be advanced.",
+                    "description": "Patterns used to identify bookmarks which may be advanced.",
                     "items": {
                         "type": "string"
                     }
                 },
                 "disabled-branches": {
                     "type": "array",
-                    "description": "Patterns used to identify branches which are not advanced. Takes precedence over 'enabled-branches'.",
+                    "description": "Patterns used to identify bookmarks which are not advanced. Takes precedence over 'enabled-branches'.",
                     "items": {
                         "type": "string"
                     }
@@ -472,8 +472,9 @@
             "properties": {
                 "backend": {
                     "type": "string",
-                    "enum": ["gpg", "ssh"],
-                    "description": "The backend to use for signing commits"
+                    "enum": ["gpg", "none", "ssh"],
+                    "description": "The backend to use for signing commits. The string `none` disables signing.",
+                    "default": "none"
                 },
                 "key": {
                     "type": "string",

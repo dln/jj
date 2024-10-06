@@ -102,18 +102,39 @@ impl<'writer, R> SaplingGraphLog<'writer, R> {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all(deserialize = "kebab-case"))]
+pub enum GraphStyle {
+    Ascii,
+    AsciiLarge,
+    Curved,
+    Square,
+}
+
+impl GraphStyle {
+    pub fn from_settings(settings: &UserSettings) -> Result<Self, config::ConfigError> {
+        settings.config().get("ui.graph.style")
+    }
+
+    pub fn is_ascii(self) -> bool {
+        match self {
+            GraphStyle::Ascii | GraphStyle::AsciiLarge => true,
+            GraphStyle::Curved | GraphStyle::Square => false,
+        }
+    }
+}
+
 pub fn get_graphlog<'a, K: Clone + Eq + Hash + 'a>(
-    settings: &UserSettings,
+    style: GraphStyle,
     formatter: &'a mut dyn Write,
 ) -> Box<dyn GraphLog<K> + 'a> {
     let builder = GraphRowRenderer::new().output().with_min_row_height(0);
-    match settings.graph_style().as_str() {
-        "square" => {
+    match style {
+        GraphStyle::Ascii => SaplingGraphLog::create(builder.build_ascii(), formatter),
+        GraphStyle::AsciiLarge => SaplingGraphLog::create(builder.build_ascii_large(), formatter),
+        GraphStyle::Curved => SaplingGraphLog::create(builder.build_box_drawing(), formatter),
+        GraphStyle::Square => {
             SaplingGraphLog::create(builder.build_box_drawing().with_square_glyphs(), formatter)
         }
-        "ascii" => SaplingGraphLog::create(builder.build_ascii(), formatter),
-        "ascii-large" => SaplingGraphLog::create(builder.build_ascii_large(), formatter),
-        // "curved"
-        _ => SaplingGraphLog::create(builder.build_box_drawing(), formatter),
     }
 }

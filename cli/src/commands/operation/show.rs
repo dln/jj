@@ -17,10 +17,12 @@ use itertools::Itertools;
 use super::diff::show_op_diff;
 use crate::cli_util::CommandHelper;
 use crate::cli_util::LogContentFormat;
-use crate::command_error::user_error;
 use crate::command_error::CommandError;
+use crate::commit_templater::CommitTemplateLanguage;
+use crate::diff_util::diff_formats_for_log;
 use crate::diff_util::DiffFormatArgs;
-use crate::operation_templater::OperationTemplateLanguage;
+use crate::diff_util::DiffRenderer;
+use crate::graphlog::GraphStyle;
 use crate::ui::Ui;
 
 /// Show changes to the repository in an operation
@@ -49,51 +51,53 @@ pub fn cmd_op_show(
     args: &OperationShowArgs,
 ) -> Result<(), CommandError> {
     let workspace_command = command.workspace_helper(ui)?;
-    let repo = workspace_command.repo();
-    let current_op_id = repo.operation().id();
-    let repo_loader = &repo.loader();
+    let workspace_env = workspace_command.env();
+    let repo_loader = workspace_command.workspace().repo_loader();
     let op = workspace_command.resolve_single_op(&args.operation)?;
     let parents: Vec<_> = op.parents().try_collect()?;
-    if parents.is_empty() {
-        return Err(user_error("Cannot show the root operation"));
-    }
     let parent_op = repo_loader.merge_operations(command.settings(), parents, None)?;
     let parent_repo = repo_loader.load_at(&parent_op)?;
     let repo = repo_loader.load_at(&op)?;
 
-    let workspace_command =
-        command.for_temporary_repo(ui, command.load_workspace()?, repo.clone())?;
-    let commit_summary_template = workspace_command.commit_summary_template();
+    let id_prefix_context = workspace_env.new_id_prefix_context();
+    let commit_summary_template = {
+        let language = workspace_env.commit_template_language(repo.as_ref(), &id_prefix_context);
+        let text = command
+            .settings()
+            .config()
+            .get_string("templates.commit_summary")?;
+        workspace_env.parse_template(ui, &language, &text, CommitTemplateLanguage::wrap_commit)?
+    };
 
+    let graph_style = GraphStyle::from_settings(command.settings())?;
     let with_content_format = LogContentFormat::new(ui, command.settings())?;
-    let diff_renderer = workspace_command.diff_renderer_for_log(&args.diff_format, args.patch)?;
+    let diff_renderer = {
+        let formats = diff_formats_for_log(command.settings(), &args.diff_format, args.patch)?;
+        let path_converter = workspace_env.path_converter();
+        (!formats.is_empty()).then(|| DiffRenderer::new(repo.as_ref(), path_converter, formats))
+    };
 
     // TODO: Should we make this customizable via clap arg?
-    let template;
-    {
-        let language = OperationTemplateLanguage::new(
-            repo_loader.op_store().root_operation_id(),
-            Some(current_op_id),
-            command.operation_template_extensions(),
-        );
+    let template = {
         let text = command.settings().config().get_string("templates.op_log")?;
-        template = workspace_command
-            .parse_template(&language, &text, OperationTemplateLanguage::wrap_operation)?
-            .labeled("op_log");
-    }
+        workspace_command
+            .parse_operation_template(ui, &text)?
+            .labeled("op_log")
+    };
 
     ui.request_pager();
-    template.format(&op, ui.stdout_formatter().as_mut())?;
+    let mut formatter = ui.stdout_formatter();
+    template.format(&op, formatter.as_mut())?;
 
     show_op_diff(
         ui,
-        command,
+        formatter.as_mut(),
         repo.as_ref(),
         &parent_repo,
         &repo,
         &commit_summary_template,
-        !args.no_graph,
+        (!args.no_graph).then_some(graph_style),
         &with_content_format,
-        diff_renderer,
+        diff_renderer.as_ref(),
     )
 }

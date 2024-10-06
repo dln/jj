@@ -24,7 +24,6 @@ use crate::cli_util::CommandHelper;
 use crate::command_error::CommandError;
 use crate::diff_util::get_copy_records;
 use crate::diff_util::DiffFormat;
-use crate::revset_util;
 use crate::ui::Ui;
 
 /// Show high-level repo status
@@ -33,8 +32,7 @@ use crate::ui::Ui;
 ///
 ///  * The working copy commit and its (first) parent, and a summary of the
 ///    changes between them
-///
-///  * Conflicted branches (see https://github.com/martinvonz/jj/blob/main/docs/branches.md)
+///  * Conflicted bookmarks (see https://martinvonz.github.io/jj/latest/bookmarks/)
 #[derive(clap::Args, Clone, Debug)]
 #[command(visible_alias = "st")]
 pub(crate) struct StatusArgs {
@@ -56,7 +54,7 @@ pub(crate) fn cmd_status(
         .map(|id| repo.store().get_commit(id))
         .transpose()?;
     let matcher = workspace_command
-        .parse_file_patterns(&args.paths)?
+        .parse_file_patterns(ui, &args.paths)?
         .to_matcher();
     ui.request_pager();
     let mut formatter = ui.stdout_formatter();
@@ -119,10 +117,8 @@ pub(crate) fn cmd_status(
                         .parents()
                         .ancestors()
                         .filtered(RevsetFilterPredicate::HasConflict)
-                        .minus(&revset_util::parse_immutable_expression(
-                            &workspace_command.revset_parse_context(),
-                        )?),
-                )?
+                        .minus(&workspace_command.env().immutable_expression()),
+                )
                 .evaluate_to_commit_ids()?
                 .collect();
 
@@ -143,47 +139,50 @@ pub(crate) fn cmd_status(
         writeln!(formatter, "No working copy")?;
     }
 
-    let conflicted_local_branches = repo
+    let conflicted_local_bookmarks = repo
         .view()
-        .local_branches()
+        .local_bookmarks()
         .filter(|(_, target)| target.has_conflict())
-        .map(|(branch_name, _)| branch_name)
+        .map(|(bookmark_name, _)| bookmark_name)
         .collect_vec();
-    let conflicted_remote_branches = repo
+    let conflicted_remote_bookmarks = repo
         .view()
-        .all_remote_branches()
+        .all_remote_bookmarks()
         .filter(|(_, remote_ref)| remote_ref.target.has_conflict())
         .map(|(full_name, _)| full_name)
         .collect_vec();
-    if !conflicted_local_branches.is_empty() {
+    if !conflicted_local_bookmarks.is_empty() {
         writeln!(
             formatter.labeled("conflict"),
-            "These branches have conflicts:"
+            "These bookmarks have conflicts:"
         )?;
-        for branch_name in conflicted_local_branches {
+        for bookmark_name in conflicted_local_bookmarks {
             write!(formatter, "  ")?;
-            write!(formatter.labeled("branch"), "{branch_name}")?;
+            write!(formatter.labeled("bookmark"), "{bookmark_name}")?;
             writeln!(formatter)?;
         }
         writeln!(
             formatter,
-            "  Use `jj branch list` to see details. Use `jj branch set <name> -r <rev>` to \
+            "  Use `jj bookmark list` to see details. Use `jj bookmark set <name> -r <rev>` to \
              resolve."
         )?;
     }
-    if !conflicted_remote_branches.is_empty() {
+    if !conflicted_remote_bookmarks.is_empty() {
         writeln!(
             formatter.labeled("conflict"),
-            "These remote branches have conflicts:"
+            "These remote bookmarks have conflicts:"
         )?;
-        for (branch_name, remote_name) in conflicted_remote_branches {
+        for (bookmark_name, remote_name) in conflicted_remote_bookmarks {
             write!(formatter, "  ")?;
-            write!(formatter.labeled("branch"), "{branch_name}@{remote_name}")?;
+            write!(
+                formatter.labeled("bookmark"),
+                "{bookmark_name}@{remote_name}"
+            )?;
             writeln!(formatter)?;
         }
         writeln!(
             formatter,
-            "  Use `jj branch list` to see details. Use `jj git fetch` to resolve."
+            "  Use `jj bookmark list` to see details. Use `jj git fetch` to resolve."
         )?;
     }
 

@@ -232,9 +232,12 @@ impl LockedWorkingCopy for LockedConflictsWorkingCopy {
         self.inner.old_tree_id()
     }
 
-    fn snapshot(&mut self, mut options: SnapshotOptions) -> Result<MergedTreeId, SnapshotError> {
-        options.base_ignores = options.base_ignores.chain("", "/.conflicts".as_bytes())?;
-        self.inner.snapshot(options)
+    fn snapshot(&mut self, options: &SnapshotOptions) -> Result<MergedTreeId, SnapshotError> {
+        let options = SnapshotOptions {
+            base_ignores: options.base_ignores.chain("", "/.conflicts".as_bytes())?,
+            ..options.clone()
+        };
+        self.inner.snapshot(&options)
     }
 
     fn check_out(&mut self, commit: &Commit) -> Result<CheckoutStats, CheckoutError> {
@@ -245,6 +248,10 @@ impl LockedWorkingCopy for LockedConflictsWorkingCopy {
             .join("");
         std::fs::write(self.wc_path.join(".conflicts"), conflicts).unwrap();
         self.inner.check_out(commit)
+    }
+
+    fn rename_workspace(&mut self, new_workspace_id: WorkspaceId) {
+        self.inner.rename_workspace(new_workspace_id);
     }
 
     fn reset(&mut self, commit: &Commit) -> Result<(), ResetError> {

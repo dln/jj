@@ -21,6 +21,7 @@ use std::ops::Range;
 use std::path::Path;
 use std::path::PathBuf;
 
+use bstr::BStr;
 use futures::executor::block_on_stream;
 use futures::stream::BoxStream;
 use futures::StreamExt;
@@ -40,7 +41,6 @@ use jj_lib::copies::CopyOperation;
 use jj_lib::copies::CopyRecords;
 use jj_lib::diff::Diff;
 use jj_lib::diff::DiffHunk;
-use jj_lib::files::DiffLine;
 use jj_lib::files::DiffLineHunkSide;
 use jj_lib::files::DiffLineIterator;
 use jj_lib::files::DiffLineNumber;
@@ -51,6 +51,7 @@ use jj_lib::object_id::ObjectId;
 use jj_lib::repo::Repo;
 use jj_lib::repo_path::RepoPath;
 use jj_lib::repo_path::RepoPathUiConverter;
+use jj_lib::rewrite::rebase_to_dest_parent;
 use jj_lib::settings::ConfigResultExt as _;
 use jj_lib::settings::UserSettings;
 use jj_lib::store::Store;
@@ -357,6 +358,32 @@ impl<'a> DiffRenderer<'a> {
         Ok(())
     }
 
+    /// Generates diff between `from_commits` and `to_commit` based off their
+    /// parents. The `from_commits` will temporarily be rebased onto the
+    /// `to_commit` parents to exclude unrelated changes.
+    pub fn show_inter_diff(
+        &self,
+        ui: &Ui,
+        formatter: &mut dyn Formatter,
+        from_commits: &[Commit],
+        to_commit: &Commit,
+        matcher: &dyn Matcher,
+        width: usize,
+    ) -> Result<(), DiffRenderError> {
+        let from_tree = rebase_to_dest_parent(self.repo, from_commits, to_commit)?;
+        let to_tree = to_commit.tree()?;
+        let copy_records = CopyRecords::default(); // TODO
+        self.show_diff(
+            ui,
+            formatter,
+            &from_tree,
+            &to_tree,
+            matcher,
+            &copy_records,
+            width,
+        )
+    }
+
     /// Generates diff of the given `commit` compared to its parents.
     pub fn show_patch(
         &self,
@@ -434,98 +461,55 @@ fn show_color_words_diff_hunks(
     options: &ColorWordsOptions,
 ) -> io::Result<()> {
     let line_diff = Diff::by_line([left, right]);
-    let mut line_diff_hunks = line_diff.hunks().peekable();
     let mut line_number = DiffLineNumber { left: 1, right: 1 };
+    // Matching entries shouldn't appear consecutively in diff of two inputs.
+    // However, if the inputs have conflicts, there may be a hunk that can be
+    // resolved, resulting [matching, resolved, matching] sequence.
+    let mut contexts = Vec::new();
+    let mut emitted = false;
 
-    // First "before" context
-    if let Some(DiffHunk::Matching(content)) =
-        line_diff_hunks.next_if(|hunk| matches!(hunk, DiffHunk::Matching(_)))
-    {
-        if line_diff_hunks.peek().is_some() {
-            line_number = show_color_words_context_lines(
-                formatter,
-                content,
-                line_number,
-                0,
-                options.context,
-            )?;
-        }
-    }
-    while let Some(hunk) = line_diff_hunks.next() {
+    for hunk in line_diff.hunks() {
         match hunk {
-            // Middle "after"/"before" context
-            DiffHunk::Matching(content) if line_diff_hunks.peek().is_some() => {
-                line_number = show_color_words_context_lines(
-                    formatter,
-                    content,
-                    line_number,
-                    options.context,
-                    options.context,
-                )?;
-            }
-            // Last "after" context
-            DiffHunk::Matching(content) => {
-                line_number = show_color_words_context_lines(
-                    formatter,
-                    content,
-                    line_number,
-                    options.context,
-                    0,
-                )?;
-            }
+            DiffHunk::Matching(content) => contexts.push(content),
             DiffHunk::Different(contents) => {
-                let word_diff_hunks = Diff::by_word(&contents).hunks().collect_vec();
-                let can_inline = match options.max_inline_alternation {
-                    None => true,     // unlimited
-                    Some(0) => false, // no need to count alternation
-                    Some(max_num) => {
-                        let groups = split_diff_hunks_by_matching_newline(&word_diff_hunks);
-                        groups.map(count_diff_alternation).max().unwrap_or(0) <= max_num
-                    }
-                };
-                if can_inline {
-                    let mut diff_line_iter =
-                        DiffLineIterator::with_line_number(word_diff_hunks.iter(), line_number);
-                    for diff_line in diff_line_iter.by_ref() {
-                        show_color_words_diff_line(formatter, &diff_line)?;
-                    }
-                    line_number = diff_line_iter.next_line_number();
-                } else {
-                    let (left_lines, right_lines) = unzip_diff_hunks_to_lines(&word_diff_hunks);
-                    for tokens in &left_lines {
-                        show_color_words_line_number(formatter, Some(line_number.left), None)?;
-                        show_color_words_single_sided_line(formatter, tokens, "removed")?;
-                        line_number.left += 1;
-                    }
-                    for tokens in &right_lines {
-                        show_color_words_line_number(formatter, None, Some(line_number.right))?;
-                        show_color_words_single_sided_line(formatter, tokens, "added")?;
-                        line_number.right += 1;
-                    }
-                }
+                let num_after = if emitted { options.context } else { 0 };
+                line_number = show_color_words_context_lines(
+                    formatter,
+                    &contexts,
+                    line_number,
+                    num_after,
+                    options.context,
+                )?;
+                contexts.clear();
+                emitted = true;
+                line_number =
+                    show_color_words_diff_lines(formatter, &contents, line_number, options)?;
             }
         }
     }
 
+    if emitted {
+        show_color_words_context_lines(formatter, &contexts, line_number, options.context, 0)?;
+    }
     Ok(())
 }
 
 /// Prints `num_after` lines, ellipsis, and `num_before` lines.
 fn show_color_words_context_lines(
     formatter: &mut dyn Formatter,
-    content: &[u8],
+    contents: &[&BStr],
     mut line_number: DiffLineNumber,
     num_after: usize,
     num_before: usize,
 ) -> io::Result<DiffLineNumber> {
     const SKIPPED_CONTEXT_LINE: &str = "    ...\n";
-    let mut lines = content.split_inclusive(|b| *b == b'\n').fuse();
+    let mut lines = contents
+        .iter()
+        .flat_map(|content| content.split_inclusive(|b| *b == b'\n'))
+        .fuse();
     for line in lines.by_ref().take(num_after) {
-        let diff_line = DiffLine {
-            line_number,
-            hunks: vec![(DiffLineHunkSide::Both, line.as_ref())],
-        };
-        show_color_words_diff_line(formatter, &diff_line)?;
+        show_color_words_line_number(formatter, Some(line_number.left), Some(line_number.right))?;
+        show_color_words_inline_hunks(formatter, &[(DiffLineHunkSide::Both, line.as_ref())])?;
         line_number.left += 1;
         line_number.right += 1;
     }
@@ -538,13 +522,57 @@ fn show_color_words_context_lines(
         line_number.right += num_skipped + 1;
     }
     for line in before_lines.into_iter().rev() {
-        let diff_line = DiffLine {
-            line_number,
-            hunks: vec![(DiffLineHunkSide::Both, line.as_ref())],
-        };
-        show_color_words_diff_line(formatter, &diff_line)?;
+        show_color_words_line_number(formatter, Some(line_number.left), Some(line_number.right))?;
+        show_color_words_inline_hunks(formatter, &[(DiffLineHunkSide::Both, line.as_ref())])?;
         line_number.left += 1;
         line_number.right += 1;
+    }
+    Ok(line_number)
+}
+
+fn show_color_words_diff_lines(
+    formatter: &mut dyn Formatter,
+    contents: &[&BStr],
+    mut line_number: DiffLineNumber,
+    options: &ColorWordsOptions,
+) -> io::Result<DiffLineNumber> {
+    let word_diff_hunks = Diff::by_word(contents).hunks().collect_vec();
+    let can_inline = match options.max_inline_alternation {
+        None => true,     // unlimited
+        Some(0) => false, // no need to count alternation
+        Some(max_num) => {
+            let groups = split_diff_hunks_by_matching_newline(&word_diff_hunks);
+            groups.map(count_diff_alternation).max().unwrap_or(0) <= max_num
+        }
+    };
+    if can_inline {
+        let mut diff_line_iter =
+            DiffLineIterator::with_line_number(word_diff_hunks.iter(), line_number);
+        for diff_line in diff_line_iter.by_ref() {
+            show_color_words_line_number(
+                formatter,
+                diff_line
+                    .has_left_content()
+                    .then_some(diff_line.line_number.left),
+                diff_line
+                    .has_right_content()
+                    .then_some(diff_line.line_number.right),
+            )?;
+            show_color_words_inline_hunks(formatter, &diff_line.hunks)?;
+        }
+        line_number = diff_line_iter.next_line_number();
+    } else {
+        let (left_lines, right_lines) = unzip_diff_hunks_to_lines(&word_diff_hunks);
+        for tokens in &left_lines {
+            show_color_words_line_number(formatter, Some(line_number.left), None)?;
+            show_color_words_single_sided_line(formatter, tokens, "removed")?;
+            line_number.left += 1;
+        }
+        for tokens in &right_lines {
+            show_color_words_line_number(formatter, None, Some(line_number.right))?;
+            show_color_words_single_sided_line(formatter, tokens, "added")?;
+            line_number.right += 1;
+        }
     }
     Ok(line_number)
 }
@@ -573,21 +601,12 @@ fn show_color_words_line_number(
     Ok(())
 }
 
-/// Prints `diff_line` which may contain tokens originating from both sides.
-fn show_color_words_diff_line(
+/// Prints line hunks which may contain tokens originating from both sides.
+fn show_color_words_inline_hunks(
     formatter: &mut dyn Formatter,
-    diff_line: &DiffLine,
+    line_hunks: &[(DiffLineHunkSide, &BStr)],
 ) -> io::Result<()> {
-    show_color_words_line_number(
-        formatter,
-        diff_line
-            .has_left_content()
-            .then_some(diff_line.line_number.left),
-        diff_line
-            .has_right_content()
-            .then_some(diff_line.line_number.right),
-    )?;
-    for (side, data) in &diff_line.hunks {
+    for (side, data) in line_hunks {
         let label = match side {
             DiffLineHunkSide::Both => None,
             DiffLineHunkSide::Left => Some("removed"),
@@ -601,7 +620,7 @@ fn show_color_words_diff_line(
             formatter.write_all(data)?;
         }
     }
-    let (_, data) = diff_line.hunks.last().expect("diff line must not be empty");
+    let (_, data) = line_hunks.last().expect("diff line must not be empty");
     if !data.ends_with(b"\n") {
         writeln!(formatter)?;
     };

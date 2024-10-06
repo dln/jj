@@ -15,7 +15,6 @@
 use std::slice;
 
 use clap::ArgGroup;
-use jj_lib::rewrite::rebase_to_dest_parent;
 use tracing::instrument;
 
 use crate::cli_util::CommandHelper;
@@ -28,7 +27,7 @@ use crate::ui::Ui;
 ///
 /// This excludes changes from other commits by temporarily rebasing `--from`
 /// onto `--to`'s parents. If you wish to compare the same change across
-/// versions, consider `jj obslog -p` instead.
+/// versions, consider `jj evolog -p` instead.
 #[derive(clap::Args, Clone, Debug)]
 #[command(group(ArgGroup::new("to_diff").args(&["from", "to"]).multiple(true).required(true)))]
 pub(crate) struct InterdiffArgs {
@@ -53,27 +52,20 @@ pub(crate) fn cmd_interdiff(
 ) -> Result<(), CommandError> {
     let workspace_command = command.workspace_helper(ui)?;
     let from =
-        workspace_command.resolve_single_rev(args.from.as_ref().unwrap_or(&RevisionArg::AT))?;
-    let to = workspace_command.resolve_single_rev(args.to.as_ref().unwrap_or(&RevisionArg::AT))?;
-
-    let from_tree = rebase_to_dest_parent(
-        workspace_command.repo().as_ref(),
-        slice::from_ref(&from),
-        &to,
-    )?;
-    let to_tree = to.tree()?;
+        workspace_command.resolve_single_rev(ui, args.from.as_ref().unwrap_or(&RevisionArg::AT))?;
+    let to =
+        workspace_command.resolve_single_rev(ui, args.to.as_ref().unwrap_or(&RevisionArg::AT))?;
     let matcher = workspace_command
-        .parse_file_patterns(&args.paths)?
+        .parse_file_patterns(ui, &args.paths)?
         .to_matcher();
     let diff_renderer = workspace_command.diff_renderer_for(&args.format)?;
     ui.request_pager();
-    diff_renderer.show_diff(
+    diff_renderer.show_inter_diff(
         ui,
         ui.stdout_formatter().as_mut(),
-        &from_tree,
-        &to_tree,
+        slice::from_ref(&from),
+        &to,
         matcher.as_ref(),
-        &Default::default(),
         ui.term_width(),
     )?;
     Ok(())

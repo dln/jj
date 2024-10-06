@@ -70,6 +70,9 @@ pub(crate) struct RestoreArgs {
     /// the user might not even realize something went wrong.
     #[arg(long, short, hide = true)]
     revision: Option<RevisionArg>,
+    /// Preserve the content (not the diff) when rebasing descendants
+    #[arg(long)]
+    restore_descendants: bool,
 }
 
 #[instrument(skip_all)]
@@ -88,20 +91,20 @@ pub(crate) fn cmd_restore(
         ));
     }
     if args.from.is_some() || args.to.is_some() {
-        to_commit =
-            workspace_command.resolve_single_rev(args.to.as_ref().unwrap_or(&RevisionArg::AT))?;
+        to_commit = workspace_command
+            .resolve_single_rev(ui, args.to.as_ref().unwrap_or(&RevisionArg::AT))?;
         from_tree = workspace_command
-            .resolve_single_rev(args.from.as_ref().unwrap_or(&RevisionArg::AT))?
+            .resolve_single_rev(ui, args.from.as_ref().unwrap_or(&RevisionArg::AT))?
             .tree()?;
     } else {
         to_commit = workspace_command
-            .resolve_single_rev(args.changes_in.as_ref().unwrap_or(&RevisionArg::AT))?;
+            .resolve_single_rev(ui, args.changes_in.as_ref().unwrap_or(&RevisionArg::AT))?;
         from_tree = to_commit.parent_tree(workspace_command.repo().as_ref())?;
     }
     workspace_command.check_rewritable([to_commit.id()])?;
 
     let matcher = workspace_command
-        .parse_file_patterns(&args.paths)?
+        .parse_file_patterns(ui, &args.paths)?
         .to_matcher();
     let to_tree = to_commit.tree()?;
     let new_tree_id = restore_tree(&from_tree, &to_tree, matcher.as_ref())?;
@@ -109,20 +112,30 @@ pub(crate) fn cmd_restore(
         writeln!(ui.status(), "Nothing changed.")?;
     } else {
         let mut tx = workspace_command.start_transaction();
-        let mut_repo = tx.mut_repo();
-        let new_commit = mut_repo
+        let new_commit = tx
+            .repo_mut()
             .rewrite_commit(command.settings(), &to_commit)
             .set_tree_id(new_tree_id)
             .write()?;
         // rebase_descendants early; otherwise `new_commit` would always have
         // a conflicted change id at this point.
-        let num_rebased = tx.mut_repo().rebase_descendants(command.settings())?;
+        let (num_rebased, extra_msg) = if args.restore_descendants {
+            (
+                tx.repo_mut().reparent_descendants(command.settings())?,
+                " (while preserving their content)",
+            )
+        } else {
+            (tx.repo_mut().rebase_descendants(command.settings())?, "")
+        };
         if let Some(mut formatter) = ui.status_formatter() {
             write!(formatter, "Created ")?;
             tx.write_commit_summary(formatter.as_mut(), &new_commit)?;
             writeln!(formatter)?;
             if num_rebased > 0 {
-                writeln!(formatter, "Rebased {num_rebased} descendant commits")?;
+                writeln!(
+                    formatter,
+                    "Rebased {num_rebased} descendant commits{extra_msg}"
+                )?;
             }
         }
         tx.finish(ui, format!("restore into commit {}", to_commit.id().hex()))?;

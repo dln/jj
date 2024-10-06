@@ -71,7 +71,7 @@ pub(crate) fn cmd_split(
     args: &SplitArgs,
 ) -> Result<(), CommandError> {
     let mut workspace_command = command.workspace_helper(ui)?;
-    let commit = workspace_command.resolve_single_rev(&args.revision)?;
+    let commit = workspace_command.resolve_single_rev(ui, &args.revision)?;
     if commit.is_empty(workspace_command.repo().as_ref())? {
         return Err(user_error_with_hint(
             format!("Refusing to split empty commit {}.", commit.id().hex()),
@@ -81,7 +81,7 @@ pub(crate) fn cmd_split(
 
     workspace_command.check_rewritable([commit.id()])?;
     let matcher = workspace_command
-        .parse_file_patterns(&args.paths)?
+        .parse_file_patterns(ui, &args.paths)?
         .to_matcher();
     let diff_selector = workspace_command.diff_selector(
         ui,
@@ -99,8 +99,7 @@ You are splitting a commit into two: {}
 The diff initially shows the changes in the commit you're splitting.
 
 Adjust the right side until it shows the contents you want for the first commit.
-The remainder will be in the second commit. If you don't make any changes, then
-the operation will be aborted.
+The remainder will be in the second commit.
 ",
             tx.format_commit_summary(&commit)
         )
@@ -109,17 +108,17 @@ the operation will be aborted.
     // Prompt the user to select the changes they want for the first commit.
     let selected_tree_id =
         diff_selector.select(&base_tree, &end_tree, matcher.as_ref(), format_instructions)?;
-    if &selected_tree_id == commit.tree_id() && diff_selector.is_interactive() {
+    if &selected_tree_id == commit.tree_id() {
         // The user selected everything from the original commit.
-        writeln!(ui.status(), "Nothing changed.")?;
-        return Ok(());
-    }
-    if selected_tree_id == base_tree.id() {
+        writeln!(
+            ui.warning_default(),
+            "All changes have been selected, so the second commit will be empty"
+        )?;
+    } else if selected_tree_id == base_tree.id() {
         // The user selected nothing, so the first commit will be empty.
         writeln!(
             ui.warning_default(),
-            "The given paths do not match any file: {}",
-            args.paths.join(" ")
+            "No changes have been selected, so the first commit will be empty"
         )?;
     }
 
@@ -127,7 +126,7 @@ the operation will be aborted.
     let selected_tree = tx.repo().store().get_root_tree(&selected_tree_id)?;
     let first_commit = {
         let mut commit_builder = tx
-            .mut_repo()
+            .repo_mut()
             .rewrite_commit(command.settings(), &commit)
             .detach();
         commit_builder.set_tree_id(selected_tree_id);
@@ -136,13 +135,15 @@ the operation will be aborted.
         }
         let temp_commit = commit_builder.write_hidden()?;
         let template = description_template(
+            ui,
             &tx,
             "Enter a description for the first commit.",
             &temp_commit,
         )?;
-        let description = edit_description(tx.base_repo(), &template, command.settings())?;
+        let description =
+            edit_description(tx.base_workspace_helper(), &template, command.settings())?;
         commit_builder.set_description(description);
-        commit_builder.write(tx.mut_repo())?
+        commit_builder.write(tx.repo_mut())?
     };
 
     // Create the second commit, which includes everything the user didn't
@@ -162,7 +163,7 @@ the operation will be aborted.
             vec![first_commit.id().clone()]
         };
         let mut commit_builder = tx
-            .mut_repo()
+            .repo_mut()
             .rewrite_commit(command.settings(), &commit)
             .detach();
         commit_builder
@@ -178,25 +179,26 @@ the operation will be aborted.
         } else {
             let temp_commit = commit_builder.write_hidden()?;
             let template = description_template(
+                ui,
                 &tx,
                 "Enter a description for the second commit.",
                 &temp_commit,
             )?;
-            edit_description(tx.base_repo(), &template, command.settings())?
+            edit_description(tx.base_workspace_helper(), &template, command.settings())?
         };
         commit_builder.set_description(description);
-        commit_builder.write(tx.mut_repo())?
+        commit_builder.write(tx.repo_mut())?
     };
 
     // Mark the commit being split as rewritten to the second commit. As a
     // result, if @ points to the commit being split, it will point to the
     // second commit after the command finishes. This also means that any
-    // branches pointing to the commit being split are moved to the second
+    // bookmarks pointing to the commit being split are moved to the second
     // commit.
-    tx.mut_repo()
+    tx.repo_mut()
         .set_rewritten_commit(commit.id().clone(), second_commit.id().clone());
     let mut num_rebased = 0;
-    tx.mut_repo().transform_descendants(
+    tx.repo_mut().transform_descendants(
         command.settings(),
         vec![commit.id().clone()],
         |mut rewriter| {

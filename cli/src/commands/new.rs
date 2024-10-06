@@ -42,10 +42,10 @@ use crate::ui::Ui;
 ///
 /// Note that you can create a merge commit by specifying multiple revisions as
 /// argument. For example, `jj new main @` will create a new commit with the
-/// `main` branch and the working copy as parents.
+/// `main` bookmark and the working copy as parents.
 ///
 /// For more information, see
-/// https://github.com/martinvonz/jj/blob/main/docs/working-copy.md.
+/// https://martinvonz.github.io/jj/latest/working-copy/.
 #[derive(clap::Args, Clone, Debug)]
 pub(crate) struct NewArgs {
     /// Parent(s) of the new change
@@ -92,17 +92,17 @@ pub(crate) fn cmd_new(
     let parent_commits;
     let parent_commit_ids: Vec<CommitId>;
     let children_commits;
-    let mut advance_branches_target = None;
-    let mut advanceable_branches = vec![];
+    let mut advance_bookmarks_target = None;
+    let mut advanceable_bookmarks = vec![];
 
     if !args.insert_before.is_empty() && !args.insert_after.is_empty() {
         parent_commits = workspace_command
-            .resolve_some_revsets_default_single(&args.insert_after)?
+            .resolve_some_revsets_default_single(ui, &args.insert_after)?
             .into_iter()
             .collect_vec();
         parent_commit_ids = parent_commits.iter().ids().cloned().collect();
         children_commits = workspace_command
-            .resolve_some_revsets_default_single(&args.insert_before)?
+            .resolve_some_revsets_default_single(ui, &args.insert_before)?
             .into_iter()
             .collect_vec();
         let children_commit_ids = children_commits.iter().ids().cloned().collect();
@@ -119,7 +119,7 @@ pub(crate) fn cmd_new(
         // The parents of the new commit will be the parents of the target commits
         // which are not descendants of other target commits.
         children_commits = workspace_command
-            .resolve_some_revsets_default_single(&args.insert_before)?
+            .resolve_some_revsets_default_single(ui, &args.insert_before)?
             .into_iter()
             .collect_vec();
         let children_commit_ids = children_commits.iter().ids().cloned().collect();
@@ -144,7 +144,7 @@ pub(crate) fn cmd_new(
             .try_collect()?;
     } else if !args.insert_after.is_empty() {
         parent_commits = workspace_command
-            .resolve_some_revsets_default_single(&args.insert_after)?
+            .resolve_some_revsets_default_single(ui, &args.insert_after)?
             .into_iter()
             .collect_vec();
         parent_commit_ids = parent_commits.iter().ids().cloned().collect();
@@ -162,17 +162,17 @@ pub(crate) fn cmd_new(
             .try_collect()?;
     } else {
         parent_commits = workspace_command
-            .resolve_some_revsets_default_single(&args.revisions)?
+            .resolve_some_revsets_default_single(ui, &args.revisions)?
             .into_iter()
             .collect_vec();
         parent_commit_ids = parent_commits.iter().ids().cloned().collect();
         children_commits = vec![];
 
-        let should_advance_branches = parent_commits.len() == 1;
-        if should_advance_branches {
-            advance_branches_target = Some(parent_commit_ids[0].clone());
-            advanceable_branches =
-                workspace_command.get_advanceable_branches(parent_commits[0].parent_ids())?;
+        let should_advance_bookmarks = parent_commits.len() == 1;
+        if should_advance_bookmarks {
+            advance_bookmarks_target = Some(parent_commit_ids[0].clone());
+            advanceable_bookmarks =
+                workspace_command.get_advanceable_bookmarks(parent_commits[0].parent_ids())?;
         }
     };
     workspace_command.check_rewritable(children_commits.iter().ids())?;
@@ -182,7 +182,7 @@ pub(crate) fn cmd_new(
     let mut tx = workspace_command.start_transaction();
     let merged_tree = merge_commit_trees(tx.repo(), &parent_commits)?;
     let new_commit = tx
-        .mut_repo()
+        .repo_mut()
         .new_commit(command.settings(), parent_commit_ids, merged_tree.id())
         .set_description(join_message_paragraphs(&args.message_paragraphs))
         .write()?;
@@ -198,13 +198,13 @@ pub(crate) fn cmd_new(
             .collect_vec();
         rebase_commit(
             command.settings(),
-            tx.mut_repo(),
+            tx.repo_mut(),
             child_commit,
             new_parent_ids,
         )?;
         num_rebased += 1;
     }
-    num_rebased += tx.mut_repo().rebase_descendants(command.settings())?;
+    num_rebased += tx.repo_mut().rebase_descendants(command.settings())?;
 
     if args.no_edit {
         if let Some(mut formatter) = ui.status_formatter() {
@@ -220,9 +220,9 @@ pub(crate) fn cmd_new(
         writeln!(ui.status(), "Rebased {num_rebased} descendant commits")?;
     }
 
-    // Does nothing if there's no branches to advance.
-    if let Some(target) = advance_branches_target {
-        tx.advance_branches(advanceable_branches, &target);
+    // Does nothing if there's no bookmarks to advance.
+    if let Some(target) = advance_bookmarks_target {
+        tx.advance_bookmarks(advanceable_bookmarks, &target);
     }
 
     tx.finish(ui, "new empty commit")?;

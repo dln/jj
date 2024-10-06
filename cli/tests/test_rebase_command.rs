@@ -25,7 +25,7 @@ fn create_commit(test_env: &TestEnvironment, repo_path: &Path, name: &str, paren
         test_env.jj_cmd_ok(repo_path, &args);
     }
     std::fs::write(repo_path.join(name), format!("{name}\n")).unwrap();
-    test_env.jj_cmd_ok(repo_path, &["branch", "create", name]);
+    test_env.jj_cmd_ok(repo_path, &["bookmark", "create", name]);
 }
 
 #[test]
@@ -169,7 +169,7 @@ fn test_rebase_invalid() {
 }
 
 #[test]
-fn test_rebase_branch() {
+fn test_rebase_bookmark() {
     let test_env = TestEnvironment::default();
     test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "repo"]);
     let repo_path = test_env.env_root().join("repo");
@@ -206,7 +206,7 @@ fn test_rebase_branch() {
     ◆
     "###);
 
-    // Test rebasing multiple branches at once
+    // Test rebasing multiple bookmarks at once
     test_env.jj_cmd_ok(&repo_path, &["undo"]);
     let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["rebase", "-b=e", "-b=d", "-d=b"]);
     insta::assert_snapshot!(stdout, @"");
@@ -260,7 +260,7 @@ fn test_rebase_branch() {
 }
 
 #[test]
-fn test_rebase_branch_with_merge() {
+fn test_rebase_bookmark_with_merge() {
     let test_env = TestEnvironment::default();
     test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "repo"]);
     let repo_path = test_env.env_root().join("repo");
@@ -680,12 +680,13 @@ fn test_rebase_revision_onto_descendant() {
     // Now, let's rebase onto the descendant merge
     let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["op", "restore", &setup_opid]);
     insta::assert_snapshot!(stdout, @"");
-    insta::assert_snapshot!(stderr, @r###"
+    insta::assert_snapshot!(stderr, @r#"
+    Restored to operation 0957966a18b4 2001-02-03 04:05:15.000 +07:00 - 2001-02-03 04:05:15.000 +07:00 create bookmark merge pointing to commit b05964d109522cd06e48f1a2661e1a0f58be0984
     Working copy now at: vruxwmqv b05964d1 merge | merge
     Parent commit      : royxmykx cea87a87 b | b
     Parent commit      : zsuskuln 2c5b7858 a | a
     Added 1 files, modified 0 files, removed 0 files
-    "###);
+    "#);
     let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["rebase", "-r", "base", "-d", "merge"]);
     insta::assert_snapshot!(stdout, @"");
     insta::assert_snapshot!(stderr, @r###"
@@ -939,7 +940,7 @@ fn test_rebase_error_revision_does_not_exist() {
     let repo_path = test_env.env_root().join("repo");
 
     test_env.jj_cmd_ok(&repo_path, &["describe", "-m", "one"]);
-    test_env.jj_cmd_ok(&repo_path, &["branch", "create", "b-one"]);
+    test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", "b-one"]);
     test_env.jj_cmd_ok(&repo_path, &["new", "-r", "@-", "-m", "two"]);
 
     let stderr = test_env.jj_cmd_failure(&repo_path, &["rebase", "-b", "b-one", "-d", "this"]);
@@ -1432,7 +1433,7 @@ fn test_rebase_revisions_after() {
     "###);
     test_env.jj_cmd_ok(&repo_path, &["op", "restore", &setup_opid]);
 
-    // Rebase a commit after a commit in a branch of a merge commit.
+    // Rebase a commit after a commit in a bookmark of a merge commit.
     let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["rebase", "-r", "f", "--after", "b1"]);
     insta::assert_snapshot!(stdout, @"");
     insta::assert_snapshot!(stderr, @r###"
@@ -1459,7 +1460,7 @@ fn test_rebase_revisions_after() {
     "###);
     test_env.jj_cmd_ok(&repo_path, &["op", "restore", &setup_opid]);
 
-    // Rebase a commit after the last commit in a branch of a merge commit.
+    // Rebase a commit after the last commit in a bookmark of a merge commit.
     let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["rebase", "-r", "f", "--after", "b2"]);
     insta::assert_snapshot!(stdout, @"");
     insta::assert_snapshot!(stderr, @r###"
@@ -1850,7 +1851,7 @@ fn test_rebase_revisions_before() {
     "###);
     test_env.jj_cmd_ok(&repo_path, &["op", "restore", &setup_opid]);
 
-    // Rebase a commit before a commit in a branch of a merge commit.
+    // Rebase a commit before a commit in a bookmark of a merge commit.
     let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["rebase", "-r", "f", "--before", "b2"]);
     insta::assert_snapshot!(stdout, @"");
     insta::assert_snapshot!(stderr, @r###"
@@ -1877,7 +1878,7 @@ fn test_rebase_revisions_before() {
     "###);
     test_env.jj_cmd_ok(&repo_path, &["op", "restore", &setup_opid]);
 
-    // Rebase a commit before the first commit in a branch of a merge commit.
+    // Rebase a commit before the first commit in a bookmark of a merge commit.
     let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["rebase", "-r", "f", "--before", "b1"]);
     insta::assert_snapshot!(stdout, @"");
     insta::assert_snapshot!(stderr, @r###"
@@ -1963,7 +1964,7 @@ fn test_rebase_revisions_before() {
     "###);
     test_env.jj_cmd_ok(&repo_path, &["op", "restore", &setup_opid]);
 
-    // Rebase a commit before two commits in separate branches to create a merge
+    // Rebase a commit before two commits in separate bookmarks to create a merge
     // commit.
     let (stdout, stderr) = test_env.jj_cmd_ok(
         &repo_path,
@@ -2455,12 +2456,12 @@ fn test_rebase_skip_if_on_destination() {
 }
 
 fn get_log_output(test_env: &TestEnvironment, repo_path: &Path) -> String {
-    let template = "branches ++ surround(': ', '', parents.map(|c| c.branches()))";
+    let template = "bookmarks ++ surround(': ', '', parents.map(|c| c.bookmarks()))";
     test_env.jj_cmd_success(repo_path, &["log", "-T", template])
 }
 
 fn get_long_log_output(test_env: &TestEnvironment, repo_path: &Path) -> String {
-    let template = "branches ++ '  ' ++ change_id.shortest(8) ++ '  ' ++ commit_id.shortest(8) ++ \
-                    surround(':  ', '', parents.map(|c| c.branches()))";
+    let template = "bookmarks ++ '  ' ++ change_id.shortest(8) ++ '  ' ++ commit_id.shortest(8) \
+                    ++ surround(':  ', '', parents.map(|c| c.bookmarks()))";
     test_env.jj_cmd_success(repo_path, &["log", "-T", template])
 }
