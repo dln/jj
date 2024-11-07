@@ -14,15 +14,20 @@
 
 #![allow(missing_docs)]
 
-use std::cmp::Ordering;
 use std::collections::BTreeMap;
-use std::collections::HashMap;
+use std::hash::BuildHasher;
+use std::hash::Hash;
+use std::hash::Hasher;
+use std::hash::RandomState;
 use std::iter;
 use std::ops::Range;
 use std::slice;
 
 use bstr::BStr;
+use hashbrown::HashTable;
 use itertools::Itertools;
+use smallvec::smallvec;
+use smallvec::SmallVec;
 
 pub fn find_line_ranges(text: &[u8]) -> Vec<Range<usize>> {
     text.split_inclusive(|b| *b == b'\n')
@@ -71,6 +76,142 @@ pub fn find_nonword_ranges(text: &[u8]) -> Vec<Range<usize>> {
         .collect()
 }
 
+fn bytes_ignore_all_whitespace(text: &[u8]) -> impl Iterator<Item = u8> + '_ {
+    text.iter().copied().filter(|b| !b.is_ascii_whitespace())
+}
+
+fn bytes_ignore_whitespace_amount(text: &[u8]) -> impl Iterator<Item = u8> + '_ {
+    let mut prev_was_space = false;
+    text.iter().filter_map(move |&b| {
+        let was_space = prev_was_space;
+        let is_space = b.is_ascii_whitespace();
+        prev_was_space = is_space;
+        match (was_space, is_space) {
+            (_, false) => Some(b),
+            (false, true) => Some(b' '),
+            (true, true) => None,
+        }
+    })
+}
+
+fn hash_with_length_suffix<I, H>(data: I, state: &mut H)
+where
+    I: IntoIterator,
+    I::Item: Hash,
+    H: Hasher,
+{
+    let mut len: usize = 0;
+    for d in data {
+        d.hash(state);
+        len += 1;
+    }
+    state.write_usize(len);
+}
+
+/// Compares byte sequences based on a certain equivalence property.
+///
+/// This isn't a newtype `Wrapper<'a>(&'a [u8])` but an external comparison
+/// object for the following reasons:
+///
+/// a. If it were newtype, a generic `wrap` function would be needed. It
+///    couldn't be expressed as a simple closure:
+///    `for<'a> Fn(&'a [u8]) -> ???<'a>`
+/// b. Dynamic comparison object can be implemented intuitively. For example,
+///    `pattern: &Regex` would have to be copied to all newtype instances if it
+///    were newtype.
+/// c. Hash values can be cached if hashing is controlled externally.
+pub trait CompareBytes {
+    /// Returns true if `left` and `right` are equivalent.
+    fn eq(&self, left: &[u8], right: &[u8]) -> bool;
+
+    /// Generates hash which respects the following property:
+    /// `eq(left, right) => hash(left) == hash(right)`
+    fn hash<H: Hasher>(&self, text: &[u8], state: &mut H);
+}
+
+// An instance might have e.g. Regex pattern, which can't be trivially copied.
+// Such comparison object can be passed by reference.
+impl<C: CompareBytes + ?Sized> CompareBytes for &C {
+    fn eq(&self, left: &[u8], right: &[u8]) -> bool {
+        <C as CompareBytes>::eq(self, left, right)
+    }
+
+    fn hash<H: Hasher>(&self, text: &[u8], state: &mut H) {
+        <C as CompareBytes>::hash(self, text, state);
+    }
+}
+
+/// Compares byte sequences literally.
+#[derive(Clone, Debug, Default)]
+pub struct CompareBytesExactly;
+
+impl CompareBytes for CompareBytesExactly {
+    fn eq(&self, left: &[u8], right: &[u8]) -> bool {
+        left == right
+    }
+
+    fn hash<H: Hasher>(&self, text: &[u8], state: &mut H) {
+        text.hash(state);
+    }
+}
+
+/// Compares byte sequences ignoring any whitespace occurrences.
+#[derive(Clone, Debug, Default)]
+pub struct CompareBytesIgnoreAllWhitespace;
+
+impl CompareBytes for CompareBytesIgnoreAllWhitespace {
+    fn eq(&self, left: &[u8], right: &[u8]) -> bool {
+        bytes_ignore_all_whitespace(left).eq(bytes_ignore_all_whitespace(right))
+    }
+
+    fn hash<H: Hasher>(&self, text: &[u8], state: &mut H) {
+        hash_with_length_suffix(bytes_ignore_all_whitespace(text), state);
+    }
+}
+
+/// Compares byte sequences ignoring changes in whitespace amount.
+#[derive(Clone, Debug, Default)]
+pub struct CompareBytesIgnoreWhitespaceAmount;
+
+impl CompareBytes for CompareBytesIgnoreWhitespaceAmount {
+    fn eq(&self, left: &[u8], right: &[u8]) -> bool {
+        bytes_ignore_whitespace_amount(left).eq(bytes_ignore_whitespace_amount(right))
+    }
+
+    fn hash<H: Hasher>(&self, text: &[u8], state: &mut H) {
+        hash_with_length_suffix(bytes_ignore_whitespace_amount(text), state);
+    }
+}
+
+/// Compares words (or tokens) under a certain hasher configuration.
+#[derive(Clone, Debug, Default)]
+struct WordComparator<C, S> {
+    compare: C,
+    hash_builder: S,
+}
+
+impl<C: CompareBytes> WordComparator<C, RandomState> {
+    fn new(compare: C) -> Self {
+        WordComparator {
+            compare,
+            // TODO: switch to ahash for better performance?
+            hash_builder: RandomState::new(),
+        }
+    }
+}
+
+impl<C: CompareBytes, S: BuildHasher> WordComparator<C, S> {
+    fn eq(&self, left: &[u8], right: &[u8]) -> bool {
+        self.compare.eq(left, right)
+    }
+
+    fn hash_one(&self, text: &[u8]) -> u64 {
+        let mut state = self.hash_builder.build_hasher();
+        self.compare.hash(text, &mut state);
+        state.finish()
+    }
+}
+
 /// Index in a list of word (or token) ranges.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 struct WordPosition(usize);
@@ -110,15 +251,25 @@ impl<'input, 'aux> DiffSource<'input, 'aux> {
 }
 
 struct Histogram<'input> {
-    word_to_positions: HashMap<&'input BStr, Vec<WordPosition>>,
+    word_to_positions: HashTable<HistogramEntry<'input>>,
 }
 
+type HistogramEntry<'input> = (&'input BStr, Vec<WordPosition>);
+
 impl<'input> Histogram<'input> {
-    fn calculate(source: &DiffSource<'input, '_>, max_occurrences: usize) -> Self {
-        let mut word_to_positions: HashMap<&BStr, Vec<WordPosition>> = HashMap::new();
+    fn calculate<C: CompareBytes, S: BuildHasher>(
+        source: &DiffSource<'input, '_>,
+        comp: &WordComparator<C, S>,
+        max_occurrences: usize,
+    ) -> Self {
+        let mut word_to_positions: HashTable<HistogramEntry> = HashTable::new();
         for (i, range) in source.ranges.iter().enumerate() {
             let word = &source.text[range.clone()];
-            let positions = word_to_positions.entry(word).or_default();
+            let hash = comp.hash_one(word);
+            let (_, positions) = word_to_positions
+                .entry(hash, |(w, _)| comp.eq(w, word), |(w, _)| comp.hash_one(w))
+                .or_insert_with(|| (word, vec![]))
+                .into_mut();
             // Allow one more than max_occurrences, so we can later skip those with more
             // than max_occurrences
             if positions.len() <= max_occurrences {
@@ -128,13 +279,26 @@ impl<'input> Histogram<'input> {
         Histogram { word_to_positions }
     }
 
-    fn build_count_to_entries(&self) -> BTreeMap<usize, Vec<(&'input BStr, &Vec<WordPosition>)>> {
+    fn build_count_to_entries(&self) -> BTreeMap<usize, Vec<&HistogramEntry<'input>>> {
         let mut count_to_entries: BTreeMap<usize, Vec<_>> = BTreeMap::new();
-        for (word, positions) in &self.word_to_positions {
+        for entry in &self.word_to_positions {
+            let (_, positions) = entry;
             let entries = count_to_entries.entry(positions.len()).or_default();
-            entries.push((*word, positions));
+            entries.push(entry);
         }
         count_to_entries
+    }
+
+    fn positions_by_word<C: CompareBytes, S: BuildHasher>(
+        &self,
+        word: &BStr,
+        comp: &WordComparator<C, S>,
+    ) -> Option<&[WordPosition]> {
+        let hash = comp.hash_one(word);
+        let (_, positions) = self
+            .word_to_positions
+            .find(hash, |(w, _)| comp.eq(w, word))?;
+        Some(positions)
     }
 }
 
@@ -196,10 +360,11 @@ fn find_lcs(input: &[usize]) -> Vec<(usize, usize)> {
 
 /// Finds unchanged word (or token) positions among the ones given as
 /// arguments. The data between those words is ignored.
-fn collect_unchanged_words(
+fn collect_unchanged_words<C: CompareBytes, S: BuildHasher>(
     found_positions: &mut Vec<(WordPosition, WordPosition)>,
     left: &DiffSource,
     right: &DiffSource,
+    comp: &WordComparator<C, S>,
 ) {
     if left.ranges.is_empty() || right.ranges.is_empty() {
         return;
@@ -207,21 +372,21 @@ fn collect_unchanged_words(
 
     // Prioritize LCS-based algorithm than leading/trailing matches
     let old_len = found_positions.len();
-    collect_unchanged_words_lcs(found_positions, left, right);
+    collect_unchanged_words_lcs(found_positions, left, right, comp);
     if found_positions.len() != old_len {
         return;
     }
 
     // Trim leading common ranges (i.e. grow previous unchanged region)
     let common_leading_len = iter::zip(left.ranges, right.ranges)
-        .take_while(|&(l, r)| left.text[l.clone()] == right.text[r.clone()])
+        .take_while(|&(l, r)| comp.eq(&left.text[l.clone()], &right.text[r.clone()]))
         .count();
     let left_ranges = &left.ranges[common_leading_len..];
     let right_ranges = &right.ranges[common_leading_len..];
 
     // Trim trailing common ranges (i.e. grow next unchanged region)
     let common_trailing_len = iter::zip(left_ranges.iter().rev(), right_ranges.iter().rev())
-        .take_while(|&(l, r)| left.text[l.clone()] == right.text[r.clone()])
+        .take_while(|&(l, r)| comp.eq(&left.text[l.clone()], &right.text[r.clone()]))
         .count();
 
     found_positions.extend(itertools::chain(
@@ -240,19 +405,20 @@ fn collect_unchanged_words(
     ));
 }
 
-fn collect_unchanged_words_lcs(
+fn collect_unchanged_words_lcs<C: CompareBytes, S: BuildHasher>(
     found_positions: &mut Vec<(WordPosition, WordPosition)>,
     left: &DiffSource,
     right: &DiffSource,
+    comp: &WordComparator<C, S>,
 ) {
     let max_occurrences = 100;
-    let left_histogram = Histogram::calculate(left, max_occurrences);
+    let left_histogram = Histogram::calculate(left, comp, max_occurrences);
     let left_count_to_entries = left_histogram.build_count_to_entries();
     if *left_count_to_entries.keys().next().unwrap() > max_occurrences {
         // If there are very many occurrences of all words, then we just give up.
         return;
     }
-    let right_histogram = Histogram::calculate(right, max_occurrences);
+    let right_histogram = Histogram::calculate(right, comp, max_occurrences);
     // Look for words with few occurrences in `left` (could equally well have picked
     // `right`?). If any of them also occur in `right`, then we add the words to
     // the LCS.
@@ -261,7 +427,7 @@ fn collect_unchanged_words_lcs(
             let mut both_positions = left_entries
                 .iter()
                 .filter_map(|&(word, left_positions)| {
-                    let right_positions = right_histogram.word_to_positions.get(word)?;
+                    let right_positions = right_histogram.positions_by_word(word, comp)?;
                     (left_positions.len() == right_positions.len())
                         .then_some((left_positions, right_positions))
                 })
@@ -305,6 +471,7 @@ fn collect_unchanged_words_lcs(
             found_positions,
             &left.narrowed(previous_left_position..left_position),
             &right.narrowed(previous_right_position..right_position),
+            comp,
         );
         found_positions.push((
             left.map_to_global(left_position),
@@ -318,6 +485,7 @@ fn collect_unchanged_words_lcs(
         found_positions,
         &left.narrowed(previous_left_position..WordPosition(left.ranges.len())),
         &right.narrowed(previous_right_position..WordPosition(right.ranges.len())),
+        comp,
     );
 }
 
@@ -342,8 +510,9 @@ fn intersect_unchanged_words(
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 struct UnchangedRange {
+    // Inline up to two sides (base + one other)
     base: Range<usize>,
-    others: Vec<Range<usize>>,
+    others: SmallVec<[Range<usize>; 1]>,
 }
 
 impl UnchangedRange {
@@ -361,20 +530,9 @@ impl UnchangedRange {
             .collect();
         UnchangedRange { base, others }
     }
-}
 
-impl PartialOrd for UnchangedRange {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for UnchangedRange {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.base
-            .start
-            .cmp(&other.base.start)
-            .then_with(|| self.base.end.cmp(&other.base.end))
+    fn is_all_empty(&self) -> bool {
+        self.base.is_empty() && self.others.iter().all(|r| r.is_empty())
     }
 }
 
@@ -383,7 +541,11 @@ impl Ord for UnchangedRange {
 #[derive(Clone, Debug)]
 pub struct Diff<'input> {
     base_input: &'input BStr,
-    other_inputs: Vec<&'input BStr>,
+    other_inputs: SmallVec<[&'input BStr; 1]>,
+    /// Sorted list of ranges of unchanged regions in bytes.
+    ///
+    /// The list should never be empty. The first and the last region may be
+    /// empty if inputs start/end with changes.
     unchanged_regions: Vec<UnchangedRange>,
 }
 
@@ -391,15 +553,18 @@ impl<'input> Diff<'input> {
     pub fn for_tokenizer<T: AsRef<[u8]> + ?Sized + 'input>(
         inputs: impl IntoIterator<Item = &'input T>,
         tokenizer: impl Fn(&[u8]) -> Vec<Range<usize>>,
+        compare: impl CompareBytes,
     ) -> Self {
         let mut inputs = inputs.into_iter().map(BStr::new);
         let base_input = inputs.next().expect("inputs must not be empty");
-        let other_inputs = inputs.collect_vec();
+        let other_inputs: SmallVec<[&BStr; 1]> = inputs.collect();
         // First tokenize each input
         let base_token_ranges: Vec<Range<usize>>;
         let other_token_ranges: Vec<Vec<Range<usize>>>;
         // No need to tokenize if one of the inputs is empty. Non-empty inputs
-        // are all different.
+        // are all different as long as the tokenizer emits non-empty ranges.
+        // This means "" and " " are different even if the compare function is
+        // ignore-whitespace. They are tokenized as [] and [" "] respectively.
         if base_input.is_empty() || other_inputs.iter().any(|input| input.is_empty()) {
             base_token_ranges = vec![];
             other_token_ranges = iter::repeat(vec![]).take(other_inputs.len()).collect();
@@ -415,47 +580,60 @@ impl<'input> Diff<'input> {
             other_inputs,
             &base_token_ranges,
             &other_token_ranges,
+            compare,
         )
     }
 
     fn with_inputs_and_token_ranges(
         base_input: &'input BStr,
-        other_inputs: Vec<&'input BStr>,
+        other_inputs: SmallVec<[&'input BStr; 1]>,
         base_token_ranges: &[Range<usize>],
         other_token_ranges: &[Vec<Range<usize>>],
+        compare: impl CompareBytes,
     ) -> Self {
         assert_eq!(other_inputs.len(), other_token_ranges.len());
+        let comp = WordComparator::new(compare);
         let base_source = DiffSource::new(base_input, base_token_ranges);
         let other_sources = iter::zip(&other_inputs, other_token_ranges)
             .map(|(input, token_ranges)| DiffSource::new(input, token_ranges))
             .collect_vec();
-        let mut unchanged_regions = match &*other_sources {
+        let unchanged_regions = match &*other_sources {
             // Consider the whole range of the base input as unchanged compared
             // to itself.
             [] => {
                 let whole_range = UnchangedRange {
                     base: 0..base_source.text.len(),
-                    others: vec![],
+                    others: smallvec![],
                 };
                 vec![whole_range]
             }
             // Diff each other input against the base. Intersect the previously
             // found ranges with the ranges in the diff.
             [first_other_source, tail_other_sources @ ..] => {
+                let mut unchanged_regions = Vec::new();
+                // Add an empty range at the start to make life easier for hunks().
+                unchanged_regions.push(UnchangedRange {
+                    base: 0..0,
+                    others: smallvec![0..0; other_inputs.len()],
+                });
                 let mut first_positions = Vec::new();
-                collect_unchanged_words(&mut first_positions, &base_source, first_other_source);
+                collect_unchanged_words(
+                    &mut first_positions,
+                    &base_source,
+                    first_other_source,
+                    &comp,
+                );
                 if tail_other_sources.is_empty() {
-                    first_positions
-                        .iter()
-                        .map(|&(base_pos, other_pos)| {
+                    unchanged_regions.extend(first_positions.iter().map(
+                        |&(base_pos, other_pos)| {
                             UnchangedRange::from_word_positions(
                                 &base_source,
                                 &other_sources,
                                 base_pos,
                                 &[other_pos],
                             )
-                        })
-                        .collect()
+                        },
+                    ));
                 } else {
                     let first_positions = first_positions
                         .iter()
@@ -465,32 +643,37 @@ impl<'input> Diff<'input> {
                         first_positions,
                         |current_positions, other_source| {
                             let mut new_positions = Vec::new();
-                            collect_unchanged_words(&mut new_positions, &base_source, other_source);
+                            collect_unchanged_words(
+                                &mut new_positions,
+                                &base_source,
+                                other_source,
+                                &comp,
+                            );
                             intersect_unchanged_words(current_positions, &new_positions)
                         },
                     );
-                    intersected_positions
-                        .iter()
-                        .map(|(base_pos, other_positions)| {
+                    unchanged_regions.extend(intersected_positions.iter().map(
+                        |(base_pos, other_positions)| {
                             UnchangedRange::from_word_positions(
                                 &base_source,
                                 &other_sources,
                                 *base_pos,
                                 other_positions,
                             )
-                        })
-                        .collect()
-                }
+                        },
+                    ));
+                };
+                // Add an empty range at the end to make life easier for hunks().
+                unchanged_regions.push(UnchangedRange {
+                    base: base_input.len()..base_input.len(),
+                    others: other_inputs
+                        .iter()
+                        .map(|input| input.len()..input.len())
+                        .collect(),
+                });
+                unchanged_regions
             }
         };
-        // Add an empty range at the end to make life easier for hunks().
-        unchanged_regions.push(UnchangedRange {
-            base: base_input.len()..base_input.len(),
-            others: other_inputs
-                .iter()
-                .map(|input| input.len()..input.len())
-                .collect(),
-        });
 
         let mut diff = Self {
             base_input,
@@ -504,14 +687,14 @@ impl<'input> Diff<'input> {
     pub fn unrefined<T: AsRef<[u8]> + ?Sized + 'input>(
         inputs: impl IntoIterator<Item = &'input T>,
     ) -> Self {
-        Diff::for_tokenizer(inputs, |_| vec![])
+        Diff::for_tokenizer(inputs, |_| vec![], CompareBytesExactly)
     }
 
     /// Compares `inputs` line by line.
     pub fn by_line<T: AsRef<[u8]> + ?Sized + 'input>(
         inputs: impl IntoIterator<Item = &'input T>,
     ) -> Self {
-        Diff::for_tokenizer(inputs, find_line_ranges)
+        Diff::for_tokenizer(inputs, find_line_ranges, CompareBytesExactly)
     }
 
     /// Compares `inputs` word by word.
@@ -521,21 +704,28 @@ impl<'input> Diff<'input> {
     pub fn by_word<T: AsRef<[u8]> + ?Sized + 'input>(
         inputs: impl IntoIterator<Item = &'input T>,
     ) -> Self {
-        let mut diff = Diff::for_tokenizer(inputs, find_word_ranges);
-        diff.refine_changed_regions(find_nonword_ranges);
+        let mut diff = Diff::for_tokenizer(inputs, find_word_ranges, CompareBytesExactly);
+        diff.refine_changed_regions(find_nonword_ranges, CompareBytesExactly);
         diff
     }
 
-    pub fn hunks<'diff>(&'diff self) -> DiffHunkIterator<'diff, 'input> {
-        DiffHunkIterator {
-            diff: self,
-            previous: UnchangedRange {
-                base: 0..0,
-                others: vec![0..0; self.other_inputs.len()],
-            },
-            unchanged_emitted: true,
-            unchanged_iter: self.unchanged_regions.iter(),
-        }
+    /// Returns iterator over matching and different texts.
+    pub fn hunks(&self) -> DiffHunkIterator<'_, 'input> {
+        let ranges = self.hunk_ranges();
+        DiffHunkIterator { diff: self, ranges }
+    }
+
+    /// Returns iterator over matching and different ranges in bytes.
+    pub fn hunk_ranges(&self) -> DiffHunkRangeIterator<'_> {
+        DiffHunkRangeIterator::new(self)
+    }
+
+    /// Returns contents at the unchanged `range`.
+    fn hunk_at<'a>(&'a self, range: &'a UnchangedRange) -> impl Iterator<Item = &'input BStr> + 'a {
+        itertools::chain(
+            iter::once(&self.base_input[range.base.clone()]),
+            iter::zip(&self.other_inputs, &range.others).map(|(input, r)| &input[r.clone()]),
+        )
     }
 
     /// Returns contents between the `previous` ends and the `current` starts.
@@ -553,19 +743,20 @@ impl<'input> Diff<'input> {
 
     /// Uses the given tokenizer to split the changed regions into smaller
     /// regions. Then tries to finds unchanged regions among them.
-    pub fn refine_changed_regions(&mut self, tokenizer: impl Fn(&[u8]) -> Vec<Range<usize>>) {
-        let mut previous = UnchangedRange {
-            base: 0..0,
-            others: vec![0..0; self.other_inputs.len()],
-        };
-        let mut new_unchanged_ranges = vec![];
-        for current in self.unchanged_regions.iter() {
+    pub fn refine_changed_regions(
+        &mut self,
+        tokenizer: impl Fn(&[u8]) -> Vec<Range<usize>>,
+        compare: impl CompareBytes,
+    ) {
+        let mut new_unchanged_ranges = vec![self.unchanged_regions[0].clone()];
+        for window in self.unchanged_regions.windows(2) {
+            let [previous, current]: &[_; 2] = window.try_into().unwrap();
             // For the changed region between the previous region and the current one,
             // create a new Diff instance. Then adjust the start positions and
             // offsets to be valid in the context of the larger Diff instance
             // (`self`).
             let refined_diff =
-                Diff::for_tokenizer(self.hunk_between(&previous, current), &tokenizer);
+                Diff::for_tokenizer(self.hunk_between(previous, current), &tokenizer, &compare);
             for refined in &refined_diff.unchanged_regions {
                 let new_base_start = refined.base.start + previous.base.end;
                 let new_base_end = refined.base.end + previous.base.end;
@@ -577,21 +768,16 @@ impl<'input> Diff<'input> {
                     others: new_others,
                 });
             }
-            previous = current.clone();
+            new_unchanged_ranges.push(current.clone());
         }
-        self.unchanged_regions = self
-            .unchanged_regions
-            .iter()
-            .cloned()
-            .merge(new_unchanged_ranges)
-            .collect_vec();
+        self.unchanged_regions = new_unchanged_ranges;
         self.compact_unchanged_regions();
     }
 
     fn compact_unchanged_regions(&mut self) {
         let mut compacted = vec![];
         let mut maybe_previous: Option<UnchangedRange> = None;
-        for current in self.unchanged_regions.iter() {
+        for current in &self.unchanged_regions {
             if let Some(previous) = maybe_previous {
                 if previous.base.end == current.base.start
                     && iter::zip(&previous.others, &current.others)
@@ -616,73 +802,162 @@ impl<'input> Diff<'input> {
     }
 }
 
-#[derive(PartialEq, Eq, Clone, Debug)]
-pub enum DiffHunk<'input> {
-    Matching(&'input BStr),
-    Different(Vec<&'input BStr>),
+/// Hunk texts.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DiffHunk<'input> {
+    pub kind: DiffHunkKind,
+    pub contents: DiffHunkContentVec<'input>,
 }
 
 impl<'input> DiffHunk<'input> {
-    pub fn matching<T: AsRef<[u8]> + ?Sized>(content: &'input T) -> Self {
-        DiffHunk::Matching(BStr::new(content))
+    pub fn matching<T: AsRef<[u8]> + ?Sized + 'input>(
+        contents: impl IntoIterator<Item = &'input T>,
+    ) -> Self {
+        DiffHunk {
+            kind: DiffHunkKind::Matching,
+            contents: contents.into_iter().map(BStr::new).collect(),
+        }
     }
 
     pub fn different<T: AsRef<[u8]> + ?Sized + 'input>(
         contents: impl IntoIterator<Item = &'input T>,
     ) -> Self {
-        DiffHunk::Different(contents.into_iter().map(BStr::new).collect())
+        DiffHunk {
+            kind: DiffHunkKind::Different,
+            contents: contents.into_iter().map(BStr::new).collect(),
+        }
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DiffHunkKind {
+    Matching,
+    Different,
+}
+
+// Inline up to two sides
+pub type DiffHunkContentVec<'input> = SmallVec<[&'input BStr; 2]>;
+
+/// Iterator over matching and different texts.
+#[derive(Clone, Debug)]
 pub struct DiffHunkIterator<'diff, 'input> {
     diff: &'diff Diff<'input>,
-    previous: UnchangedRange,
+    ranges: DiffHunkRangeIterator<'diff>,
+}
+
+impl<'input> Iterator for DiffHunkIterator<'_, 'input> {
+    type Item = DiffHunk<'input>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.ranges.next_with(
+            |previous| {
+                let contents = self.diff.hunk_at(previous).collect();
+                let kind = DiffHunkKind::Matching;
+                DiffHunk { kind, contents }
+            },
+            |previous, current| {
+                let contents: DiffHunkContentVec =
+                    self.diff.hunk_between(previous, current).collect();
+                debug_assert!(
+                    contents.iter().any(|content| !content.is_empty()),
+                    "unchanged regions should have been compacted"
+                );
+                let kind = DiffHunkKind::Different;
+                DiffHunk { kind, contents }
+            },
+        )
+    }
+}
+
+/// Hunk ranges in bytes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DiffHunkRange {
+    pub kind: DiffHunkKind,
+    pub ranges: DiffHunkRangeVec,
+}
+
+// Inline up to two sides
+pub type DiffHunkRangeVec = SmallVec<[Range<usize>; 2]>;
+
+/// Iterator over matching and different ranges in bytes.
+#[derive(Clone, Debug)]
+pub struct DiffHunkRangeIterator<'diff> {
+    previous: &'diff UnchangedRange,
     unchanged_emitted: bool,
     unchanged_iter: slice::Iter<'diff, UnchangedRange>,
 }
 
-impl<'diff, 'input> Iterator for DiffHunkIterator<'diff, 'input> {
-    type Item = DiffHunk<'input>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            if !self.unchanged_emitted {
-                self.unchanged_emitted = true;
-                if !self.previous.base.is_empty() {
-                    return Some(DiffHunk::Matching(
-                        &self.diff.base_input[self.previous.base.clone()],
-                    ));
-                }
-            }
-            if let Some(current) = self.unchanged_iter.next() {
-                let slices = self
-                    .diff
-                    .hunk_between(&self.previous, current)
-                    .collect_vec();
-                self.previous = current.clone();
-                self.unchanged_emitted = false;
-                if slices.iter().any(|slice| !slice.is_empty()) {
-                    return Some(DiffHunk::Different(slices));
-                }
-            } else {
-                break;
-            }
+impl<'diff> DiffHunkRangeIterator<'diff> {
+    fn new(diff: &'diff Diff) -> Self {
+        let mut unchanged_iter = diff.unchanged_regions.iter();
+        let previous = unchanged_iter.next().unwrap();
+        DiffHunkRangeIterator {
+            previous,
+            unchanged_emitted: previous.is_all_empty(),
+            unchanged_iter,
         }
-        None
+    }
+
+    fn next_with<T>(
+        &mut self,
+        hunk_at: impl FnOnce(&UnchangedRange) -> T,
+        hunk_between: impl FnOnce(&UnchangedRange, &UnchangedRange) -> T,
+    ) -> Option<T> {
+        if !self.unchanged_emitted {
+            self.unchanged_emitted = true;
+            return Some(hunk_at(self.previous));
+        }
+        let current = self.unchanged_iter.next()?;
+        let hunk = hunk_between(self.previous, current);
+        self.previous = current;
+        self.unchanged_emitted = self.previous.is_all_empty();
+        Some(hunk)
     }
 }
 
-/// Diffs slices of bytes. The returned diff hunks may be any length (may
-/// span many lines or may be only part of a line). This currently uses
-/// Histogram diff (or maybe something similar; I'm not sure I understood the
-/// algorithm correctly). It first diffs lines in the input and then refines
-/// the changed ranges at the word level.
+impl Iterator for DiffHunkRangeIterator<'_> {
+    type Item = DiffHunkRange;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next_with(
+            |previous| {
+                let ranges = itertools::chain(iter::once(&previous.base), &previous.others)
+                    .cloned()
+                    .collect();
+                let kind = DiffHunkKind::Matching;
+                DiffHunkRange { kind, ranges }
+            },
+            |previous, current| {
+                let ranges: DiffHunkRangeVec = itertools::chain(
+                    iter::once(previous.base.end..current.base.start),
+                    iter::zip(&previous.others, &current.others)
+                        .map(|(prev, cur)| prev.end..cur.start),
+                )
+                .collect();
+                debug_assert!(
+                    ranges.iter().any(|range| !range.is_empty()),
+                    "unchanged regions should have been compacted"
+                );
+                let kind = DiffHunkKind::Different;
+                DiffHunkRange { kind, ranges }
+            },
+        )
+    }
+}
+
+/// Diffs slices of bytes.
+///
+/// The returned diff hunks may be any length (may span many lines or
+/// may be only part of a line). This currently uses Histogram diff
+/// (or maybe something similar; I'm not sure I understood the
+/// algorithm correctly). It first diffs lines in the input and then
+/// refines the changed ranges at the word level.
 pub fn diff<'a, T: AsRef<[u8]> + ?Sized + 'a>(
     inputs: impl IntoIterator<Item = &'a T>,
 ) -> Vec<DiffHunk<'a>> {
-    let mut diff = Diff::for_tokenizer(inputs, find_line_ranges);
-    diff.refine_changed_regions(find_word_ranges);
-    diff.refine_changed_regions(find_nonword_ranges);
+    let mut diff = Diff::for_tokenizer(inputs, find_line_ranges, CompareBytesExactly);
+    diff.refine_changed_regions(find_word_ranges, CompareBytesExactly);
+    diff.refine_changed_regions(find_nonword_ranges, CompareBytesExactly);
     diff.hunks().collect()
 }
 
@@ -743,7 +1018,7 @@ mod tests {
 
     #[test]
     fn test_find_word_ranges_multibyte() {
-        assert_eq!(find_word_ranges("⊢".as_bytes()), vec![0..3])
+        assert_eq!(find_word_ranges("⊢".as_bytes()), vec![0..3]);
     }
 
     #[test]
@@ -807,12 +1082,62 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_compare_bytes_ignore_all_whitespace() {
+        let comp = WordComparator::new(CompareBytesIgnoreAllWhitespace);
+        let hash = |data: &[u8]| comp.hash_one(data);
+
+        assert!(comp.eq(b"", b""));
+        assert!(comp.eq(b"", b" "));
+        assert!(comp.eq(b"\t", b"\r"));
+        assert_eq!(hash(b""), hash(b""));
+        assert_eq!(hash(b""), hash(b" "));
+        assert_eq!(hash(b""), hash(b"\t"));
+        assert_eq!(hash(b""), hash(b"\r"));
+
+        assert!(comp.eq(b"ab", b" a  b\t"));
+        assert_eq!(hash(b"ab"), hash(b" a  b\t"));
+
+        assert!(!comp.eq(b"a", b""));
+        assert!(!comp.eq(b"a", b" "));
+        assert!(!comp.eq(b"a", b"ab"));
+        assert!(!comp.eq(b"ab", b"ba"));
+    }
+
+    #[test]
+    fn test_compare_bytes_ignore_whitespace_amount() {
+        let comp = WordComparator::new(CompareBytesIgnoreWhitespaceAmount);
+        let hash = |data: &[u8]| comp.hash_one(data);
+
+        assert!(comp.eq(b"", b""));
+        assert!(comp.eq(b"\n", b" \n"));
+        assert!(comp.eq(b"\t", b"\r"));
+        assert_eq!(hash(b""), hash(b""));
+        assert_eq!(hash(b" "), hash(b"\n"));
+        assert_eq!(hash(b" "), hash(b" \n"));
+        assert_eq!(hash(b" "), hash(b"\t"));
+        assert_eq!(hash(b" "), hash(b"\r"));
+
+        assert!(comp.eq(b"a b c\n", b"a  b\tc\r\n"));
+        assert_eq!(hash(b"a b c\n"), hash(b"a  b\tc\r\n"));
+
+        assert!(!comp.eq(b"", b" "));
+        assert!(!comp.eq(b"a", b""));
+        assert!(!comp.eq(b"a", b" "));
+        assert!(!comp.eq(b"a", b"a "));
+        assert!(!comp.eq(b"a", b" a"));
+        assert!(!comp.eq(b"a", b"ab"));
+        assert!(!comp.eq(b"ab", b"ba"));
+        assert!(!comp.eq(b"ab", b"a b"));
+    }
+
     fn unchanged_ranges(
         left: &DiffSource,
         right: &DiffSource,
     ) -> Vec<(Range<usize>, Range<usize>)> {
+        let comp = WordComparator::new(CompareBytesExactly);
         let mut positions = Vec::new();
-        collect_unchanged_words(&mut positions, left, right);
+        collect_unchanged_words(&mut positions, left, right, &comp);
         positions
             .into_iter()
             .map(|(left_pos, right_pos)| (left.range_at(left_pos), right.range_at(right_pos)))
@@ -949,7 +1274,7 @@ mod tests {
 
     #[test]
     fn test_diff_single_input() {
-        assert_eq!(diff(["abc"]), vec![DiffHunk::matching("abc")]);
+        assert_eq!(diff(["abc"]), vec![DiffHunk::matching(["abc"])]);
     }
 
     #[test]
@@ -989,9 +1314,9 @@ mod tests {
         assert_eq!(
             diff(["a b c", "a X c"]),
             vec![
-                DiffHunk::matching("a "),
+                DiffHunk::matching(["a "].repeat(2)),
                 DiffHunk::different(["b", "X"]),
-                DiffHunk::matching(" c"),
+                DiffHunk::matching([" c"].repeat(2)),
             ]
         );
     }
@@ -1001,9 +1326,9 @@ mod tests {
         assert_eq!(
             diff(["a b c", "a X c", "a b c"]),
             vec![
-                DiffHunk::matching("a "),
+                DiffHunk::matching(["a "].repeat(3)),
                 DiffHunk::different(["b", "X", "b"]),
-                DiffHunk::matching(" c"),
+                DiffHunk::matching([" c"].repeat(3)),
             ]
         );
     }
@@ -1013,9 +1338,9 @@ mod tests {
         assert_eq!(
             diff(["a b c", "a X c", "a c X"]),
             vec![
-                DiffHunk::matching("a "),
+                DiffHunk::matching(["a "].repeat(3)),
                 DiffHunk::different(["b ", "X ", ""]),
-                DiffHunk::matching("c"),
+                DiffHunk::matching(["c"].repeat(3)),
                 DiffHunk::different(["", "", " X"]),
             ]
         );
@@ -1027,13 +1352,14 @@ mod tests {
         let diff = Diff::for_tokenizer(
             ["a\nb\nc\nd\ne\nf\ng", "a\nb\nc\nX\ne\nf\ng"],
             find_line_ranges,
+            CompareBytesExactly,
         );
         assert_eq!(
             diff.hunks().collect_vec(),
             vec![
-                DiffHunk::matching("a\nb\nc\n"),
+                DiffHunk::matching(["a\nb\nc\n"].repeat(2)),
                 DiffHunk::different(["d\n", "X\n"]),
-                DiffHunk::matching("e\nf\ng"),
+                DiffHunk::matching(["e\nf\ng"].repeat(2)),
             ]
         );
     }
@@ -1051,9 +1377,9 @@ mod tests {
         assert_eq!(
             diff(["a z", "a S z"]),
             vec![
-                DiffHunk::matching("a "),
+                DiffHunk::matching(["a "].repeat(2)),
                 DiffHunk::different(["", "S "]),
-                DiffHunk::matching("z"),
+                DiffHunk::matching(["z"].repeat(2)),
             ]
         );
     }
@@ -1063,11 +1389,11 @@ mod tests {
         assert_eq!(
             diff(["a R R S S z", "a S S R R z"]),
             vec![
-                DiffHunk::matching("a "),
+                DiffHunk::matching(["a "].repeat(2)),
                 DiffHunk::different(["R R ", ""]),
-                DiffHunk::matching("S S "),
+                DiffHunk::matching(["S S "].repeat(2)),
                 DiffHunk::different(["", "R R "]),
-                DiffHunk::matching("z")
+                DiffHunk::matching(["z"].repeat(2))
             ],
         );
     }
@@ -1080,19 +1406,120 @@ mod tests {
                 "a r r x q y z q b y q x r r c",
             ]),
             vec![
-                DiffHunk::matching("a "),
+                DiffHunk::matching(["a "].repeat(2)),
                 DiffHunk::different(["q", "r"]),
-                DiffHunk::matching(" "),
+                DiffHunk::matching([" "].repeat(2)),
                 DiffHunk::different(["", "r "]),
-                DiffHunk::matching("x q y "),
+                DiffHunk::matching(["x q y "].repeat(2)),
                 DiffHunk::different(["q ", ""]),
-                DiffHunk::matching("z q b "),
+                DiffHunk::matching(["z q b "].repeat(2)),
                 DiffHunk::different(["q ", ""]),
-                DiffHunk::matching("y q x "),
+                DiffHunk::matching(["y q x "].repeat(2)),
                 DiffHunk::different(["q", "r"]),
-                DiffHunk::matching(" "),
+                DiffHunk::matching([" "].repeat(2)),
                 DiffHunk::different(["", "r "]),
-                DiffHunk::matching("c"),
+                DiffHunk::matching(["c"].repeat(2)),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_diff_ignore_all_whitespace() {
+        fn diff(inputs: [&str; 2]) -> Vec<DiffHunk<'_>> {
+            let diff =
+                Diff::for_tokenizer(inputs, find_line_ranges, CompareBytesIgnoreAllWhitespace);
+            diff.hunks().collect()
+        }
+
+        assert_eq!(diff(["", "\n"]), vec![DiffHunk::different(["", "\n"])]);
+        assert_eq!(
+            diff(["a\n", " a\r\n"]),
+            vec![DiffHunk::matching(["a\n", " a\r\n"])]
+        );
+        assert_eq!(
+            diff(["a\n", " a\nb"]),
+            vec![
+                DiffHunk::matching(["a\n", " a\n"]),
+                DiffHunk::different(["", "b"]),
+            ]
+        );
+
+        // No LCS matches, so trim leading/trailing common lines
+        assert_eq!(
+            diff(["a\nc\n", " a\n a\n"]),
+            vec![
+                DiffHunk::matching(["a\n", " a\n"]),
+                DiffHunk::different(["c\n", " a\n"]),
+            ]
+        );
+        assert_eq!(
+            diff(["c\na\n", " a\n a\n"]),
+            vec![
+                DiffHunk::different(["c\n", " a\n"]),
+                DiffHunk::matching(["a\n", " a\n"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_diff_ignore_whitespace_amount() {
+        fn diff(inputs: [&str; 2]) -> Vec<DiffHunk<'_>> {
+            let diff =
+                Diff::for_tokenizer(inputs, find_line_ranges, CompareBytesIgnoreWhitespaceAmount);
+            diff.hunks().collect()
+        }
+
+        assert_eq!(diff(["", "\n"]), vec![DiffHunk::different(["", "\n"])]);
+        // whitespace at line end is ignored
+        assert_eq!(
+            diff(["a\n", "a\r\n"]),
+            vec![DiffHunk::matching(["a\n", "a\r\n"])]
+        );
+        // but whitespace at line start isn't
+        assert_eq!(
+            diff(["a\n", " a\n"]),
+            vec![DiffHunk::different(["a\n", " a\n"])]
+        );
+        assert_eq!(
+            diff(["a\n", "a \nb"]),
+            vec![
+                DiffHunk::matching(["a\n", "a \n"]),
+                DiffHunk::different(["", "b"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_diff_hunk_iterator() {
+        let diff = Diff::by_word(["a b c", "a XX c", "a b "]);
+        assert_eq!(
+            diff.hunks().collect_vec(),
+            vec![
+                DiffHunk::matching(["a "].repeat(3)),
+                DiffHunk::different(["b", "XX", "b"]),
+                DiffHunk::matching([" "].repeat(3)),
+                DiffHunk::different(["c", "c", ""]),
+            ]
+        );
+        assert_eq!(
+            diff.hunk_ranges().collect_vec(),
+            vec![
+                DiffHunkRange {
+                    kind: DiffHunkKind::Matching,
+                    ranges: smallvec![0..2, 0..2, 0..2],
+                },
+                DiffHunkRange {
+                    kind: DiffHunkKind::Different,
+                    ranges: smallvec![2..3, 2..4, 2..3],
+                },
+                DiffHunkRange {
+                    kind: DiffHunkKind::Matching,
+                    ranges: smallvec![3..4, 4..5, 3..4],
+                },
+                DiffHunkRange {
+                    kind: DiffHunkKind::Different,
+                    ranges: smallvec![4..5, 5..6, 4..4],
+                },
             ]
         );
     }
@@ -1111,11 +1538,11 @@ mod tests {
                 "    pub fn write_fmt(&mut self, fmt: fmt::Arguments<\'_>) -> io::Result<()> {\n        self.styler().write_fmt(fmt)\n"
             ]),
             vec![
-                DiffHunk::matching("    pub fn write_fmt(&mut self, fmt: fmt::Arguments<\'_>) "),
+                DiffHunk::matching(["    pub fn write_fmt(&mut self, fmt: fmt::Arguments<\'_>) "].repeat(2)),
                 DiffHunk::different(["", "-> io::Result<()> "]),
-                DiffHunk::matching("{\n        self.styler().write_fmt(fmt)"),
+                DiffHunk::matching(["{\n        self.styler().write_fmt(fmt)"].repeat(2)),
                 DiffHunk::different([".unwrap()", ""]),
-                DiffHunk::matching("\n")
+                DiffHunk::matching(["\n"].repeat(2))
             ]
         );
     }
@@ -1266,19 +1693,19 @@ int main(int argc, char **argv)
 "##,
             ]),
             vec![
-               DiffHunk::matching("/*\n * GIT - The information manager from hell\n *\n * Copyright (C) Linus Torvalds, 2005\n */\n#include \"#cache.h\"\n\n"),
+               DiffHunk::matching(["/*\n * GIT - The information manager from hell\n *\n * Copyright (C) Linus Torvalds, 2005\n */\n#include \"#cache.h\"\n\n"].repeat(2)),
                DiffHunk::different(["", "static void create_directories(const char *path)\n{\n\tint len = strlen(path);\n\tchar *buf = malloc(len + 1);\n\tconst char *slash = path;\n\n\twhile ((slash = strchr(slash+1, \'/\')) != NULL) {\n\t\tlen = slash - path;\n\t\tmemcpy(buf, path, len);\n\t\tbuf[len] = 0;\n\t\tmkdir(buf, 0700);\n\t}\n}\n\nstatic int create_file(const char *path)\n{\n\tint fd = open(path, O_WRONLY | O_TRUNC | O_CREAT, 0600);\n\tif (fd < 0) {\n\t\tif (errno == ENOENT) {\n\t\t\tcreate_directories(path);\n\t\t\tfd = open(path, O_WRONLY | O_TRUNC | O_CREAT, 0600);\n\t\t}\n\t}\n\treturn fd;\n}\n\n"]),
-               DiffHunk::matching("static int unpack(unsigned char *sha1)\n{\n\tvoid *buffer;\n\tunsigned long size;\n\tchar type[20];\n\n\tbuffer = read_sha1_file(sha1, type, &size);\n\tif (!buffer)\n\t\tusage(\"unable to read sha1 file\");\n\tif (strcmp(type, \"tree\"))\n\t\tusage(\"expected a \'tree\' node\");\n\twhile (size) {\n\t\tint len = strlen(buffer)+1;\n\t\tunsigned char *sha1 = buffer + len;\n\t\tchar *path = strchr(buffer, \' \')+1;\n"),
+               DiffHunk::matching(["static int unpack(unsigned char *sha1)\n{\n\tvoid *buffer;\n\tunsigned long size;\n\tchar type[20];\n\n\tbuffer = read_sha1_file(sha1, type, &size);\n\tif (!buffer)\n\t\tusage(\"unable to read sha1 file\");\n\tif (strcmp(type, \"tree\"))\n\t\tusage(\"expected a \'tree\' node\");\n\twhile (size) {\n\t\tint len = strlen(buffer)+1;\n\t\tunsigned char *sha1 = buffer + len;\n\t\tchar *path = strchr(buffer, \' \')+1;\n"].repeat(2)),
                DiffHunk::different(["", "\t\tchar *data;\n\t\tunsigned long filesize;\n"]),
-               DiffHunk::matching("\t\tunsigned int mode;\n"),
+               DiffHunk::matching(["\t\tunsigned int mode;\n"].repeat(2)),
                DiffHunk::different(["", "\t\tint fd;\n\n"]),
-               DiffHunk::matching("\t\tif (size < len + 20 || sscanf(buffer, \"%o\", &mode) != 1)\n\t\t\tusage(\"corrupt \'tree\' file\");\n\t\tbuffer = sha1 + 20;\n\t\tsize -= len + 20;\n\t\t"),
+               DiffHunk::matching(["\t\tif (size < len + 20 || sscanf(buffer, \"%o\", &mode) != 1)\n\t\t\tusage(\"corrupt \'tree\' file\");\n\t\tbuffer = sha1 + 20;\n\t\tsize -= len + 20;\n\t\t"].repeat(2)),
                DiffHunk::different(["printf(\"%o %s (%s)\\n\", mode, path,", "data ="]),
-               DiffHunk::matching(" "),
+               DiffHunk::matching([" "].repeat(2)),
                DiffHunk::different(["sha1_to_hex", "read_sha1_file"]),
-               DiffHunk::matching("(sha1"),
+               DiffHunk::matching(["(sha1"].repeat(2)),
                DiffHunk::different([")", ", type, &filesize);\n\t\tif (!data || strcmp(type, \"blob\"))\n\t\t\tusage(\"tree file refers to bad file data\");\n\t\tfd = create_file(path);\n\t\tif (fd < 0)\n\t\t\tusage(\"unable to create file\");\n\t\tif (write(fd, data, filesize) != filesize)\n\t\t\tusage(\"unable to write file\");\n\t\tfchmod(fd, mode);\n\t\tclose(fd);\n\t\tfree(data"]),
-               DiffHunk::matching(");\n\t}\n\treturn 0;\n}\n\nint main(int argc, char **argv)\n{\n\tint fd;\n\tunsigned char sha1[20];\n\n\tif (argc != 2)\n\t\tusage(\"read-tree <key>\");\n\tif (get_sha1_hex(argv[1], sha1) < 0)\n\t\tusage(\"read-tree <key>\");\n\tsha1_file_directory = getenv(DB_ENVIRONMENT);\n\tif (!sha1_file_directory)\n\t\tsha1_file_directory = DEFAULT_DB_ENVIRONMENT;\n\tif (unpack(sha1) < 0)\n\t\tusage(\"unpack failed\");\n\treturn 0;\n}\n"),
+               DiffHunk::matching([");\n\t}\n\treturn 0;\n}\n\nint main(int argc, char **argv)\n{\n\tint fd;\n\tunsigned char sha1[20];\n\n\tif (argc != 2)\n\t\tusage(\"read-tree <key>\");\n\tif (get_sha1_hex(argv[1], sha1) < 0)\n\t\tusage(\"read-tree <key>\");\n\tsha1_file_directory = getenv(DB_ENVIRONMENT);\n\tif (!sha1_file_directory)\n\t\tsha1_file_directory = DEFAULT_DB_ENVIRONMENT;\n\tif (unpack(sha1) < 0)\n\t\tusage(\"unpack failed\");\n\treturn 0;\n}\n"].repeat(2)),
             ]
         );
     }

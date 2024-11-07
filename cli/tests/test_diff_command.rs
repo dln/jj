@@ -433,8 +433,8 @@ fn test_diff_types() {
             &[
                 "diff",
                 "--types",
-                &format!(r#"--from=description("{}")"#, from),
-                &format!(r#"--to=description("{}")"#, to),
+                &format!(r#"--from=description("{from}")"#),
+                &format!(r#"--to=description("{to}")"#),
             ],
         )
     };
@@ -1522,6 +1522,110 @@ fn test_color_words_diff_missing_newline() {
 }
 
 #[test]
+fn test_diff_ignore_whitespace() {
+    let test_env = TestEnvironment::default();
+    test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "repo"]);
+    let repo_path = test_env.env_root().join("repo");
+
+    std::fs::write(
+        repo_path.join("file1"),
+        indoc! {"
+            foo {
+                bar;
+            }
+            baz {}
+        "},
+    )
+    .unwrap();
+    test_env.jj_cmd_ok(&repo_path, &["new", "-mindent + whitespace insertion"]);
+    std::fs::write(
+        repo_path.join("file1"),
+        indoc! {"
+            {
+                foo {
+                    bar;
+                }
+            }
+            baz {  }
+        "},
+    )
+    .unwrap();
+    test_env.jj_cmd_ok(&repo_path, &["status"]);
+
+    // Git diff as reference output
+    let stdout = test_env.jj_cmd_success(&repo_path, &["diff", "--git", "--ignore-all-space"]);
+    insta::assert_snapshot!(stdout, @r#"
+    diff --git a/file1 b/file1
+    index f532aa68ad..033c4a6168 100644
+    --- a/file1
+    +++ b/file1
+    @@ -1,4 +1,6 @@
+    +{
+         foo {
+             bar;
+         }
+    +}
+     baz {  }
+    "#);
+    let stdout = test_env.jj_cmd_success(&repo_path, &["diff", "--git", "--ignore-space-change"]);
+    insta::assert_snapshot!(stdout, @r#"
+    diff --git a/file1 b/file1
+    index f532aa68ad..033c4a6168 100644
+    --- a/file1
+    +++ b/file1
+    @@ -1,4 +1,6 @@
+    -foo {
+    +{
+    +    foo {
+             bar;
+    +    }
+     }
+    -baz {}
+    +baz {  }
+    "#);
+
+    // Diff-stat should respects the whitespace options
+    let stdout = test_env.jj_cmd_success(&repo_path, &["diff", "--stat", "--ignore-all-space"]);
+    insta::assert_snapshot!(stdout, @r#"
+    file1 | 2 ++
+    1 file changed, 2 insertions(+), 0 deletions(-)
+    "#);
+    let stdout = test_env.jj_cmd_success(&repo_path, &["diff", "--stat", "--ignore-space-change"]);
+    insta::assert_snapshot!(stdout, @r#"
+    file1 | 6 ++++--
+    1 file changed, 4 insertions(+), 2 deletions(-)
+    "#);
+
+    // Word-level changes are still highlighted
+    let stdout = test_env.jj_cmd_success(
+        &repo_path,
+        &["diff", "--color=always", "--ignore-all-space"],
+    );
+    insta::assert_snapshot!(stdout, @r#"
+    [38;5;3mModified regular file file1:[39m
+         [38;5;2m   1[39m: [4m[38;5;2m{[24m[39m
+    [38;5;1m   1[39m [38;5;2m   2[39m: [4m[38;5;2m    [24m[39mfoo {
+    [38;5;1m   2[39m [38;5;2m   3[39m:     [4m[38;5;2m    [24m[39mbar;
+    [38;5;1m   3[39m [38;5;2m   4[39m: [4m[38;5;2m    [24m[39m}
+         [38;5;2m   5[39m: [4m[38;5;2m}[24m[39m
+    [38;5;1m   4[39m [38;5;2m   6[39m: baz {[4m[38;5;2m  [24m[39m}
+    "#);
+    let stdout = test_env.jj_cmd_success(
+        &repo_path,
+        &["diff", "--color=always", "--ignore-space-change"],
+    );
+    insta::assert_snapshot!(stdout, @r#"
+    [38;5;3mModified regular file file1:[39m
+         [38;5;2m   1[39m: [4m[38;5;2m{[24m[39m
+    [38;5;1m   1[39m [38;5;2m   2[39m: [4m[38;5;2m    [24m[39mfoo {
+    [38;5;1m   2[39m [38;5;2m   3[39m:     [4m[38;5;2m    [24m[39mbar;
+         [38;5;2m   4[39m: [4m[38;5;2m    }[24m[39m
+    [38;5;1m   3[39m [38;5;2m   5[39m: }
+    [38;5;1m   4[39m [38;5;2m   6[39m: baz {[4m[38;5;2m  [24m[39m}
+    "#);
+}
+
+#[test]
 fn test_diff_skipped_context() {
     let test_env = TestEnvironment::default();
     test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "repo"]);
@@ -1630,6 +1734,100 @@ fn test_diff_skipped_context() {
        9    9: i
       10   10: j
     "###);
+}
+
+#[test]
+fn test_diff_skipped_context_from_settings_color_words() {
+    let test_env = TestEnvironment::default();
+    test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "repo"]);
+    let repo_path = test_env.env_root().join("repo");
+
+    test_env.add_config(
+        r#"
+[diff.color-words]
+context = 0
+        "#,
+    );
+
+    std::fs::write(repo_path.join("file1"), "a\nb\nc\nd\ne").unwrap();
+    test_env.jj_cmd_ok(&repo_path, &["describe", "-m", "=== First commit"]);
+
+    test_env.jj_cmd_ok(&repo_path, &["new", "@", "-m", "=== Must show 0 context"]);
+    std::fs::write(repo_path.join("file1"), "a\nb\nC\nd\ne").unwrap();
+
+    let stdout = test_env.jj_cmd_success(
+        &repo_path,
+        &["log", "-Tdescription", "-p", "--no-graph", "--reversed"],
+    );
+    insta::assert_snapshot!(stdout, @r#"
+    === First commit
+    Added regular file file1:
+            1: a
+            2: b
+            3: c
+            4: d
+            5: e
+    === Must show 0 context
+    Modified regular file file1:
+        ...
+       3    3: cC
+        ...
+    "#);
+}
+
+#[test]
+fn test_diff_skipped_context_from_settings_git() {
+    let test_env = TestEnvironment::default();
+    test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "repo"]);
+    let repo_path = test_env.env_root().join("repo");
+
+    test_env.add_config(
+        r#"
+[diff.git]
+context = 0
+        "#,
+    );
+
+    std::fs::write(repo_path.join("file1"), "a\nb\nc\nd\ne").unwrap();
+    test_env.jj_cmd_ok(&repo_path, &["describe", "-m", "=== First commit"]);
+
+    test_env.jj_cmd_ok(&repo_path, &["new", "@", "-m", "=== Must show 0 context"]);
+    std::fs::write(repo_path.join("file1"), "a\nb\nC\nd\ne").unwrap();
+
+    let stdout = test_env.jj_cmd_success(
+        &repo_path,
+        &[
+            "log",
+            "-Tdescription",
+            "-p",
+            "--git",
+            "--no-graph",
+            "--reversed",
+        ],
+    );
+    insta::assert_snapshot!(stdout, @r#"
+    === First commit
+    diff --git a/file1 b/file1
+    new file mode 100644
+    index 0000000000..0fec236860
+    --- /dev/null
+    +++ b/file1
+    @@ -1,0 +1,5 @@
+    +a
+    +b
+    +c
+    +d
+    +e
+    \ No newline at end of file
+    === Must show 0 context
+    diff --git a/file1 b/file1
+    index 0fec236860..b7615dae52 100644
+    --- a/file1
+    +++ b/file1
+    @@ -3,1 +3,1 @@
+    -c
+    +C
+    "#);
 }
 
 #[test]

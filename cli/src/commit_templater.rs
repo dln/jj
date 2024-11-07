@@ -30,9 +30,8 @@ use jj_lib::extensions_map::ExtensionsMap;
 use jj_lib::fileset;
 use jj_lib::fileset::FilesetDiagnostics;
 use jj_lib::fileset::FilesetExpression;
-use jj_lib::git;
-use jj_lib::hex_util::to_reverse_hex;
 use jj_lib::id_prefix::IdPrefixContext;
+use jj_lib::id_prefix::IdPrefixIndex;
 use jj_lib::matchers::Matcher;
 use jj_lib::merged_tree::MergedTree;
 use jj_lib::object_id::ObjectId as _;
@@ -43,6 +42,7 @@ use jj_lib::repo::Repo;
 use jj_lib::repo_path::RepoPathUiConverter;
 use jj_lib::revset;
 use jj_lib::revset::Revset;
+use jj_lib::revset::RevsetContainingFn;
 use jj_lib::revset::RevsetDiagnostics;
 use jj_lib::revset::RevsetExpression;
 use jj_lib::revset::RevsetModifier;
@@ -703,8 +703,11 @@ fn builtin_commit_methods<'repo>() -> CommitTemplateBuildMethodFnMap<'repo, Comm
         |language, _diagnostics, _build_ctx, self_property, function| {
             function.expect_no_arguments()?;
             let repo = language.repo;
-            let out_property = self_property.map(|commit| extract_git_head(repo, &commit));
-            Ok(L::wrap_ref_name_opt(out_property))
+            let out_property = self_property.map(|commit| {
+                let target = repo.view().git_head();
+                target.added_ids().contains(commit.id())
+            });
+            Ok(L::wrap_boolean(out_property))
         },
     );
     map.insert(
@@ -740,7 +743,7 @@ fn builtin_commit_methods<'repo>() -> CommitTemplateBuildMethodFnMap<'repo, Comm
                 .keyword_cache
                 .is_immutable_fn(language, function.name_span)?
                 .clone();
-            let out_property = self_property.map(move |commit| is_immutable(commit.id()));
+            let out_property = self_property.and_then(move |commit| Ok(is_immutable(commit.id())?));
             Ok(L::wrap_boolean(out_property))
         },
     );
@@ -754,7 +757,7 @@ fn builtin_commit_methods<'repo>() -> CommitTemplateBuildMethodFnMap<'repo, Comm
                     Ok(evaluate_user_revset(language, diagnostics, span, revset)?.containing_fn())
                 })?;
 
-            let out_property = self_property.map(move |commit| is_contained(commit.id()));
+            let out_property = self_property.and_then(move |commit| Ok(is_contained(commit.id())?));
             Ok(L::wrap_boolean(out_property))
         },
     );
@@ -838,8 +841,6 @@ fn expect_fileset_literal(
         Ok(expression)
     })
 }
-
-type RevsetContainingFn<'repo> = dyn Fn(&CommitId) -> bool + 'repo;
 
 fn evaluate_revset_expression<'repo>(
     language: &CommitTemplateLanguage<'repo>,
@@ -1019,7 +1020,7 @@ impl RefName {
             .get_or_try_init(|| {
                 let self_ids = self.target.added_ids().cloned().collect_vec();
                 let other_ids = tracking.target.added_ids().cloned().collect_vec();
-                Ok(revset::walk_revs(repo, &self_ids, &other_ids)?.count_estimate())
+                Ok(revset::walk_revs(repo, &self_ids, &other_ids)?.count_estimate()?)
             })
             .copied()
     }
@@ -1034,7 +1035,7 @@ impl RefName {
             .get_or_try_init(|| {
                 let self_ids = self.target.added_ids().cloned().collect_vec();
                 let other_ids = tracking.target.added_ids().cloned().collect_vec();
-                Ok(revset::walk_revs(repo, &other_ids, &self_ids)?.count_estimate())
+                Ok(revset::walk_revs(repo, &other_ids, &self_ids)?.count_estimate()?)
             })
             .copied()
     }
@@ -1230,14 +1231,6 @@ fn build_ref_names_index<'a>(
     index
 }
 
-fn extract_git_head(repo: &dyn Repo, commit: &Commit) -> Option<Rc<RefName>> {
-    let target = repo.view().git_head();
-    target
-        .added_ids()
-        .contains(commit.id())
-        .then(|| RefName::remote_only("HEAD", git::REMOTE_NAME_FOR_LOCAL_GIT_REPO, target.clone()))
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CommitOrChangeId {
     Commit(CommitId),
@@ -1248,11 +1241,7 @@ impl CommitOrChangeId {
     pub fn hex(&self) -> String {
         match self {
             CommitOrChangeId::Commit(id) => id.hex(),
-            CommitOrChangeId::Change(id) => {
-                // TODO: We can avoid the unwrap() and make this more efficient by converting
-                // straight from bytes.
-                to_reverse_hex(&id.hex()).unwrap()
-            }
+            CommitOrChangeId::Change(id) => id.reverse_hex(),
         }
     }
 
@@ -1267,13 +1256,13 @@ impl CommitOrChangeId {
     pub fn shortest(
         &self,
         repo: &dyn Repo,
-        id_prefix_context: &IdPrefixContext,
+        index: &IdPrefixIndex,
         total_len: usize,
     ) -> ShortestIdPrefix {
         let mut hex = self.hex();
         let prefix_len = match self {
-            CommitOrChangeId::Commit(id) => id_prefix_context.shortest_commit_prefix_len(repo, id),
-            CommitOrChangeId::Change(id) => id_prefix_context.shortest_change_prefix_len(repo, id),
+            CommitOrChangeId::Commit(id) => index.shortest_commit_prefix_len(repo, id),
+            CommitOrChangeId::Change(id) => index.shortest_change_prefix_len(repo, id),
         };
         hex.truncate(max(prefix_len, total_len));
         let rest = hex.split_off(prefix_len);
@@ -1330,7 +1319,6 @@ fn builtin_commit_or_change_id_methods<'repo>(
     map.insert(
         "shortest",
         |language, diagnostics, build_ctx, self_property, function| {
-            let id_prefix_context = &language.id_prefix_context;
             let ([], [len_node]) = function.expect_arguments()?;
             let len_property = len_node
                 .map(|node| {
@@ -1342,8 +1330,24 @@ fn builtin_commit_or_change_id_methods<'repo>(
                     )
                 })
                 .transpose()?;
+            let repo = language.repo;
+            let index = match language.id_prefix_context.populate(repo) {
+                Ok(index) => index,
+                Err(err) => {
+                    // Not an error because we can still produce somewhat
+                    // reasonable output.
+                    diagnostics.add_warning(
+                        TemplateParseError::expression(
+                            "Failed to load short-prefixes index",
+                            function.name_span,
+                        )
+                        .with_source(err),
+                    );
+                    IdPrefixIndex::empty()
+                }
+            };
             let out_property = (self_property, len_property)
-                .map(|(id, len)| id.shortest(language.repo, id_prefix_context, len.unwrap_or(0)));
+                .map(move |(id, len)| id.shortest(repo, &index, len.unwrap_or(0)));
             Ok(L::wrap_shortest_id_prefix(out_property))
         },
     );
@@ -1504,8 +1508,11 @@ fn builtin_tree_diff_methods<'repo>() -> CommitTemplateBuildMethodFnMap<'repo, T
             let template = (self_property, context_property)
                 .map(move |(diff, context)| {
                     // TODO: load defaults from UserSettings?
-                    let options = diff_util::ColorWordsOptions {
+                    let options = diff_util::ColorWordsDiffOptions {
                         context: context.unwrap_or(diff_util::DEFAULT_CONTEXT_LINES),
+                        line_diff: diff_util::LineDiffOptions {
+                            compare_mode: diff_util::LineCompareMode::Exact,
+                        },
                         max_inline_alternation: Some(3),
                     };
                     diff.into_formatted(move |formatter, store, tree_diff| {
@@ -1538,9 +1545,14 @@ fn builtin_tree_diff_methods<'repo>() -> CommitTemplateBuildMethodFnMap<'repo, T
                 .transpose()?;
             let template = (self_property, context_property)
                 .map(|(diff, context)| {
-                    let context = context.unwrap_or(diff_util::DEFAULT_CONTEXT_LINES);
+                    let options = diff_util::UnifiedDiffOptions {
+                        context: context.unwrap_or(diff_util::DEFAULT_CONTEXT_LINES),
+                        line_diff: diff_util::LineDiffOptions {
+                            compare_mode: diff_util::LineCompareMode::Exact,
+                        },
+                    };
                     diff.into_formatted(move |formatter, store, tree_diff| {
-                        diff_util::show_git_diff(formatter, store, tree_diff, context)
+                        diff_util::show_git_diff(formatter, store, tree_diff, &options)
                     })
                 })
                 .into_template();
@@ -1560,12 +1572,18 @@ fn builtin_tree_diff_methods<'repo>() -> CommitTemplateBuildMethodFnMap<'repo, T
             let path_converter = language.path_converter;
             let template = (self_property, width_property)
                 .map(move |(diff, width)| {
+                    let options = diff_util::DiffStatOptions {
+                        line_diff: diff_util::LineDiffOptions {
+                            compare_mode: diff_util::LineCompareMode::Exact,
+                        },
+                    };
                     diff.into_formatted(move |formatter, store, tree_diff| {
                         diff_util::show_diff_stat(
                             formatter,
                             store,
                             tree_diff,
                             path_converter,
+                            &options,
                             width,
                         )
                     })

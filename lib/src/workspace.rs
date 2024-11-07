@@ -93,6 +93,8 @@ pub enum WorkspaceLoadError {
     Path(#[from] PathError),
 }
 
+/// The combination of a repo and a working copy.
+///
 /// Represents the combination of a repo and working copy, i.e. what's typically
 /// the .jj/ directory and its parent. See
 /// <https://github.com/martinvonz/jj/blob/main/docs/working-copy.md#workspaces>
@@ -313,7 +315,7 @@ impl Workspace {
                 working_copy_factory,
                 workspace_id,
             )?;
-            let repo_loader = repo.loader();
+            let repo_loader = repo.loader().clone();
             let workspace = Workspace::new(workspace_root, repo_dir, working_copy, repo_loader)?;
             Ok((workspace, repo))
         })()
@@ -372,7 +374,12 @@ impl Workspace {
             working_copy_factory,
             workspace_id,
         )?;
-        let workspace = Workspace::new(workspace_root, repo_dir, working_copy, repo.loader())?;
+        let workspace = Workspace::new(
+            workspace_root,
+            repo_dir,
+            working_copy,
+            repo.loader().clone(),
+        )?;
         Ok((workspace, repo))
     }
 
@@ -454,7 +461,7 @@ pub struct LockedWorkspace<'a> {
     locked_wc: Box<dyn LockedWorkingCopy>,
 }
 
-impl<'a> LockedWorkspace<'a> {
+impl LockedWorkspace<'_> {
     pub fn locked_wc(&mut self) -> &mut dyn LockedWorkingCopy {
         self.locked_wc.as_mut()
     }
@@ -609,8 +616,8 @@ impl WorkspaceLoader for DefaultWorkspaceLoader {
     ) -> Result<Box<dyn WorkingCopy>, WorkspaceLoadError> {
         Ok(working_copy_factory.load_working_copy(
             store.clone(),
-            self.workspace_root.to_owned(),
-            self.working_copy_state_path.to_owned(),
+            self.workspace_root.clone(),
+            self.working_copy_state_path.clone(),
         )?)
     }
 }

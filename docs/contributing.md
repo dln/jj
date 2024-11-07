@@ -40,13 +40,16 @@ test and document.
 
 The commit message should describe the changes in the commit;
 the PR description can even be empty, but feel free to include a personal
-message. We write commit messages in an affected component style and don't use
+message. We start the commit message with `<topic>: `  and don't use
 [conventional commits](https://www.conventionalcommits.org/en/v1.0.0/). This means if
 you modified a command in the CLI, use its name as the topic, e.g
 `next/prev: <your-modification>` or `conflicts: <your-modification>`. We don't
 currently have a specific guidelines on what to write in the topic field, but
 the reviewers will help you provide a topic if you have difficulties choosing
-it.
+it. [How to Write a Git Commit Message](https://cbea.ms/git-commit/) is a good
+guide if you're new to writing good commit messages. We are not particularly
+strict about the style, but please do explain the reason for the change unless
+it's obvious.
 
 When you address comments on a PR, don't make the changes in a commit on top (as
 is typical on GitHub). Instead, please make the changes in the appropriate

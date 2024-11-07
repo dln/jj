@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 use itertools::Itertools as _;
 use once_cell::unsync::OnceCell;
+use thiserror::Error;
 
 use crate::backend::ChangeId;
 use crate::backend::CommitId;
@@ -30,11 +31,19 @@ use crate::object_id::ObjectId;
 use crate::object_id::PrefixResolution;
 use crate::repo::Repo;
 use crate::revset::DefaultSymbolResolver;
+use crate::revset::RevsetEvaluationError;
 use crate::revset::RevsetExpression;
 use crate::revset::RevsetExtensions;
+use crate::revset::RevsetResolutionError;
 use crate::revset::SymbolResolverExtension;
 
-struct PrefixDisambiguationError;
+#[derive(Debug, Error)]
+pub enum IdPrefixIndexLoadError {
+    #[error("Failed to resolve short-prefixes disambiguation revset")]
+    Resolution(#[from] RevsetResolutionError),
+    #[error("Failed to evaluate short-prefixes disambiguation revset")]
+    Evaluation(#[from] RevsetEvaluationError),
+}
 
 struct DisambiguationData {
     expression: Rc<RevsetExpression>,
@@ -52,19 +61,16 @@ impl DisambiguationData {
         &self,
         repo: &dyn Repo,
         extensions: &[impl AsRef<dyn SymbolResolverExtension>],
-    ) -> Result<&Indexes, PrefixDisambiguationError> {
+    ) -> Result<&Indexes, IdPrefixIndexLoadError> {
         self.indexes.get_or_try_init(|| {
             let symbol_resolver = DefaultSymbolResolver::new(repo, extensions);
             let resolved_expression = self
                 .expression
                 .clone()
-                .resolve_user_expression(repo, &symbol_resolver)
-                .map_err(|_| PrefixDisambiguationError)?;
-            let revset = resolved_expression
-                .evaluate(repo)
-                .map_err(|_| PrefixDisambiguationError)?;
+                .resolve_user_expression(repo, &symbol_resolver)?;
+            let revset = resolved_expression.evaluate(repo)?;
 
-            let commit_change_ids = revset.commit_change_ids().collect_vec();
+            let commit_change_ids: Vec<_> = revset.commit_change_ids().try_collect()?;
             let mut commit_index = IdIndex::with_capacity(commit_change_ids.len());
             let mut change_index = IdIndex::with_capacity(commit_change_ids.len());
             for (i, (commit_id, change_id)) in commit_change_ids.iter().enumerate() {
@@ -103,6 +109,7 @@ impl IdIndexSourceEntry<ChangeId> for &'_ (CommitId, ChangeId) {
     }
 }
 
+/// Manages configuration and cache of commit/change ID disambiguation index.
 #[derive(Default)]
 pub struct IdPrefixContext {
     disambiguation: Option<DisambiguationData>,
@@ -125,13 +132,27 @@ impl IdPrefixContext {
         self
     }
 
-    fn disambiguation_indexes(&self, repo: &dyn Repo) -> Option<&Indexes> {
-        // TODO: propagate errors instead of treating them as if no revset was specified
-        self.disambiguation.as_ref().and_then(|disambiguation| {
-            disambiguation
-                .indexes(repo, self.extensions.symbol_resolvers())
-                .ok()
-        })
+    /// Loads disambiguation index once, returns a borrowed index to
+    /// disambiguate commit/change IDs.
+    pub fn populate(&self, repo: &dyn Repo) -> Result<IdPrefixIndex<'_>, IdPrefixIndexLoadError> {
+        let indexes = if let Some(disambiguation) = &self.disambiguation {
+            Some(disambiguation.indexes(repo, self.extensions.symbol_resolvers())?)
+        } else {
+            None
+        };
+        Ok(IdPrefixIndex { indexes })
+    }
+}
+
+/// Loaded index to disambiguate commit/change IDs.
+pub struct IdPrefixIndex<'a> {
+    indexes: Option<&'a Indexes>,
+}
+
+impl IdPrefixIndex<'_> {
+    /// Returns an empty index that just falls back to a provided `repo`.
+    pub const fn empty() -> IdPrefixIndex<'static> {
+        IdPrefixIndex { indexes: None }
     }
 
     /// Resolve an unambiguous commit ID prefix.
@@ -140,12 +161,18 @@ impl IdPrefixContext {
         repo: &dyn Repo,
         prefix: &HexPrefix,
     ) -> PrefixResolution<CommitId> {
-        if let Some(indexes) = self.disambiguation_indexes(repo) {
+        if let Some(indexes) = self.indexes {
             let resolution = indexes
                 .commit_index
                 .resolve_prefix_to_key(&*indexes.commit_change_ids, prefix);
             if let PrefixResolution::SingleMatch(id) = resolution {
-                return PrefixResolution::SingleMatch(id);
+                // The disambiguation set may be loaded from a different repo,
+                // and contain a commit that doesn't exist in the current repo.
+                if repo.index().has_id(&id) {
+                    return PrefixResolution::SingleMatch(id);
+                } else {
+                    return PrefixResolution::NoMatch;
+                }
             }
         }
         repo.index().resolve_commit_id_prefix(prefix)
@@ -154,7 +181,7 @@ impl IdPrefixContext {
     /// Returns the shortest length of a prefix of `commit_id` that
     /// can still be resolved by `resolve_commit_prefix()`.
     pub fn shortest_commit_prefix_len(&self, repo: &dyn Repo, commit_id: &CommitId) -> usize {
-        if let Some(indexes) = self.disambiguation_indexes(repo) {
+        if let Some(indexes) = self.indexes {
             if let Some(lookup) = indexes
                 .commit_index
                 .lookup_exact(&*indexes.commit_change_ids, commit_id)
@@ -171,7 +198,7 @@ impl IdPrefixContext {
         repo: &dyn Repo,
         prefix: &HexPrefix,
     ) -> PrefixResolution<Vec<CommitId>> {
-        if let Some(indexes) = self.disambiguation_indexes(repo) {
+        if let Some(indexes) = self.indexes {
             let resolution = indexes
                 .change_index
                 .resolve_prefix_to_key(&*indexes.commit_change_ids, prefix);
@@ -190,7 +217,7 @@ impl IdPrefixContext {
     /// Returns the shortest length of a prefix of `change_id` that
     /// can still be resolved by `resolve_change_prefix()`.
     pub fn shortest_change_prefix_len(&self, repo: &dyn Repo, change_id: &ChangeId) -> usize {
-        if let Some(indexes) = self.disambiguation_indexes(repo) {
+        if let Some(indexes) = self.indexes {
             if let Some(lookup) = indexes
                 .change_index
                 .lookup_exact(&*indexes.commit_change_ids, change_id)
@@ -418,7 +445,7 @@ pub struct IdIndexLookup<'i, 'q, K, P, S, const N: usize> {
     pos: usize, // may be index.len()
 }
 
-impl<'i, 'q, K, P, S, const N: usize> IdIndexLookup<'i, 'q, K, P, S, N>
+impl<K, P, S, const N: usize> IdIndexLookup<'_, '_, K, P, S, N>
 where
     K: ObjectId + Eq,
     S: IdIndexSource<P>,

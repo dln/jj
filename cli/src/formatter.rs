@@ -34,7 +34,7 @@ use itertools::Itertools;
 pub trait Formatter: Write {
     /// Returns the backing `Write`. This is useful for writing data that is
     /// already formatted, such as in the graphical log.
-    fn raw(&mut self) -> &mut dyn Write;
+    fn raw(&mut self) -> io::Result<Box<dyn Write + '_>>;
 
     fn push_label(&mut self, label: &str) -> io::Result<()>;
 
@@ -203,8 +203,8 @@ impl<W: Write> Write for PlainTextFormatter<W> {
 }
 
 impl<W: Write> Formatter for PlainTextFormatter<W> {
-    fn raw(&mut self) -> &mut dyn Write {
-        &mut self.output
+    fn raw(&mut self) -> io::Result<Box<dyn Write + '_>> {
+        Ok(Box::new(self.output.by_ref()))
     }
 
     fn push_label(&mut self, _label: &str) -> io::Result<()> {
@@ -238,8 +238,8 @@ impl<W: Write> Write for SanitizingFormatter<W> {
 }
 
 impl<W: Write> Formatter for SanitizingFormatter<W> {
-    fn raw(&mut self) -> &mut dyn Write {
-        &mut self.output
+    fn raw(&mut self) -> io::Result<Box<dyn Write + '_>> {
+        Ok(Box::new(self.output.by_ref()))
     }
 
     fn push_label(&mut self, _label: &str) -> io::Result<()> {
@@ -395,7 +395,7 @@ impl<W: Write> ColorFormatter<W> {
         }
         if let Some(d) = new_debug {
             if !d.is_empty() {
-                write!(self.output, "<<{}::", d)?;
+                write!(self.output, "<<{d}::")?;
             }
             self.current_debug = Some(d);
         }
@@ -471,7 +471,7 @@ fn color_for_name_or_hex(name_or_hex: &str) -> Result<Color, config::ConfigError
         "bright cyan" => Ok(Color::Cyan),
         "bright white" => Ok(Color::White),
         _ => color_for_hex(name_or_hex)
-            .ok_or_else(|| config::ConfigError::Message(format!("invalid color: {}", name_or_hex))),
+            .ok_or_else(|| config::ConfigError::Message(format!("invalid color: {name_or_hex}"))),
     }
 }
 
@@ -541,8 +541,9 @@ impl<W: Write> Write for ColorFormatter<W> {
 }
 
 impl<W: Write> Formatter for ColorFormatter<W> {
-    fn raw(&mut self) -> &mut dyn Write {
-        &mut self.output
+    fn raw(&mut self) -> io::Result<Box<dyn Write + '_>> {
+        self.write_new_style()?;
+        Ok(Box::new(self.output.by_ref()))
     }
 
     fn push_label(&mut self, label: &str) -> io::Result<()> {
@@ -553,7 +554,7 @@ impl<W: Write> Formatter for ColorFormatter<W> {
     fn pop_label(&mut self) -> io::Result<()> {
         self.labels.pop();
         if self.labels.is_empty() {
-            self.write_new_style()?
+            self.write_new_style()?;
         }
         Ok(())
     }
@@ -578,13 +579,14 @@ impl<W: Write> Drop for ColorFormatter<W> {
 #[derive(Clone, Debug, Default)]
 pub struct FormatRecorder {
     data: Vec<u8>,
-    label_ops: Vec<(usize, LabelOp)>,
+    ops: Vec<(usize, FormatOp)>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum LabelOp {
+enum FormatOp {
     PushLabel(String),
     PopLabel,
+    RawEscapeSequence(Vec<u8>),
 }
 
 impl FormatRecorder {
@@ -592,12 +594,20 @@ impl FormatRecorder {
         FormatRecorder::default()
     }
 
+    /// Creates new buffer containing the given `data`.
+    pub fn with_data(data: impl Into<Vec<u8>>) -> Self {
+        FormatRecorder {
+            data: data.into(),
+            ops: vec![],
+        }
+    }
+
     pub fn data(&self) -> &[u8] {
         &self.data
     }
 
-    fn push_label_op(&mut self, op: LabelOp) {
-        self.label_ops.push((self.data.len(), op));
+    fn push_op(&mut self, op: FormatOp) {
+        self.ops.push((self.data.len(), op));
     }
 
     pub fn replay(&self, formatter: &mut dyn Formatter) -> io::Result<()> {
@@ -619,11 +629,14 @@ impl FormatRecorder {
             }
             Ok(())
         };
-        for (pos, op) in &self.label_ops {
+        for (pos, op) in &self.ops {
             flush_data(formatter, *pos)?;
             match op {
-                LabelOp::PushLabel(label) => formatter.push_label(label)?,
-                LabelOp::PopLabel => formatter.pop_label()?,
+                FormatOp::PushLabel(label) => formatter.push_label(label)?,
+                FormatOp::PopLabel => formatter.pop_label()?,
+                FormatOp::RawEscapeSequence(raw_escape_sequence) => {
+                    formatter.raw()?.write_all(raw_escape_sequence)?;
+                }
             }
         }
         flush_data(formatter, self.data.len())
@@ -641,18 +654,31 @@ impl Write for FormatRecorder {
     }
 }
 
+struct RawEscapeSequenceRecorder<'a>(&'a mut FormatRecorder);
+
+impl Write for RawEscapeSequenceRecorder<'_> {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        self.0.push_op(FormatOp::RawEscapeSequence(data.to_vec()));
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush()
+    }
+}
+
 impl Formatter for FormatRecorder {
-    fn raw(&mut self) -> &mut dyn Write {
-        panic!("raw output isn't supported by FormatRecorder")
+    fn raw(&mut self) -> io::Result<Box<dyn Write + '_>> {
+        Ok(Box::new(RawEscapeSequenceRecorder(self)))
     }
 
     fn push_label(&mut self, label: &str) -> io::Result<()> {
-        self.push_label_op(LabelOp::PushLabel(label.to_owned()));
+        self.push_op(FormatOp::PushLabel(label.to_owned()));
         Ok(())
     }
 
     fn pop_label(&mut self) -> io::Result<()> {
-        self.push_label_op(LabelOp::PopLabel);
+        self.push_op(FormatOp::PopLabel);
         Ok(())
     }
 }
@@ -786,7 +812,7 @@ mod tests {
         for [label, color] in labels_and_colors {
             // Use the color name as the label.
             config_builder = config_builder
-                .set_override(format!("colors.{}", label), color)
+                .set_override(format!("colors.{label}"), color)
                 .unwrap();
         }
         let mut output: Vec<u8> = vec![];
@@ -1243,5 +1269,40 @@ mod tests {
         insta::assert_snapshot!(
             String::from_utf8(output).unwrap(),
             @"<< outer1 >>[38;5;1m<< inner1  inner2 >>[39m<< outer2 >>");
+    }
+
+    #[test]
+    fn test_raw_format_recorder() {
+        // Note: similar to test_format_recorder above
+        let mut recorder = FormatRecorder::new();
+        write!(recorder.raw().unwrap(), " outer1 ").unwrap();
+        recorder.push_label("inner").unwrap();
+        write!(recorder.raw().unwrap(), " inner1 ").unwrap();
+        write!(recorder.raw().unwrap(), " inner2 ").unwrap();
+        recorder.pop_label().unwrap();
+        write!(recorder.raw().unwrap(), " outer2 ").unwrap();
+
+        // Replayed raw escape sequences are labeled.
+        let config = config_from_string(r#" colors.inner = "red" "#);
+        let mut output: Vec<u8> = vec![];
+        let mut formatter = ColorFormatter::for_config(&mut output, &config, false).unwrap();
+        recorder.replay(&mut formatter).unwrap();
+        drop(formatter);
+        insta::assert_snapshot!(
+            String::from_utf8(output).unwrap(), @" outer1 [38;5;1m inner1  inner2 [39m outer2 ");
+
+        let mut output: Vec<u8> = vec![];
+        let mut formatter = ColorFormatter::for_config(&mut output, &config, false).unwrap();
+        recorder
+            .replay_with(&mut formatter, |_formatter, range| {
+                panic!(
+                    "Called with {:?} when all output should be raw",
+                    str::from_utf8(&recorder.data()[range]).unwrap()
+                );
+            })
+            .unwrap();
+        drop(formatter);
+        insta::assert_snapshot!(
+            String::from_utf8(output).unwrap(), @" outer1 [38;5;1m inner1  inner2 [39m outer2 ");
     }
 }

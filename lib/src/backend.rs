@@ -25,6 +25,7 @@ use futures::stream::BoxStream;
 use thiserror::Error;
 
 use crate::content_hash::ContentHash;
+use crate::hex_util;
 use crate::index::Index;
 use crate::merge::Merge;
 use crate::object_id::id_type;
@@ -38,17 +39,25 @@ use crate::signing::SignResult;
 id_type!(
     /// Identifier for a [`Commit`] based on its content. When a commit is
     /// rewritten, its `CommitId` changes.
-    pub CommitId
+    pub CommitId { hex() }
 );
 id_type!(
     /// Stable identifier for a [`Commit`]. Unlike the `CommitId`, the `ChangeId`
     /// follows the commit and is not updated when the commit is rewritten.
-    pub ChangeId
+    pub ChangeId { reverse_hex() }
 );
-id_type!(pub TreeId);
-id_type!(pub FileId);
-id_type!(pub SymlinkId);
-id_type!(pub ConflictId);
+id_type!(pub TreeId { hex() });
+id_type!(pub FileId { hex() });
+id_type!(pub SymlinkId { hex() });
+id_type!(pub ConflictId { hex() });
+
+impl ChangeId {
+    /// Returns the hex string representation of this ID, which uses `z-k`
+    /// "digits" instead of `0-9a-f`.
+    pub fn reverse_hex(&self) -> String {
+        hex_util::encode_reverse_hex(&self.0)
+    }
+}
 
 #[derive(ContentHash, Debug, PartialEq, Eq, Clone, Copy, PartialOrd, Ord)]
 pub struct MillisSinceEpoch(pub i64);
@@ -231,7 +240,10 @@ pub enum BackendError {
         hash: String,
         source: Box<dyn std::error::Error + Send + Sync>,
     },
-    #[error("Error when reading file content for file {} with id {}", path.as_internal_file_string(), id.hex())]
+    #[error(
+        "Error when reading file content for file {path} with id {id}",
+        path = path.as_internal_file_string()
+    )]
     ReadFile {
         path: RepoPathBuf,
         id: FileId,

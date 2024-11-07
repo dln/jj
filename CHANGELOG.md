@@ -6,7 +6,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-
 ## [Unreleased]
 
 ### Breaking changes
@@ -17,6 +16,135 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed bugs
 
+## [0.23.0] - 2024-11-06
+
+### Security fixes
+
+* Fixed path traversal by cloning/checking out crafted Git repository containing
+  `..`, `.jj`, `.git` paths.
+  ([GHSA-88h5-6w7m-5w56](https://github.com/martinvonz/jj/security/advisories/GHSA-88h5-6w7m-5w56);CVE-2024-51990)
+
+### Breaking changes
+
+* Revset function names can no longer start with a number.
+
+* Evaluation error of `revsets.short-prefixes` configuration is now reported.
+
+* The `HEAD@git` symbol no longer resolves to the Git HEAD revision. Use
+  `git_head()` or `@-` revset expression instead. The `git_head` template
+  keyword now returns a boolean.
+
+* Help command doesn't work recursively anymore, i.e. `jj workspace help root`
+  doesn't work anymore.
+
+* The color label `op_log` from the `[colors]` config section now **only**
+  applies to the op log and not to the other places operations are displayed. In
+  almost all cases, if you configured `op_log` before, you should use the new
+  `operation` label instead.
+
+* Default operation log template now shows end times of operations instead of
+  start times.
+
+### Deprecations
+
+* `git.auto-local-bookmark` replaces `git.auto-local-branch`. The latter remains
+  supported for now (at lower precedence than the former).
+
+### New features
+
+* Added diff options to ignore whitespace when comparing lines. Whitespace
+  changes are still highlighted.
+
+* New command `jj simplify-parents` will remove redundant parent edges.
+
+* `jj squash` now supports `-f/-t` shorthands for `--from/--[in]to`.
+
+* Initial support for shallow Git repositories has been implemented. However,
+  deepening the history of a shallow repository is not yet supported.
+
+* `jj git clone` now accepts a `--depth <DEPTH>` option, which
+  allows to clone the repository with a given depth.
+
+* New command `jj file annotate` that annotates files line by line. This is similar
+  in functionality to `git blame`. Invoke the command with `jj file annotate <file_path>`.
+  The output can be customized via the `templates.annotate_commit_summary`
+  config variable.
+
+* `jj bookmark list` gained a `--remote REMOTE` option to display bookmarks
+   belonging to a remote. This option can be combined with `--tracked` or
+   `--conflicted`.
+
+* New command `jj config unset` that unsets config values. For example,
+  `jj config unset --user user.name`.
+
+* `jj help` now has the flag `--keyword` (shorthand `-k`), which can give help
+  for some keywords (e.g. `jj help -k revsets`). To see a list of the available
+  keywords you can do `jj help --help`.
+
+* New `at_operation(op, expr)` revset can be used in order to query revisions
+  based on historical state.
+
+* String literals in filesets, revsets and templates now support hex bytes
+  (with `\e` as escape / shorthand for `\x1b`).
+
+* New `coalesce(revsets...)` revset which returns commits in the first revset
+  in the `revsets` list that does not evaluate to `none()`.
+
+* New template function `raw_escape_sequence(...)` preserves escape sequences.
+
+* Timestamp objects in templates now have `after(date) -> Boolean` and
+  `before(date) -> Boolean` methods for comparing timestamps to other dates.
+
+* New template functions `pad_start()`, `pad_end()`, `truncate_start()`, and
+  `truncate_end()` are added.
+
+* Add a new template alias `bultin_log_compact_full_description()`.
+
+* Added the config settings `diff.color-words.context` and `diff.git.context` to
+  control the default number of lines of context shown.
+
+### Fixed bugs
+
+* Error on `trunk()` revset resolution is now handled gracefully.
+  [#4616](https://github.com/martinvonz/jj/issues/4616)
+
+* Updated the built-in diff editor `scm-record` to version 
+  [0.4.0](https://github.com/arxanas/scm-record/releases/tag/v0.4.0), which
+  includes multiple fixes.
+
+### Contributors
+
+Thanks to the people who made this release happen!
+
+* Alec Snyder (@allonsy)
+* Arthur Grillo (Grillo-0)
+* Austin Seipp (@thoughtpolice)
+* Benjamin Tan (@bnjmnt4n)
+* Dave Townsend (@Mossop)
+* Daniel Ploch (@torquestomp)
+* Emily (@neongreen)
+* Essien Ita Essien (@essiene)
+* Fedor Sheremetyev (@sheremetyev)
+* Ilya Grigoriev (@ilyagr)
+* Jakub Okoński (@farnoy)
+* Jcparkyn (@Jcparkyn)
+* Joaquín Triñanes (@JoaquinTrinanes)
+* Lukas Wirth (@Veykril)
+* Marco Neumann (@crepererum)
+* Martin von Zweigbergk (@martinvonz)
+* Matt Stark (@matts1)
+* Philip Metzger (@PhilipMetzger)
+* Philipp Albrecht (@pylbrecht)
+* Remo Senekowitsch (@senekor)
+* Richard Macklin (@rmacklin)
+* Robin Stocker (@robinst)
+* Samuel Tardieu (@samueltardieu)
+* Sora (@SoraTenshi)
+* Stephen Jennings (@jennings)
+* Theodore Ehrenborg (@TheodoreEhrenborg)
+* Vamsi Avula (@avamsi)
+* Vincent Ging Ho Yim (@cenviity)
+* Yuya Nishihara (@yuja)
 
 ## [0.22.0] - 2024-10-02
 
@@ -175,6 +303,9 @@ Thanks to the people who made this release happen!
   directory when configuring a `signing.key` for SSH commit signing.
 
 * When reconfiguring the author, warn that the working copy won't be updated
+
+* `jj rebase -s` can now be used with the `--insert-after` and `--insert-before`
+  options, like `jj rebase -r`.
 
 ### Fixed bugs
 

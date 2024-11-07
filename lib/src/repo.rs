@@ -65,10 +65,12 @@ use crate::op_heads_store::OpHeadsStore;
 use crate::op_store;
 use crate::op_store::OpStore;
 use crate::op_store::OpStoreError;
+use crate::op_store::OpStoreResult;
 use crate::op_store::OperationId;
 use crate::op_store::RefTarget;
 use crate::op_store::RemoteRef;
 use crate::op_store::RemoteRefState;
+use crate::op_store::RootOperationData;
 use crate::op_store::WorkspaceId;
 use crate::operation::Operation;
 use crate::refs::diff_named_ref_targets;
@@ -76,7 +78,6 @@ use crate::refs::diff_named_remote_refs;
 use crate::refs::merge_ref_targets;
 use crate::refs::merge_remote_refs;
 use crate::revset;
-use crate::revset::RevsetEvaluationError;
 use crate::revset::RevsetExpression;
 use crate::revset::RevsetIteratorExt;
 use crate::rewrite::merge_commit_trees;
@@ -96,6 +97,10 @@ use crate::view::RenameWorkspaceError;
 use crate::view::View;
 
 pub trait Repo {
+    /// Base repository that contains all committed data. Returns `self` if this
+    /// is a `ReadonlyRepo`,
+    fn base_repo(&self) -> &ReadonlyRepo;
+
     fn store(&self) -> &Arc<Store>;
 
     fn op_store(&self) -> &Arc<dyn OpStore>;
@@ -122,13 +127,8 @@ pub trait Repo {
 }
 
 pub struct ReadonlyRepo {
-    store: Arc<Store>,
-    op_store: Arc<dyn OpStore>,
-    op_heads_store: Arc<dyn OpHeadsStore>,
+    loader: RepoLoader,
     operation: Operation,
-    settings: RepoSettings,
-    index_store: Arc<dyn IndexStore>,
-    submodule_store: Arc<dyn SubmoduleStore>,
     index: Box<dyn ReadonlyIndex>,
     change_id_index: OnceCell<Box<dyn ChangeIdIndex>>,
     // TODO: This should eventually become part of the index and not be stored fully in memory.
@@ -137,7 +137,9 @@ pub struct ReadonlyRepo {
 
 impl Debug for ReadonlyRepo {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
-        f.debug_struct("Repo").field("store", &self.store).finish()
+        f.debug_struct("ReadonlyRepo")
+            .field("store", &self.loader.store)
+            .finish_non_exhaustive()
     }
 }
 
@@ -151,7 +153,7 @@ pub enum RepoInitError {
 
 impl ReadonlyRepo {
     pub fn default_op_store_initializer() -> &'static OpStoreInitializer<'static> {
-        &|_settings, store_path| Box::new(SimpleOpStore::init(store_path))
+        &|_settings, store_path, root_data| Box::new(SimpleOpStore::init(store_path, root_data))
     }
 
     pub fn default_op_heads_store_initializer() -> &'static OpHeadsStoreInitializer<'static> {
@@ -192,7 +194,10 @@ impl ReadonlyRepo {
 
         let op_store_path = repo_path.join("op_store");
         fs::create_dir(&op_store_path).context(&op_store_path)?;
-        let op_store = op_store_initializer(user_settings, &op_store_path);
+        let root_op_data = RootOperationData {
+            root_commit_id: store.root_commit_id().clone(),
+        };
+        let op_store = op_store_initializer(user_settings, &op_store_path, root_op_data);
         let op_store_type_path = op_store_path.join("type");
         fs::write(&op_store_type_path, op_store.name()).context(&op_store_type_path)?;
         let op_store: Arc<dyn OpStore> = Arc::from(op_store);
@@ -220,48 +225,35 @@ impl ReadonlyRepo {
             .context(&submodule_store_type_path)?;
         let submodule_store = Arc::from(submodule_store);
 
-        let root_operation_data = op_store
-            .read_operation(op_store.root_operation_id())
-            .expect("failed to read root operation");
-        let root_operation = Operation::new(
-            op_store.clone(),
-            op_store.root_operation_id().clone(),
-            root_operation_data,
-        );
-        let root_view = root_operation.view().expect("failed to read root view");
-        let index = index_store
-            .get_index_at_op(&root_operation, &store)
-            // If the root op index couldn't be read, the index backend wouldn't
-            // be initialized properly.
-            .map_err(|err| BackendInitError(err.into()))?;
-        let repo = Arc::new(ReadonlyRepo {
+        let loader = RepoLoader {
+            repo_settings,
             store,
             op_store,
             op_heads_store,
-            operation: root_operation,
-            settings: repo_settings,
             index_store,
+            submodule_store,
+        };
+
+        let root_operation = loader.root_operation();
+        let root_view = root_operation.view().expect("failed to read root view");
+        assert!(!root_view.heads().is_empty());
+        let index = loader
+            .index_store
+            .get_index_at_op(&root_operation, &loader.store)
+            // If the root op index couldn't be read, the index backend wouldn't
+            // be initialized properly.
+            .map_err(|err| BackendInitError(err.into()))?;
+        Ok(Arc::new(ReadonlyRepo {
+            loader,
+            operation: root_operation,
             index,
             change_id_index: OnceCell::new(),
             view: root_view,
-            submodule_store,
-        });
-        let mut tx = repo.start_transaction(user_settings);
-        tx.repo_mut()
-            .add_head(&repo.store().root_commit())
-            .expect("failed to add root commit as head");
-        Ok(tx.commit("initialize repo"))
+        }))
     }
 
-    pub fn loader(&self) -> RepoLoader {
-        RepoLoader {
-            repo_settings: self.settings.clone(),
-            store: self.store.clone(),
-            op_store: self.op_store.clone(),
-            op_heads_store: self.op_heads_store.clone(),
-            index_store: self.index_store.clone(),
-            submodule_store: self.submodule_store.clone(),
-        }
+    pub fn loader(&self) -> &RepoLoader {
+        &self.loader
     }
 
     pub fn op_id(&self) -> &OperationId {
@@ -290,15 +282,15 @@ impl ReadonlyRepo {
     }
 
     pub fn op_heads_store(&self) -> &Arc<dyn OpHeadsStore> {
-        &self.op_heads_store
+        self.loader.op_heads_store()
     }
 
     pub fn index_store(&self) -> &Arc<dyn IndexStore> {
-        &self.index_store
+        self.loader.index_store()
     }
 
     pub fn settings(&self) -> &RepoSettings {
-        &self.settings
+        self.loader.settings()
     }
 
     pub fn start_transaction(
@@ -323,12 +315,16 @@ impl ReadonlyRepo {
 }
 
 impl Repo for ReadonlyRepo {
+    fn base_repo(&self) -> &ReadonlyRepo {
+        self
+    }
+
     fn store(&self) -> &Arc<Store> {
-        &self.store
+        self.loader.store()
     }
 
     fn op_store(&self) -> &Arc<dyn OpStore> {
-        &self.op_store
+        self.loader.op_store()
     }
 
     fn index(&self) -> &dyn Index {
@@ -340,7 +336,7 @@ impl Repo for ReadonlyRepo {
     }
 
     fn submodule_store(&self) -> &Arc<dyn SubmoduleStore> {
-        &self.submodule_store
+        self.loader.submodule_store()
     }
 
     fn resolve_change_id_prefix(&self, prefix: &HexPrefix) -> PrefixResolution<Vec<CommitId>> {
@@ -354,7 +350,8 @@ impl Repo for ReadonlyRepo {
 
 pub type BackendInitializer<'a> =
     dyn Fn(&UserSettings, &Path) -> Result<Box<dyn Backend>, BackendInitError> + 'a;
-pub type OpStoreInitializer<'a> = dyn Fn(&UserSettings, &Path) -> Box<dyn OpStore> + 'a;
+pub type OpStoreInitializer<'a> =
+    dyn Fn(&UserSettings, &Path, RootOperationData) -> Box<dyn OpStore> + 'a;
 pub type OpHeadsStoreInitializer<'a> = dyn Fn(&UserSettings, &Path) -> Box<dyn OpHeadsStore> + 'a;
 pub type IndexStoreInitializer<'a> =
     dyn Fn(&UserSettings, &Path) -> Result<Box<dyn IndexStore>, BackendInitError> + 'a;
@@ -363,7 +360,7 @@ pub type SubmoduleStoreInitializer<'a> =
 
 type BackendFactory =
     Box<dyn Fn(&UserSettings, &Path) -> Result<Box<dyn Backend>, BackendLoadError>>;
-type OpStoreFactory = Box<dyn Fn(&UserSettings, &Path) -> Box<dyn OpStore>>;
+type OpStoreFactory = Box<dyn Fn(&UserSettings, &Path, RootOperationData) -> Box<dyn OpStore>>;
 type OpHeadsStoreFactory = Box<dyn Fn(&UserSettings, &Path) -> Box<dyn OpHeadsStore>>;
 type IndexStoreFactory =
     Box<dyn Fn(&UserSettings, &Path) -> Result<Box<dyn IndexStore>, BackendLoadError>>;
@@ -421,7 +418,9 @@ impl Default for StoreFactories {
         // OpStores
         factories.add_op_store(
             SimpleOpStore::name(),
-            Box::new(|_settings, store_path| Box::new(SimpleOpStore::load(store_path))),
+            Box::new(|_settings, store_path, root_data| {
+                Box::new(SimpleOpStore::load(store_path, root_data))
+            }),
         );
 
         // OpHeadsStores
@@ -521,6 +520,7 @@ impl StoreFactories {
         &self,
         settings: &UserSettings,
         store_path: &Path,
+        root_data: RootOperationData,
     ) -> Result<Box<dyn OpStore>, StoreLoadError> {
         let op_store_type = read_store_type("operation", store_path.join("type"))?;
         let op_store_factory = self.op_store_factories.get(&op_store_type).ok_or_else(|| {
@@ -529,7 +529,7 @@ impl StoreFactories {
                 store_type: op_store_type.to_string(),
             }
         })?;
-        Ok(op_store_factory(settings, store_path))
+        Ok(op_store_factory(settings, store_path, root_data))
     }
 
     pub fn add_op_heads_store(&mut self, name: &str, factory: OpHeadsStoreFactory) {
@@ -662,8 +662,14 @@ impl RepoLoader {
             Signer::from_settings(user_settings)?,
         );
         let repo_settings = user_settings.with_repo(repo_path).unwrap();
-        let op_store =
-            Arc::from(store_factories.load_op_store(user_settings, &repo_path.join("op_store"))?);
+        let root_op_data = RootOperationData {
+            root_commit_id: store.root_commit_id().clone(),
+        };
+        let op_store = Arc::from(store_factories.load_op_store(
+            user_settings,
+            &repo_path.join("op_store"),
+            root_op_data,
+        )?);
         let op_heads_store = Arc::from(
             store_factories.load_op_heads_store(user_settings, &repo_path.join("op_heads"))?,
         );
@@ -683,6 +689,10 @@ impl RepoLoader {
         })
     }
 
+    pub fn settings(&self) -> &RepoSettings {
+        &self.repo_settings
+    }
+
     pub fn store(&self) -> &Arc<Store> {
         &self.store
     }
@@ -697,6 +707,10 @@ impl RepoLoader {
 
     pub fn op_heads_store(&self) -> &Arc<dyn OpHeadsStore> {
         &self.op_heads_store
+    }
+
+    pub fn submodule_store(&self) -> &Arc<dyn SubmoduleStore> {
+        &self.submodule_store
     }
 
     pub fn load_at_head(
@@ -725,18 +739,28 @@ impl RepoLoader {
         index: Box<dyn ReadonlyIndex>,
     ) -> Arc<ReadonlyRepo> {
         let repo = ReadonlyRepo {
-            store: self.store.clone(),
-            op_store: self.op_store.clone(),
-            op_heads_store: self.op_heads_store.clone(),
+            loader: self.clone(),
             operation,
-            settings: self.repo_settings.clone(),
-            index_store: self.index_store.clone(),
-            submodule_store: self.submodule_store.clone(),
             index,
             change_id_index: OnceCell::new(),
             view,
         };
         Arc::new(repo)
+    }
+
+    // If we add a higher-level abstraction of OpStore, root_operation() and
+    // load_operation() will be moved there.
+
+    /// Returns the root operation.
+    pub fn root_operation(&self) -> Operation {
+        self.load_operation(self.op_store.root_operation_id())
+            .expect("failed to read root operation")
+    }
+
+    /// Loads the specified operation from the operation store.
+    pub fn load_operation(&self, id: &OperationId) -> OpStoreResult<Operation> {
+        let data = self.op_store.read_operation(id)?;
+        Ok(Operation::new(self.op_store.clone(), id.clone(), data))
     }
 
     /// Merges the given `operations` into a single operation. Returns the root
@@ -750,9 +774,7 @@ impl RepoLoader {
         let num_operations = operations.len();
         let mut operations = operations.into_iter();
         let Some(base_op) = operations.next() else {
-            let id = self.op_store.root_operation_id();
-            let data = self.op_store.read_operation(id)?;
-            return Ok(Operation::new(self.op_store.clone(), id.clone(), data));
+            return Ok(self.root_operation());
         };
         let final_op = if num_operations > 1 {
             let base_repo = self.load_at(&base_op)?;
@@ -762,7 +784,7 @@ impl RepoLoader {
                 tx.repo_mut().rebase_descendants(settings)?;
             }
             let tx_description = tx_description.map_or_else(
-                || format!("merge {} operations", num_operations),
+                || format!("merge {num_operations} operations"),
                 |tx_description| tx_description.to_string(),
             );
             let merged_repo = tx.write(tx_description).leave_unpublished();
@@ -794,13 +816,8 @@ impl RepoLoader {
     ) -> Result<Arc<ReadonlyRepo>, RepoLoaderError> {
         let index = self.index_store.get_index_at_op(&operation, &self.store)?;
         let repo = ReadonlyRepo {
-            store: self.store.clone(),
-            op_store: self.op_store.clone(),
-            op_heads_store: self.op_heads_store.clone(),
+            loader: self.clone(),
             operation,
-            settings: self.repo_settings.clone(),
-            index_store: self.index_store.clone(),
-            submodule_store: self.submodule_store.clone(),
             index,
             change_id_index: OnceCell::new(),
             view,
@@ -1131,7 +1148,7 @@ impl MutableRepo {
                 let commit = self
                     .new_commit(
                         settings,
-                        new_commit_ids.to_vec(),
+                        new_commit_ids.clone(),
                         merged_parents_tree.id().clone(),
                     )
                     .write()?;
@@ -1152,7 +1169,8 @@ impl MutableRepo {
         let heads_to_add = heads_to_add_expression
             .evaluate_programmatic(self)
             .unwrap()
-            .iter();
+            .iter()
+            .map(Result::unwrap); // TODO: Return error to caller
 
         let mut view = self.view().store_view().clone();
         for commit_id in self.parent_mapping.keys() {
@@ -1176,11 +1194,13 @@ impl MutableRepo {
                 ));
         let to_visit_revset = to_visit_expression
             .evaluate_programmatic(self)
-            .map_err(|err| match err {
-                RevsetEvaluationError::StoreError(err) => err,
-                RevsetEvaluationError::Other(_) => panic!("Unexpected revset error: {err}"),
-            })?;
-        let to_visit: Vec<_> = to_visit_revset.iter().commits(store).try_collect()?;
+            .map_err(|err| err.expect_backend_error())?;
+        let to_visit: Vec<_> = to_visit_revset
+            .iter()
+            .commits(store)
+            .try_collect()
+            // TODO: Return evaluation error to caller
+            .map_err(|err| err.expect_backend_error())?;
         drop(to_visit_revset);
         let to_visit_set: HashSet<CommitId> =
             to_visit.iter().map(|commit| commit.id().clone()).collect();
@@ -1763,6 +1783,8 @@ impl MutableRepo {
         for (commit_id, change_id) in revset::walk_revs(self, old_heads, new_heads)
             .unwrap()
             .commit_change_ids()
+            .map(Result::unwrap)
+        // TODO: Return error to caller
         {
             removed_changes
                 .entry(change_id)
@@ -1778,6 +1800,8 @@ impl MutableRepo {
         for (commit_id, change_id) in revset::walk_revs(self, new_heads, old_heads)
             .unwrap()
             .commit_change_ids()
+            .map(Result::unwrap)
+        // TODO: Return error to caller
         {
             if let Some(old_commits) = removed_changes.get(&change_id) {
                 for old_commit in old_commits {
@@ -1811,6 +1835,10 @@ impl MutableRepo {
 }
 
 impl Repo for MutableRepo {
+    fn base_repo(&self) -> &ReadonlyRepo {
+        &self.base_repo
+    }
+
     fn store(&self) -> &Arc<Store> {
         self.base_repo.store()
     }

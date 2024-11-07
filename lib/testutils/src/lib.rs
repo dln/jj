@@ -61,7 +61,7 @@ use jj_lib::workspace::Workspace;
 use pollster::FutureExt;
 use tempfile::TempDir;
 
-use crate::test_backend::TestBackend;
+use crate::test_backend::TestBackendFactory;
 
 pub mod test_backend;
 pub mod test_signing_backend;
@@ -119,8 +119,53 @@ pub fn user_settings() -> UserSettings {
     UserSettings::from_config(config)
 }
 
+#[derive(Debug)]
+pub struct TestEnvironment {
+    temp_dir: TempDir,
+    test_backend_factory: TestBackendFactory,
+}
+
+impl TestEnvironment {
+    pub fn init() -> Self {
+        TestEnvironment {
+            temp_dir: new_temp_dir(),
+            test_backend_factory: TestBackendFactory::default(),
+        }
+    }
+
+    pub fn root(&self) -> &Path {
+        self.temp_dir.path()
+    }
+
+    pub fn default_store_factories(&self) -> StoreFactories {
+        let mut factories = StoreFactories::default();
+        factories.add_backend("test", {
+            let factory = self.test_backend_factory.clone();
+            Box::new(move |_settings, store_path| Ok(Box::new(factory.load(store_path))))
+        });
+        factories.add_backend(
+            SecretBackend::name(),
+            Box::new(|settings, store_path| {
+                Ok(Box::new(SecretBackend::load(settings, store_path)?))
+            }),
+        );
+        factories
+    }
+
+    pub fn load_repo_at_head(
+        &self,
+        settings: &UserSettings,
+        repo_path: &Path,
+    ) -> Arc<ReadonlyRepo> {
+        RepoLoader::init_from_file_system(settings, repo_path, &self.default_store_factories())
+            .unwrap()
+            .load_at_head(settings)
+            .unwrap()
+    }
+}
+
 pub struct TestRepo {
-    _temp_dir: TempDir,
+    pub env: TestEnvironment,
     pub repo: Arc<ReadonlyRepo>,
     repo_path: PathBuf,
 }
@@ -135,13 +180,14 @@ pub enum TestRepoBackend {
 impl TestRepoBackend {
     fn init_backend(
         &self,
+        env: &TestEnvironment,
         settings: &UserSettings,
         store_path: &Path,
     ) -> Result<Box<dyn Backend>, BackendInitError> {
         match self {
             TestRepoBackend::Git => Ok(Box::new(GitBackend::init_internal(settings, store_path)?)),
             TestRepoBackend::Local => Ok(Box::new(LocalBackend::init(store_path))),
-            TestRepoBackend::Test => Ok(Box::new(TestBackend::init(store_path))),
+            TestRepoBackend::Test => Ok(Box::new(env.test_backend_factory.init(store_path))),
         }
     }
 }
@@ -163,15 +209,15 @@ impl TestRepo {
         backend: TestRepoBackend,
         settings: &UserSettings,
     ) -> Self {
-        let temp_dir = new_temp_dir();
+        let env = TestEnvironment::init();
 
-        let repo_dir = temp_dir.path().join("repo");
+        let repo_dir = env.root().join("repo");
         fs::create_dir(&repo_dir).unwrap();
 
         let repo = ReadonlyRepo::init(
             settings,
             &repo_dir,
-            &move |settings, store_path| backend.init_backend(settings, store_path),
+            &|settings, store_path| backend.init_backend(&env, settings, store_path),
             Signer::from_settings(settings).unwrap(),
             ReadonlyRepo::default_op_store_initializer(),
             ReadonlyRepo::default_op_heads_store_initializer(),
@@ -181,25 +227,10 @@ impl TestRepo {
         .unwrap();
 
         Self {
-            _temp_dir: temp_dir,
+            env,
             repo,
             repo_path: repo_dir,
         }
-    }
-
-    pub fn default_store_factories() -> StoreFactories {
-        let mut factories = StoreFactories::default();
-        factories.add_backend(
-            "test",
-            Box::new(|_settings, store_path| Ok(Box::new(TestBackend::load(store_path)))),
-        );
-        factories.add_backend(
-            SecretBackend::name(),
-            Box::new(|settings, store_path| {
-                Ok(Box::new(SecretBackend::load(settings, store_path)?))
-            }),
-        );
-        factories
     }
 
     pub fn repo_path(&self) -> &Path {
@@ -208,7 +239,7 @@ impl TestRepo {
 }
 
 pub struct TestWorkspace {
-    temp_dir: TempDir,
+    pub env: TestEnvironment,
     pub workspace: Workspace,
     pub repo: Arc<ReadonlyRepo>,
 }
@@ -231,28 +262,28 @@ impl TestWorkspace {
         backend: TestRepoBackend,
         signer: Signer,
     ) -> Self {
-        let temp_dir = new_temp_dir();
+        let env = TestEnvironment::init();
 
-        let workspace_root = temp_dir.path().join("repo");
+        let workspace_root = env.root().join("repo");
         fs::create_dir(&workspace_root).unwrap();
 
         let (workspace, repo) = Workspace::init_with_backend(
             settings,
             &workspace_root,
-            &move |settings, store_path| backend.init_backend(settings, store_path),
+            &|settings, store_path| backend.init_backend(&env, settings, store_path),
             signer,
         )
         .unwrap();
 
         Self {
-            temp_dir,
+            env,
             workspace,
             repo,
         }
     }
 
     pub fn root_dir(&self) -> PathBuf {
-        self.temp_dir.path().join("repo").join("..")
+        self.env.root().join("repo").join("..")
     }
 
     pub fn repo_path(&self) -> &Path {
@@ -279,15 +310,8 @@ impl TestWorkspace {
     }
 }
 
-pub fn load_repo_at_head(settings: &UserSettings, repo_path: &Path) -> Arc<ReadonlyRepo> {
-    RepoLoader::init_from_file_system(settings, repo_path, &TestRepo::default_store_factories())
-        .unwrap()
-        .load_at_head(settings)
-        .unwrap()
-}
-
 pub fn commit_transactions(settings: &UserSettings, txs: Vec<Transaction>) -> Arc<ReadonlyRepo> {
-    let repo_loader = txs[0].base_repo().loader();
+    let repo_loader = txs[0].base_repo().loader().clone();
     let mut op_ids = vec![];
     for tx in txs {
         op_ids.push(tx.commit("test").op_id().clone());
@@ -430,18 +454,13 @@ pub fn dump_tree(store: &Arc<Store>, tree_id: &MergedTreeId) -> String {
             Ok(Some(TreeValue::File { id, executable: _ })) => {
                 let file_buf = read_file(store, &path, &id);
                 let file_contents = String::from_utf8_lossy(&file_buf);
-                writeln!(
-                    &mut buf,
-                    "  file {path:?} ({}): {file_contents:?}",
-                    id.hex()
-                )
-                .unwrap();
+                writeln!(&mut buf, "  file {path:?} ({id}): {file_contents:?}").unwrap();
             }
             Ok(Some(TreeValue::Symlink(id))) => {
-                writeln!(&mut buf, "  symlink {path:?} ({})", id.hex()).unwrap();
+                writeln!(&mut buf, "  symlink {path:?} ({id})").unwrap();
             }
             Ok(Some(TreeValue::GitSubmodule(id))) => {
-                writeln!(&mut buf, "  submodule {path:?} ({})", id.hex()).unwrap();
+                writeln!(&mut buf, "  submodule {path:?} ({id})").unwrap();
             }
             entry => {
                 unimplemented!("dumping tree entry {entry:?}");
@@ -456,7 +475,7 @@ pub fn write_random_commit(mut_repo: &mut MutableRepo, settings: &UserSettings) 
 }
 
 pub fn write_working_copy_file(workspace_root: &Path, path: &RepoPath, contents: &str) {
-    let path = path.to_fs_path(workspace_root);
+    let path = path.to_fs_path(workspace_root).unwrap();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).unwrap();
     }
@@ -531,6 +550,8 @@ pub fn assert_rebased_onto(
     new_commit
 }
 
+/// Maps children of an abandoned commit to a new rebase target.
+///
 /// If `expected_old_commit` was abandoned, the `rebased` map indicates the
 /// commit the children of `expected_old_commit` should be rebased to, which
 /// would have a different change id. This happens when the EmptyBehavior in

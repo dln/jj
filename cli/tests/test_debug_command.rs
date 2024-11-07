@@ -57,16 +57,12 @@ fn test_debug_revset() {
     insta::with_settings!({filters => vec![
         (r"(?m)(^    .*\n)+", "    ..\n"),
     ]}, {
-        assert_snapshot!(stdout, @r###"
+        assert_snapshot!(stdout, @r"
         -- Parsed:
-        CommitRef(
-            ..
-        )
+        Root
 
         -- Optimized:
-        CommitRef(
-            ..
-        )
+        Root
 
         -- Resolved:
         Commits(
@@ -80,7 +76,7 @@ fn test_debug_revset() {
 
         -- Commit IDs:
         0000000000000000000000000000000000000000
-        "###);
+        ");
     });
 }
 
@@ -235,9 +231,9 @@ fn test_debug_operation_id() {
     let workspace_path = test_env.env_root().join("repo");
     let stdout =
         test_env.jj_cmd_success(&workspace_path, &["debug", "operation", "--display", "id"]);
-    assert_snapshot!(filter_index_stats(&stdout), @r###"
-    b51416386f2685fd5493f2b20e8eec3c24a1776d9e1a7cb5ed7e30d2d9c88c0c1e1fe71b0b7358cba60de42533d1228ed9878f2f89817d892c803395ccf9fe92
-    "###
+    assert_snapshot!(filter_index_stats(&stdout), @r#"
+    eac759b9ab75793fd3da96e60939fb48f2cd2b2a9c1f13ffe723cf620f3005b8d3e7e923634a07ea39513e4f2f360c87b9ad5d331cf90d7a844864b83b72eba1
+    "#
     );
 }
 

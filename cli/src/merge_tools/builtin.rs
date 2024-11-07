@@ -16,7 +16,7 @@ use jj_lib::conflicts::materialize_merge_result;
 use jj_lib::conflicts::materialize_tree_value;
 use jj_lib::conflicts::MaterializedTreeValue;
 use jj_lib::diff::Diff;
-use jj_lib::diff::DiffHunk;
+use jj_lib::diff::DiffHunkKind;
 use jj_lib::files;
 use jj_lib::files::MergeResult;
 use jj_lib::matchers::Matcher;
@@ -37,7 +37,7 @@ pub enum BuiltinToolError {
     Record(#[from] scm_record::RecordError),
     #[error(transparent)]
     ReadFileBackend(BackendError),
-    #[error("Failed to read file {path:?} with ID {id}", id = id.hex())]
+    #[error("Failed to read file {path:?} with ID {id}")]
     ReadFileIo {
         path: RepoPathBuf,
         id: FileId,
@@ -253,8 +253,10 @@ fn make_diff_sections(
     let diff = Diff::by_line([left_contents.as_bytes(), right_contents.as_bytes()]);
     let mut sections = Vec::new();
     for hunk in diff.hunks() {
-        match hunk {
-            DiffHunk::Matching(text) => {
+        match hunk.kind {
+            DiffHunkKind::Matching => {
+                debug_assert!(hunk.contents.iter().all_equal());
+                let text = hunk.contents[0];
                 let text =
                     std::str::from_utf8(text).map_err(|err| BuiltinToolError::DecodeUtf8 {
                         source: err,
@@ -265,9 +267,10 @@ fn make_diff_sections(
                         .split_inclusive('\n')
                         .map(|line| Cow::Owned(line.to_owned()))
                         .collect(),
-                })
+                });
             }
-            DiffHunk::Different(sides) => {
+            DiffHunkKind::Different => {
+                let sides = &hunk.contents;
                 assert_eq!(sides.len(), 2, "only two inputs were provided to the diff");
                 let left_side =
                     std::str::from_utf8(sides[0]).map_err(|err| BuiltinToolError::DecodeUtf8 {
@@ -285,7 +288,7 @@ fn make_diff_sections(
                         make_section_changed_lines(right_side, scm_record::ChangeType::Added),
                     ]
                     .concat(),
-                })
+                });
             }
         }
     }
@@ -361,7 +364,7 @@ pub fn make_diff_files(
                     is_checked: false,
                     old_description: None,
                     new_description: Some(Cow::Owned(describe_binary(hash.as_deref(), num_bytes))),
-                })
+                });
             }
 
             (
@@ -426,13 +429,14 @@ pub fn make_diff_files(
                     is_checked: false,
                     old_description: Some(Cow::Owned(describe_binary(hash.as_deref(), num_bytes))),
                     new_description: None,
-                })
+                });
             }
         }
 
         files.push(scm_record::File {
             old_path: None,
-            path: Cow::Owned(changed_path.to_fs_path(Path::new(""))),
+            // Path for displaying purposes, not for file access.
+            path: Cow::Owned(changed_path.to_fs_path_unchecked(Path::new(""))),
             file_mode: Some(left_info.file_mode),
             sections,
         });
@@ -507,7 +511,7 @@ pub fn apply_diff_builtin(
                         executable: file.get_file_mode()
                             == Some(scm_record::FileMode(mode::EXECUTABLE)),
                     }),
-                )
+                );
             }
         }
     }
@@ -637,7 +641,8 @@ pub fn edit_merge_builtin(
             is_read_only: false,
             files: vec![scm_record::File {
                 old_path: None,
-                path: Cow::Owned(path.to_fs_path(Path::new(""))),
+                // Path for displaying purposes, not for file access.
+                path: Cow::Owned(path.to_fs_path_unchecked(Path::new(""))),
                 file_mode: None,
                 sections,
             }],
@@ -800,7 +805,7 @@ mod tests {
         );
 
         let mut files = files;
-        for file in files.iter_mut() {
+        for file in &mut files {
             file.toggle_all();
         }
         let all_changes_tree_id =
@@ -864,7 +869,7 @@ mod tests {
         );
 
         let mut files = files;
-        for file in files.iter_mut() {
+        for file in &mut files {
             file.toggle_all();
         }
         let all_changes_tree_id =
@@ -928,7 +933,7 @@ mod tests {
         );
 
         let mut files = files;
-        for file in files.iter_mut() {
+        for file in &mut files {
             file.toggle_all();
         }
         let all_changes_tree_id =
@@ -993,7 +998,7 @@ mod tests {
         );
 
         let mut files = files;
-        for file in files.iter_mut() {
+        for file in &mut files {
             file.toggle_all();
         }
         let all_changes_tree_id =

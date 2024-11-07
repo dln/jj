@@ -288,6 +288,22 @@
                             "type": "integer",
                             "description": "Maximum number of removed/added word alternation to inline",
                             "default": 3
+                        },
+                        "context": {
+                            "type": "integer",
+                            "description": "Number of lines of context to show",
+                            "default": 3
+                        }
+                    }
+                },
+                "git": {
+                    "type": "object",
+                    "description": "Options for git diffs",
+                    "properties": {
+                        "context": {
+                            "type": "integer",
+                            "description": "Number of lines of context to show",
+                            "default": 3
                         }
                     }
                 }
@@ -297,7 +313,7 @@
             "type": "object",
             "description": "Settings for git behavior (when using git backend)",
             "properties": {
-                "auto-local-branch": {
+                "auto-local-bookmark": {
                     "type": "boolean",
                     "description": "Whether jj creates a local bookmark with the same name when it imports a remote-tracking branch from git. See https://martinvonz.github.io/jj/latest/config/#automatic-local-bookmark-creation",
                     "default": false
@@ -389,7 +405,7 @@
                 "log": {
                     "type": "string",
                     "description": "Default set of revisions to show when no explicit revset is given for jj log and similar commands",
-                    "default": "present(@) | ancestors(immutable_heads().., 2) | trunk()"
+                    "default": "present(@) | ancestors(immutable_heads().., 2) | present(trunk())"
                 },
                 "short-prefixes": {
                     "type": "string",
@@ -408,7 +424,7 @@
                 "immutable_heads()": {
                     "type": "string",
                     "description": "Revisions to consider immutable. Ancestors of these are also considered immutable. The root commit is always considered immutable.",
-                    "default": "trunk() | tags() | untracked_remote_branches()"
+                    "default": "present(trunk()) | tags() | untracked_remote_branches()"
                 }
             },
             "additionalProperties": {

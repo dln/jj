@@ -323,7 +323,7 @@ impl LayeredConfigs {
                         config_vals.push(AnnotatedValue {
                             path,
                             value: value.to_owned(),
-                            source: source.to_owned(),
+                            source: source.clone(),
                             // Note: Value updated below.
                             is_overridden: false,
                         });
@@ -455,10 +455,11 @@ pub fn existing_config_path() -> Result<Option<PathBuf>, ConfigError> {
     ConfigEnv::new().existing_config_path()
 }
 
-/// Returns a path to the user-specific config file. If no config file is found,
-/// tries to guess a reasonable new location for it. If a path to a new config
-/// file is returned, the parent directory may be created as a result of this
-/// call.
+/// Returns a path to the user-specific config file.
+///
+/// If no config file is found, tries to guess a reasonable new
+/// location for it. If a path to a new config file is returned, the
+/// parent directory may be created as a result of this call.
 pub fn new_config_path() -> Result<Option<PathBuf>, ConfigError> {
     ConfigEnv::new().new_config_path()
 }
@@ -498,10 +499,10 @@ pub fn default_config() -> config::Config {
         .add_source(from_toml!("config/revsets.toml"))
         .add_source(from_toml!("config/templates.toml"));
     if cfg!(unix) {
-        builder = builder.add_source(from_toml!("config/unix.toml"))
+        builder = builder.add_source(from_toml!("config/unix.toml"));
     }
     if cfg!(windows) {
-        builder = builder.add_source(from_toml!("config/windows.toml"))
+        builder = builder.add_source(from_toml!("config/windows.toml"));
     }
     builder.build().unwrap()
 }
@@ -582,12 +583,7 @@ fn read_config_path(config_path: &Path) -> Result<config::Config, config::Config
         .build()
 }
 
-pub fn write_config_value_to_file(
-    key: &ConfigNamePathBuf,
-    value: toml_edit::Value,
-    path: &Path,
-) -> Result<(), CommandError> {
-    // Read config
+fn read_config(path: &Path) -> Result<toml_edit::Document, CommandError> {
     let config_toml = std::fs::read_to_string(path).or_else(|err| {
         match err.kind() {
             // If config doesn't exist yet, read as empty and we'll write one.
@@ -598,12 +594,29 @@ pub fn write_config_value_to_file(
             )),
         }
     })?;
-    let mut doc: toml_edit::Document = config_toml.parse().map_err(|err| {
+    config_toml.parse().map_err(|err| {
         user_error_with_message(
             format!("Failed to parse file {path}", path = path.display()),
             err,
         )
-    })?;
+    })
+}
+
+fn write_config(path: &Path, doc: &toml_edit::Document) -> Result<(), CommandError> {
+    std::fs::write(path, doc.to_string()).map_err(|err| {
+        user_error_with_message(
+            format!("Failed to write file {path}", path = path.display()),
+            err,
+        )
+    })
+}
+
+pub fn write_config_value_to_file(
+    key: &ConfigNamePathBuf,
+    value: toml_edit::Value,
+    path: &Path,
+) -> Result<(), CommandError> {
+    let mut doc = read_config(path)?;
 
     // Apply config value
     let mut target_table = doc.as_table_mut();
@@ -632,13 +645,35 @@ pub fn write_config_value_to_file(
     }
     target_table[last_key_part] = toml_edit::Item::Value(value);
 
-    // Write config back
-    std::fs::write(path, doc.to_string()).map_err(|err| {
-        user_error_with_message(
-            format!("Failed to write file {path}", path = path.display()),
-            err,
-        )
-    })
+    write_config(path, &doc)
+}
+
+pub fn remove_config_value_from_file(
+    key: &ConfigNamePathBuf,
+    path: &Path,
+) -> Result<(), CommandError> {
+    let mut doc = read_config(path)?;
+
+    // Find target table
+    let mut key_iter = key.components();
+    let last_key = key_iter.next_back().expect("key must not be empty");
+    let target_table = key_iter.try_fold(doc.as_table_mut(), |table, key| {
+        table
+            .get_mut(key)
+            .ok_or_else(|| config::ConfigError::NotFound(key.to_string()))
+            .and_then(|table| {
+                table.as_table_mut().ok_or_else(|| {
+                    config::ConfigError::Message(format!(r#""{key}" is not a table"#))
+                })
+            })
+    })?;
+
+    // Remove config value
+    target_table
+        .remove(last_key)
+        .ok_or_else(|| config::ConfigError::NotFound(key.to_string()))?;
+
+    write_config(path, &doc)
 }
 
 /// Command name and arguments specified by config.
@@ -715,7 +750,7 @@ impl fmt::Display for CommandNameAndArgs {
             // TODO: format with shell escapes
             CommandNameAndArgs::Vec(a) => write!(f, "{}", a.0.join(" ")),
             CommandNameAndArgs::Structured { env, command } => {
-                for (k, v) in env.iter() {
+                for (k, v) in env {
                     write!(f, "{k}={v} ")?;
                 }
                 write!(f, "{}", command.0.join(" "))
@@ -888,8 +923,8 @@ mod tests {
     fn test_layered_configs_resolved_config_values_empty() {
         let empty_config = config::Config::default();
         let layered_configs = LayeredConfigs {
-            default: empty_config.to_owned(),
-            env_base: empty_config.to_owned(),
+            default: empty_config.clone(),
+            env_base: empty_config.clone(),
             user: None,
             repo: None,
             env_overrides: empty_config,
@@ -919,7 +954,7 @@ mod tests {
             .build()
             .unwrap();
         let layered_configs = LayeredConfigs {
-            default: empty_config.to_owned(),
+            default: empty_config.clone(),
             env_base: env_base_config,
             user: None,
             repo: Some(repo_config),
@@ -1042,8 +1077,8 @@ mod tests {
             .build()
             .unwrap();
         let layered_configs = LayeredConfigs {
-            default: empty_config.to_owned(),
-            env_base: empty_config.to_owned(),
+            default: empty_config.clone(),
+            env_base: empty_config.clone(),
             user: Some(user_config),
             repo: Some(repo_config),
             env_overrides: empty_config,

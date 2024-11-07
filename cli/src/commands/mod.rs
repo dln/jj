@@ -30,6 +30,7 @@ mod evolog;
 mod file;
 mod fix;
 mod git;
+mod help;
 mod init;
 mod interdiff;
 mod log;
@@ -46,6 +47,7 @@ mod restore;
 mod root;
 mod run;
 mod show;
+mod simplify_parents;
 mod sparse;
 mod split;
 mod squash;
@@ -70,6 +72,8 @@ use crate::command_error::CommandError;
 use crate::ui::Ui;
 
 #[derive(clap::Parser, Clone, Debug)]
+#[command(disable_help_subcommand = true)]
+#[command(after_long_help = help::show_keyword_hint_after_help())]
 enum Command {
     Abandon(abandon::AbandonArgs),
     Backout(backout::BackoutArgs),
@@ -109,6 +113,7 @@ enum Command {
     Fix(fix::FixArgs),
     #[command(subcommand)]
     Git(git::GitCommand),
+    Help(help::HelpArgs),
     Init(init::InitArgs),
     Interdiff(interdiff::InterdiffArgs),
     Log(log::LogArgs),
@@ -145,6 +150,7 @@ enum Command {
     // TODO: Flesh out.
     Run(run::RunArgs),
     Show(show::ShowArgs),
+    SimplifyParents(simplify_parents::SimplifyParentsArgs),
     #[command(subcommand)]
     Sparse(sparse::SparseCommand),
     Split(split::SplitArgs),
@@ -215,6 +221,7 @@ pub fn run_command(ui: &mut Ui, command_helper: &CommandHelper) -> Result<(), Co
         }
         Command::Fix(args) => fix::cmd_fix(ui, command_helper, args),
         Command::Git(args) => git::cmd_git(ui, command_helper, args),
+        Command::Help(args) => help::cmd_help(ui, command_helper, args),
         Command::Init(args) => init::cmd_init(ui, command_helper, args),
         Command::Interdiff(args) => interdiff::cmd_interdiff(ui, command_helper, args),
         Command::Log(args) => log::cmd_log(ui, command_helper, args),
@@ -232,6 +239,9 @@ pub fn run_command(ui: &mut Ui, command_helper: &CommandHelper) -> Result<(), Co
         Command::Revert(_args) => revert(),
         Command::Root(args) => root::cmd_root(ui, command_helper, args),
         Command::Run(args) => run::cmd_run(ui, command_helper, args),
+        Command::SimplifyParents(args) => {
+            simplify_parents::cmd_simplify_parents(ui, command_helper, args)
+        }
         Command::Show(args) => show::cmd_show(ui, command_helper, args),
         Command::Sparse(args) => sparse::cmd_sparse(ui, command_helper, args),
         Command::Split(args) => split::cmd_split(ui, command_helper, args),

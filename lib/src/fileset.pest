@@ -34,7 +34,10 @@ bare_string = @{
   | '\u{80}'..'\u{10ffff}' )+
 }
 
-string_escape = @{ "\\" ~ ("t" | "r" | "n" | "0" | "\"" | "\\") }
+string_escape = @{
+  "\\"
+  ~ ("t" | "r" | "n" | "0" | "e" | ("x" ~ ASCII_HEX_DIGIT{2}) | "\"" | "\\")
+}
 string_content_char = @{ !("\"" | "\\") ~ ANY }
 string_content = @{ string_content_char+ }
 string_literal = ${ "\"" ~ (string_content | string_escape)* ~ "\"" }
@@ -52,7 +55,7 @@ prefix_ops = _{ negate_op }
 infix_ops = _{ union_op | intersection_op | difference_op }
 
 function = { function_name ~ "(" ~ whitespace* ~ function_arguments ~ whitespace* ~ ")" }
-function_name = @{ (ASCII_ALPHANUMERIC | "_")+ }
+function_name = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
 function_arguments = {
   expression ~ (whitespace* ~ "," ~ whitespace* ~ expression)* ~ (whitespace* ~ ",")?
   | ""

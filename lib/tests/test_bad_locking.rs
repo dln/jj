@@ -21,7 +21,6 @@ use jj_lib::workspace::default_working_copy_factories;
 use jj_lib::workspace::Workspace;
 use test_case::test_case;
 use testutils::create_random_commit;
-use testutils::load_repo_at_head;
 use testutils::TestRepoBackend;
 use testutils::TestWorkspace;
 
@@ -32,7 +31,7 @@ fn copy_directory(src: &Path, dst: &Path) {
         let base_name = child_src.file_name().unwrap();
         let child_dst = dst.join(base_name);
         if child_src.is_dir() {
-            copy_directory(&child_src, &child_dst)
+            copy_directory(&child_src, &child_dst);
         } else {
             std::fs::copy(&child_src, &child_dst).unwrap();
         }
@@ -189,6 +188,7 @@ fn test_bad_locking_interrupted(backend: TestRepoBackend) {
     // operation.
     let settings = testutils::user_settings();
     let test_workspace = TestWorkspace::init_with_backend(&settings, backend);
+    let test_env = &test_workspace.env;
     let repo = &test_workspace.repo;
 
     let mut tx = repo.start_transaction(&settings);
@@ -214,10 +214,10 @@ fn test_bad_locking_interrupted(backend: TestRepoBackend) {
 
     copy_directory(&backup_path, &op_heads_dir);
     // Reload the repo and check that only the new head is present.
-    let reloaded_repo = load_repo_at_head(&settings, test_workspace.repo_path());
+    let reloaded_repo = test_env.load_repo_at_head(&settings, test_workspace.repo_path());
     assert_eq!(reloaded_repo.op_id(), &op_id);
     // Reload once more to make sure that the .jj/op_heads/ directory was updated
     // correctly.
-    let reloaded_repo = load_repo_at_head(&settings, test_workspace.repo_path());
+    let reloaded_repo = test_env.load_repo_at_head(&settings, test_workspace.repo_path());
     assert_eq!(reloaded_repo.op_id(), &op_id);
 }

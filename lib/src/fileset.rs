@@ -67,7 +67,7 @@ pub enum FilePatternParseError {
 }
 
 /// Basic pattern to match `RepoPath`.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum FilePattern {
     /// Matches file (or exact) path.
     FilePath(RepoPathBuf),
@@ -198,7 +198,7 @@ fn split_glob_path(input: &str) -> (&str, &str) {
 }
 
 /// AST-level representation of the fileset expression.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum FilesetExpression {
     /// Matches nothing.
     None,
@@ -297,7 +297,7 @@ impl FilesetExpression {
     pub fn explicit_paths(&self) -> impl Iterator<Item = &RepoPath> {
         // pre/post-ordering doesn't matter so long as children are visited from
         // left to right.
-        self.dfs_pre().flat_map(|expr| match expr {
+        self.dfs_pre().filter_map(|expr| match expr {
             FilesetExpression::Pattern(pattern) => pattern.as_path(),
             _ => None,
         })
@@ -328,7 +328,7 @@ fn build_union_matcher(expressions: &[FilesetExpression]) -> Box<dyn Matcher> {
                     FilePattern::FilePath(path) => file_paths.push(path),
                     FilePattern::PrefixPath(path) => prefix_paths.push(path),
                     FilePattern::FileGlob { dir, pattern } => {
-                        file_globs.push((dir, pattern.clone()))
+                        file_globs.push((dir, pattern.clone()));
                     }
                 }
                 continue;
@@ -505,6 +505,8 @@ mod tests {
 
     fn insta_settings() -> insta::Settings {
         let mut settings = insta::Settings::clone_current();
+        // Elide parsed glob tokens, which aren't interesting.
+        settings.add_filter(r"\b(tokens): \[[^]]*\],", "$1: _,");
         // Collapse short "Thing(_,)" repeatedly to save vertical space and make
         // the output more readable.
         for _ in 0..4 {
@@ -521,6 +523,8 @@ mod tests {
 
     #[test]
     fn test_parse_file_pattern() {
+        let settings = insta_settings();
+        let _guard = settings.bind_to_scope();
         let path_converter = RepoPathUiConverter::Fs {
             cwd: PathBuf::from("/ws/cur"),
             base: PathBuf::from("/ws"),
@@ -528,128 +532,209 @@ mod tests {
         let parse = |text| parse_maybe_bare(&mut FilesetDiagnostics::new(), text, &path_converter);
 
         // cwd-relative patterns
-        assert_eq!(
+        insta::assert_debug_snapshot!(
             parse(".").unwrap(),
-            FilesetExpression::prefix_path(repo_path_buf("cur"))
-        );
-        assert_eq!(
+            @r#"Pattern(PrefixPath("cur"))"#);
+        insta::assert_debug_snapshot!(
             parse("..").unwrap(),
-            FilesetExpression::prefix_path(RepoPathBuf::root())
-        );
+            @r#"Pattern(PrefixPath(""))"#);
         assert!(parse("../..").is_err());
-        assert_eq!(
+        insta::assert_debug_snapshot!(
             parse("foo").unwrap(),
-            FilesetExpression::prefix_path(repo_path_buf("cur/foo"))
-        );
-        assert_eq!(
+            @r#"Pattern(PrefixPath("cur/foo"))"#);
+        insta::assert_debug_snapshot!(
             parse("cwd:.").unwrap(),
-            FilesetExpression::prefix_path(repo_path_buf("cur"))
-        );
-        assert_eq!(
+            @r#"Pattern(PrefixPath("cur"))"#);
+        insta::assert_debug_snapshot!(
             parse("cwd-file:foo").unwrap(),
-            FilesetExpression::file_path(repo_path_buf("cur/foo"))
-        );
-        assert_eq!(
+            @r#"Pattern(FilePath("cur/foo"))"#);
+        insta::assert_debug_snapshot!(
             parse("file:../foo/bar").unwrap(),
-            FilesetExpression::file_path(repo_path_buf("foo/bar"))
-        );
+            @r#"Pattern(FilePath("foo/bar"))"#);
 
         // workspace-relative patterns
-        assert_eq!(
+        insta::assert_debug_snapshot!(
             parse("root:.").unwrap(),
-            FilesetExpression::prefix_path(RepoPathBuf::root())
-        );
+            @r#"Pattern(PrefixPath(""))"#);
         assert!(parse("root:..").is_err());
-        assert_eq!(
+        insta::assert_debug_snapshot!(
             parse("root:foo/bar").unwrap(),
-            FilesetExpression::prefix_path(repo_path_buf("foo/bar"))
-        );
-        assert_eq!(
+            @r#"Pattern(PrefixPath("foo/bar"))"#);
+        insta::assert_debug_snapshot!(
             parse("root-file:bar").unwrap(),
-            FilesetExpression::file_path(repo_path_buf("bar"))
-        );
+            @r#"Pattern(FilePath("bar"))"#);
     }
 
     #[test]
     fn test_parse_glob_pattern() {
+        let settings = insta_settings();
+        let _guard = settings.bind_to_scope();
         let path_converter = RepoPathUiConverter::Fs {
             // meta character in cwd path shouldn't be expanded
             cwd: PathBuf::from("/ws/cur*"),
             base: PathBuf::from("/ws"),
         };
         let parse = |text| parse_maybe_bare(&mut FilesetDiagnostics::new(), text, &path_converter);
-        let glob_expr = |dir: &str, pattern: &str| {
-            FilesetExpression::pattern(FilePattern::FileGlob {
-                dir: repo_path_buf(dir),
-                pattern: glob::Pattern::new(pattern).unwrap(),
-            })
-        };
 
         // cwd-relative, without meta characters
-        assert_eq!(
+        insta::assert_debug_snapshot!(
             parse(r#"cwd-glob:"foo""#).unwrap(),
-            FilesetExpression::file_path(repo_path_buf("cur*/foo"))
-        );
+            @r#"Pattern(FilePath("cur*/foo"))"#);
         // Strictly speaking, glob:"" shouldn't match a file named <cwd>, but
         // file pattern doesn't distinguish "foo/" from "foo".
-        assert_eq!(
+        insta::assert_debug_snapshot!(
             parse(r#"glob:"""#).unwrap(),
-            FilesetExpression::file_path(repo_path_buf("cur*"))
-        );
-        assert_eq!(
+            @r#"Pattern(FilePath("cur*"))"#);
+        insta::assert_debug_snapshot!(
             parse(r#"glob:".""#).unwrap(),
-            FilesetExpression::file_path(repo_path_buf("cur*"))
-        );
-        assert_eq!(
+            @r#"Pattern(FilePath("cur*"))"#);
+        insta::assert_debug_snapshot!(
             parse(r#"glob:"..""#).unwrap(),
-            FilesetExpression::file_path(RepoPathBuf::root())
-        );
+            @r#"Pattern(FilePath(""))"#);
 
         // cwd-relative, with meta characters
-        assert_eq!(parse(r#"glob:"*""#).unwrap(), glob_expr("cur*", "*"));
-        assert_eq!(parse(r#"glob:"./*""#).unwrap(), glob_expr("cur*", "*"));
-        assert_eq!(parse(r#"glob:"../*""#).unwrap(), glob_expr("", "*"));
+        insta::assert_debug_snapshot!(
+            parse(r#"glob:"*""#).unwrap(), @r#"
+        Pattern(
+            FileGlob {
+                dir: "cur*",
+                pattern: Pattern {
+                    original: "*",
+                    tokens: _,
+                    is_recursive: false,
+                },
+            },
+        )
+        "#);
+        insta::assert_debug_snapshot!(
+            parse(r#"glob:"./*""#).unwrap(), @r#"
+        Pattern(
+            FileGlob {
+                dir: "cur*",
+                pattern: Pattern {
+                    original: "*",
+                    tokens: _,
+                    is_recursive: false,
+                },
+            },
+        )
+        "#);
+        insta::assert_debug_snapshot!(
+            parse(r#"glob:"../*""#).unwrap(), @r#"
+        Pattern(
+            FileGlob {
+                dir: "",
+                pattern: Pattern {
+                    original: "*",
+                    tokens: _,
+                    is_recursive: false,
+                },
+            },
+        )
+        "#);
         // glob:"**" is equivalent to root-glob:"<cwd>/**", not root-glob:"**"
-        assert_eq!(parse(r#"glob:"**""#).unwrap(), glob_expr("cur*", "**"));
-        assert_eq!(
-            parse(r#"glob:"../foo/b?r/baz""#).unwrap(),
-            glob_expr("foo", "b?r/baz")
-        );
+        insta::assert_debug_snapshot!(
+            parse(r#"glob:"**""#).unwrap(), @r#"
+        Pattern(
+            FileGlob {
+                dir: "cur*",
+                pattern: Pattern {
+                    original: "**",
+                    tokens: _,
+                    is_recursive: true,
+                },
+            },
+        )
+        "#);
+        insta::assert_debug_snapshot!(
+            parse(r#"glob:"../foo/b?r/baz""#).unwrap(), @r#"
+        Pattern(
+            FileGlob {
+                dir: "foo",
+                pattern: Pattern {
+                    original: "b?r/baz",
+                    tokens: _,
+                    is_recursive: false,
+                },
+            },
+        )
+        "#);
         assert!(parse(r#"glob:"../../*""#).is_err());
         assert!(parse(r#"glob:"/*""#).is_err());
         // no support for relative path component after glob meta character
         assert!(parse(r#"glob:"*/..""#).is_err());
 
         // cwd-relative, with Windows path separators
-        assert_eq!(
-            parse(r#"glob:"..\\foo\\*\\bar""#).unwrap(),
-            if cfg!(windows) {
-                glob_expr("foo", "*/bar")
-            } else {
-                glob_expr("cur*", r"..\foo\*\bar")
-            }
-        );
+        if cfg!(windows) {
+            insta::assert_debug_snapshot!(
+                parse(r#"glob:"..\\foo\\*\\bar""#).unwrap(), @r#"
+            Pattern(
+                FileGlob {
+                    dir: "foo",
+                    pattern: Pattern {
+                        original: "*/bar",
+                        tokens: _,
+                        is_recursive: false,
+                    },
+                },
+            )
+            "#);
+        } else {
+            insta::assert_debug_snapshot!(
+                parse(r#"glob:"..\\foo\\*\\bar""#).unwrap(), @r#"
+            Pattern(
+                FileGlob {
+                    dir: "cur*",
+                    pattern: Pattern {
+                        original: "..\\foo\\*\\bar",
+                        tokens: _,
+                        is_recursive: false,
+                    },
+                },
+            )
+            "#);
+        }
 
         // workspace-relative, without meta characters
-        assert_eq!(
+        insta::assert_debug_snapshot!(
             parse(r#"root-glob:"foo""#).unwrap(),
-            FilesetExpression::file_path(repo_path_buf("foo"))
-        );
-        assert_eq!(
+            @r#"Pattern(FilePath("foo"))"#);
+        insta::assert_debug_snapshot!(
             parse(r#"root-glob:"""#).unwrap(),
-            FilesetExpression::file_path(RepoPathBuf::root())
-        );
-        assert_eq!(
+            @r#"Pattern(FilePath(""))"#);
+        insta::assert_debug_snapshot!(
             parse(r#"root-glob:".""#).unwrap(),
-            FilesetExpression::file_path(RepoPathBuf::root())
-        );
+            @r#"Pattern(FilePath(""))"#);
 
         // workspace-relative, with meta characters
-        assert_eq!(parse(r#"root-glob:"*""#).unwrap(), glob_expr("", "*"));
-        assert_eq!(
-            parse(r#"root-glob:"foo/bar/b[az]""#).unwrap(),
-            glob_expr("foo/bar", "b[az]")
-        );
+        insta::assert_debug_snapshot!(
+            parse(r#"root-glob:"*""#).unwrap(), @r#"
+        Pattern(
+            FileGlob {
+                dir: "",
+                pattern: Pattern {
+                    original: "*",
+                    tokens: _,
+                    is_recursive: false,
+                },
+            },
+        )
+        "#);
+        insta::assert_debug_snapshot!(
+            parse(r#"root-glob:"foo/bar/b[az]""#).unwrap(), @r#"
+        Pattern(
+            FileGlob {
+                dir: "foo/bar",
+                pattern: Pattern {
+                    original: "b[az]",
+                    tokens: _,
+                        ),
+                    ],
+                    is_recursive: false,
+                },
+            },
+        )
+        "#);
         assert!(parse(r#"root-glob:"../*""#).is_err());
         assert!(parse(r#"root-glob:"/*""#).is_err());
     }
@@ -664,8 +749,8 @@ mod tests {
         };
         let parse = |text| parse_maybe_bare(&mut FilesetDiagnostics::new(), text, &path_converter);
 
-        assert_eq!(parse("all()").unwrap(), FilesetExpression::all());
-        assert_eq!(parse("none()").unwrap(), FilesetExpression::none());
+        insta::assert_debug_snapshot!(parse("all()").unwrap(), @"All");
+        insta::assert_debug_snapshot!(parse("none()").unwrap(), @"None");
         insta::assert_debug_snapshot!(parse("all(x)").unwrap_err().kind(), @r###"
         InvalidArguments {
             name: "all",
@@ -791,47 +876,41 @@ mod tests {
             })
         };
 
-        insta::assert_debug_snapshot!(glob_expr("", "*").to_matcher(), @r###"
+        insta::assert_debug_snapshot!(glob_expr("", "*").to_matcher(), @r#"
         FileGlobsMatcher {
             tree: [
                 Pattern {
                     original: "*",
-                    tokens: [
-                        AnySequence,
-                    ],
+                    tokens: _,
                     is_recursive: false,
                 },
             ] {},
         }
-        "###);
+        "#);
 
         let expr =
             FilesetExpression::union_all(vec![glob_expr("foo", "*"), glob_expr("foo/bar", "*")]);
-        insta::assert_debug_snapshot!(expr.to_matcher(), @r###"
+        insta::assert_debug_snapshot!(expr.to_matcher(), @r#"
         FileGlobsMatcher {
             tree: [] {
                 "foo": [
                     Pattern {
                         original: "*",
-                        tokens: [
-                            AnySequence,
-                        ],
+                        tokens: _,
                         is_recursive: false,
                     },
                 ] {
                     "bar": [
                         Pattern {
                             original: "*",
-                            tokens: [
-                                AnySequence,
-                            ],
+                            tokens: _,
                             is_recursive: false,
                         },
                     ] {},
                 },
             },
         }
-        "###);
+        "#);
     }
 
     #[test]

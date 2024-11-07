@@ -45,8 +45,23 @@ The following functions are defined.
   the given `width`.
 * `indent(prefix: Template, content: Template) -> Template`: Indent
   non-empty lines by the given `prefix`.
+* `pad_start(width: Integer, content: Template[, fill_char: Template])`: Pad (or
+  right-justify) content by adding leading fill characters. The `content`
+  shouldn't have newline character.
+* `pad_end(width: Integer, content: Template[, fill_char: Template])`: Pad (or
+  left-justify) content by adding trailing fill characters. The `content`
+  shouldn't have newline character.
+* `truncate_start(width: Integer, content: Template)`: Truncate `content` by
+  removing leading characters. The `content` shouldn't have newline character.
+* `truncate_end(width: Integer, content: Template)`: Truncate `content` by
+  removing trailing characters. The `content` shouldn't have newline character.
 * `label(label: Template, content: Template) -> Template`: Apply label to
   the content. The `label` is evaluated as a space-separated string.
+* `raw_escape_sequence(content: Template) -> Template`: Preserves any escape
+  sequences in `content` (i.e., bypasses sanitization) and strips labels.
+  Note: This function is intended for escape sequences and as such, it's output
+  is expected to be invisible / of no display width. Outputting content with
+  nonzero display width may break wrapping, indentation etc.
 * `if(condition: Boolean, then: Template[, else: Template]) -> Template`:
   Conditionally evaluate `then`/`else` template content.
 * `coalesce(content: Template...) -> Template`: Returns the first **non-empty**
@@ -87,7 +102,7 @@ This type cannot be printed. The following methods are defined.
 * `remote_bookmarks() -> List<RefName>`: All remote bookmarks pointing to the commit.
 * `tags() -> List<RefName>`
 * `git_refs() -> List<RefName>`
-* `git_head() -> Option<RefName>`
+* `git_head() -> Boolean`: True for the Git `HEAD` commit.
 * `divergent() -> Boolean`: True if the commit's change id corresponds to multiple
   visible commits.
 * `hidden() -> Boolean`: True if the commit is not visible (a.k.a. abandoned).
@@ -237,6 +252,8 @@ A double-quoted string literal supports the following escape sequences:
 * `\r`: carriage return
 * `\n`: new line
 * `\0`: null
+* `\e`: escape (i.e., `\x1b`)
+* `\xHH`: byte with hex value `HH`
 
 Other escape sequences are not supported. Any UTF-8 characters are allowed
 inside a string literal, with two exceptions: unescaped `"`-s and uses of `\`
@@ -258,6 +275,8 @@ The following methods are defined.
   format string](https://docs.rs/chrono/latest/chrono/format/strftime/).
 * `.utc() -> Timestamp`: Convert timestamp into UTC timezone.
 * `.local() -> Timestamp`: Convert timestamp into local timezone.
+* `.after(date: String) -> Boolean`: True if the timestamp is exactly at or after the given date.
+* `.before(date: String) -> Boolean`: True if the timestamp is before, but not including, the given date.
 
 ### TimestampRange type
 

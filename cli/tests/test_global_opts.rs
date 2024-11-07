@@ -292,6 +292,31 @@ fn test_bad_path() {
 }
 
 #[test]
+fn test_invalid_filesets_looking_like_filepaths() {
+    let test_env = TestEnvironment::default();
+    test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "repo"]);
+    let repo_path = test_env.env_root().join("repo");
+
+    let stderr = test_env.jj_cmd_failure(&repo_path, &["file", "show", "abc~"]);
+    insta::assert_snapshot!(stderr, @r#"
+    Error: Failed to parse fileset: Syntax error
+    Caused by:  --> 1:5
+      |
+    1 | abc~
+      |     ^---
+      |
+      = expected `~` or <primary>
+    Hint: See https://martinvonz.github.io/jj/latest/filesets/ for filesets syntax, or for how to match file paths.
+    "#);
+
+    test_env.add_config(r#"ui.allow-filesets=false"#);
+    let stderr = test_env.jj_cmd_failure(&repo_path, &["file", "show", "abc~"]);
+    insta::assert_snapshot!(stderr, @r#"
+    Error: No such path: abc~
+    "#);
+}
+
+#[test]
 fn test_broken_repo_structure() {
     let test_env = TestEnvironment::default();
     test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "repo"]);
@@ -529,6 +554,20 @@ fn test_early_args() {
     // Check that output is colorized.
     let stdout = test_env.jj_cmd_success(test_env.env_root(), &["--color=always", "help"]);
     insta::assert_snapshot!(stdout.lines().find(|l| l.contains("Commands:")).unwrap(), @"[1m[4mCommands:[0m");
+
+    // Check that early args are accepted after the help command
+    let stdout = test_env.jj_cmd_success(test_env.env_root(), &["help", "--color=always"]);
+    insta::assert_snapshot!(stdout.lines().find(|l| l.contains("Commands:")).unwrap(), @"[1m[4mCommands:[0m");
+
+    // Check that early args are accepted after -h/--help
+    let stdout = test_env.jj_cmd_success(test_env.env_root(), &["-h", "--color=always"]);
+    insta::assert_snapshot!(
+        stdout.lines().find(|l| l.contains("Usage:")).unwrap(),
+        @"[1m[4mUsage:[0m [1mjj[0m [OPTIONS] <COMMAND>");
+    let stdout = test_env.jj_cmd_success(test_env.env_root(), &["log", "--help", "--color=always"]);
+    insta::assert_snapshot!(
+        stdout.lines().find(|l| l.contains("Usage:")).unwrap(),
+        @"[1m[4mUsage:[0m [1mjj log[0m [OPTIONS] [PATHS]...");
 
     // Early args are parsed with clap's ignore_errors(), but there is a known
     // bug that causes defaults to be unpopulated. Test that the early args are

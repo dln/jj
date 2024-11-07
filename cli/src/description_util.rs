@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io::Write as _;
+use std::path::Path;
 
 use bstr::ByteVec as _;
 use indexmap::IndexMap;
@@ -12,7 +13,6 @@ use thiserror::Error;
 
 use crate::cli_util::edit_temp_file;
 use crate::cli_util::short_commit_hash;
-use crate::cli_util::WorkspaceCommandHelper;
 use crate::cli_util::WorkspaceCommandTransaction;
 use crate::command_error::CommandError;
 use crate::formatter::PlainTextFormatter;
@@ -34,21 +34,20 @@ where
 }
 
 pub fn edit_description(
-    workspace_command: &WorkspaceCommandHelper,
+    repo_path: &Path,
     description: &str,
     settings: &UserSettings,
 ) -> Result<String, CommandError> {
     let description = format!(
-        r#"{}
+        r#"{description}
 JJ: Lines starting with "JJ: " (like this one) will be removed.
-"#,
-        description
+"#
     );
 
     let description = edit_temp_file(
         "description",
         ".jjdescription",
-        workspace_command.repo_path(),
+        repo_path,
         &description,
         settings,
     )?;
@@ -73,7 +72,7 @@ pub fn edit_multiple_descriptions(
         JJ: - The syntax of the separator lines may change in the future.
 
     "#});
-    for (commit_id, temp_commit) in commits.iter() {
+    for (commit_id, temp_commit) in commits {
         let commit_hash = short_commit_hash(commit_id);
         bulk_message.push_str("JJ: describe ");
         bulk_message.push_str(&commit_hash);
@@ -179,7 +178,7 @@ where
 /// then that one is used. Otherwise we concatenate the messages and ask the
 /// user to edit the result in their editor.
 pub fn combine_messages(
-    workspace_command: &WorkspaceCommandHelper,
+    repo_path: &Path,
     sources: &[&Commit],
     destination: &Commit,
     settings: &UserSettings,
@@ -209,7 +208,7 @@ pub fn combine_messages(
         combined.push_str("\nJJ: Description from source commit:\n");
         combined.push_str(commit.description());
     }
-    edit_description(workspace_command, &combined, settings)
+    edit_description(repo_path, &combined, settings)
 }
 
 /// Create a description from a list of paragraphs.

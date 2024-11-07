@@ -78,6 +78,9 @@ only symbols.
 You can use parentheses to control evaluation order, such as `(x & y) | z` or
 `x & (y | z)`.
 
+<!-- The following format will be understood by the web site generator, and will
+ generate a folded section that can be unfolded at will. -->
+
 ??? examples
 
     Given this history:
@@ -231,8 +234,7 @@ revsets (expressions) as arguments.
 * `git_refs()`:  All Git ref targets as of the last import. If a Git ref
   is in a conflicted state, all its possible targets are included.
 
-* `git_head()`: The Git `HEAD` target as of the last import. Equivalent to
-  `present(HEAD@git)`.
+* `git_head()`: The Git `HEAD` target as of the last import.
 
 * `visible_heads()`: All visible heads (same as `heads(all())`).
 
@@ -280,11 +282,11 @@ given [string pattern](#string-patterns).
   Paths are relative to the directory `jj` was invoked from. A directory name
   will match all files in that directory and its subdirectories.
 
-  For example, `file(foo)` will match files `foo`, `foo/bar`, `foo/bar/baz`.
+  For example, `files(foo)` will match files `foo`, `foo/bar`, `foo/bar/baz`.
   It will *not* match `foobar` or `bar/foo`.
 
   Some file patterns might need quoting because the `expression` must also be
-  parsable as a revset. For example, `.` has to be quoted in `file(".")`.
+  parsable as a revset. For example, `.` has to be quoted in `files(".")`.
 
 * `diff_contains(text[, files])`: Commits containing diffs matching the given
   `text` pattern line by line.
@@ -301,7 +303,17 @@ given [string pattern](#string-patterns).
 * `present(x)`: Same as `x`, but evaluated to `none()` if any of the commits
   in `x` doesn't exist (e.g. is an unknown bookmark name.)
 
+* `coalesce(revsets...)`: Commits in the first revset in the list of `revsets`
+  which does not evaluate to `none()`. If all revsets evaluate to `none()`, then
+  the result of `coalesce` will also be `none()`.
+
 * `working_copies()`: The working copy commits across all the workspaces.
+
+* `at_operation(op, x)`: Evaluates `x` at the specified [operation][]. For
+  example, `at_operation(@-, visible_heads())` will return all heads which were
+  visible at the previous operation.
+
+[operation]: glossary.md#operation
 
 ??? examples
 
@@ -426,15 +438,15 @@ for a comprehensive list.
   'trunk()' = 'your-bookmark@your-remote'
   ```
 
-* `builtin_immutable_heads()`: Resolves to `trunk() | tags() | untracked_remote_bookmarks()`.
-   It is used as the default definition for `immutable_heads()` below. it is not
-   recommended to redefined this alias. Prefer to redefine `immutable_heads()`
-   instead.
+* `builtin_immutable_heads()`: Resolves to
+  `present(trunk()) | tags() | untracked_remote_bookmarks()`. It is used as the
+   default definition for `immutable_heads()` below. it is not recommended to
+   redefined this alias. Prefer to redefine `immutable_heads()` instead.
 
-* `immutable_heads()`: Resolves to `trunk() | tags() | untracked_remote_bookmarks()`
-  by default. It is actually defined as `builtin_immutable_heads()`, and can be
-  overridden as required. See [here](config.md#set-of-immutable-commits) for
-  details.
+* `immutable_heads()`: Resolves to
+  `present(trunk()) | tags() | untracked_remote_bookmarks()` by default. It is
+  actually defined as `builtin_immutable_heads()`, and can be overridden as
+  required. See [here](config.md#set-of-immutable-commits) for details.
 
 * `immutable()`: The set of commits that `jj` treats as immutable. This is
   equivalent to `::(immutable_heads() | root())`. It is not recommended to redefine

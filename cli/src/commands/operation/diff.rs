@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::sync::Arc;
 
 use indexmap::IndexMap;
@@ -125,14 +126,12 @@ pub fn cmd_op_diff(
     let op_summary_template = workspace_command.operation_summary_template();
     ui.request_pager();
     let mut formatter = ui.stdout_formatter();
-    formatter.with_label("op_log", |formatter| {
-        write!(formatter, "From operation ")?;
-        op_summary_template.format(&from_op, &mut *formatter)?;
-        writeln!(formatter)?;
-        write!(formatter, "  To operation ")?;
-        op_summary_template.format(&to_op, &mut *formatter)?;
-        writeln!(formatter)
-    })?;
+    write!(formatter, "From operation: ")?;
+    op_summary_template.format(&from_op, &mut *formatter)?;
+    writeln!(formatter)?;
+    write!(formatter, "  To operation: ")?;
+    op_summary_template.format(&to_op, &mut *formatter)?;
+    writeln!(formatter)?;
 
     show_op_diff(
         ui,
@@ -197,21 +196,24 @@ pub fn show_op_diff(
             writeln!(formatter, "Changed commits:")
         })?;
         if let Some(graph_style) = graph_style {
-            let mut graph = get_graphlog(graph_style, formatter.raw());
+            let mut raw_output = formatter.raw()?;
+            let mut graph = get_graphlog(graph_style, raw_output.as_mut());
 
-            let graph_iter =
-                TopoGroupedGraphIterator::new(ordered_change_ids.iter().map(|change_id| {
+            let graph_iter = TopoGroupedGraphIterator::new(ordered_change_ids.iter().map(
+                |change_id| -> Result<_, Infallible> {
                     let parent_change_ids = change_parents.get(change_id).unwrap();
-                    (
+                    Ok((
                         change_id.clone(),
                         parent_change_ids
                             .iter()
                             .map(|parent_change_id| GraphEdge::direct(parent_change_id.clone()))
                             .collect_vec(),
-                    )
-                }));
+                    ))
+                },
+            ));
 
-            for (change_id, edges) in graph_iter {
+            for node in graph_iter {
+                let (change_id, edges) = node.unwrap();
                 let modified_change = changes.get(&change_id).unwrap();
                 let edges = edges
                     .iter()
@@ -282,7 +284,7 @@ pub fn show_op_diff(
         })?;
         for (name, (from_target, to_target)) in changed_local_bookmarks {
             with_content_format.write(formatter, |formatter| {
-                writeln!(formatter, "{}:", name)?;
+                writeln!(formatter, "{name}:")?;
                 write_ref_target_summary(
                     formatter,
                     current_repo,
@@ -310,7 +312,7 @@ pub fn show_op_diff(
         with_content_format.write(formatter, |formatter| writeln!(formatter, "Changed tags:"))?;
         for (name, (from_target, to_target)) in changed_tags {
             with_content_format.write(formatter, |formatter| {
-                writeln!(formatter, "{}:", name)?;
+                writeln!(formatter, "{name}:")?;
                 write_ref_target_summary(
                     formatter,
                     current_repo,
@@ -351,7 +353,7 @@ pub fn show_op_diff(
         };
         for ((name, remote_name), (from_ref, to_ref)) in changed_remote_bookmarks {
             with_content_format.write(formatter, |formatter| {
-                writeln!(formatter, "{}@{}:", name, remote_name)?;
+                writeln!(formatter, "{name}@{remote_name}:")?;
                 write_ref_target_summary(
                     formatter,
                     current_repo,
@@ -383,13 +385,13 @@ fn write_modified_change_summary(
     modified_change: &ModifiedChange,
 ) -> Result<(), std::io::Error> {
     writeln!(formatter, "Change {}", short_change_hash(change_id))?;
-    for commit in modified_change.added_commits.iter() {
+    for commit in &modified_change.added_commits {
         formatter.with_label("diff", |formatter| write!(formatter.labeled("added"), "+"))?;
         write!(formatter, " ")?;
         commit_summary_template.format(commit, formatter)?;
         writeln!(formatter)?;
     }
-    for commit in modified_change.removed_commits.iter() {
+    for commit in &modified_change.removed_commits {
         formatter.with_label("diff", |formatter| {
             write!(formatter.labeled("removed"), "-")
         })?;
@@ -422,7 +424,7 @@ fn write_ref_target_summary(
         })?;
         write!(formatter, " ")?;
         if let Some(prefix) = prefix {
-            write!(formatter, "{} ", prefix)?;
+            write!(formatter, "{prefix} ")?;
         }
         Ok(())
     };

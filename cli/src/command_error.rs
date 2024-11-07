@@ -352,7 +352,7 @@ impl From<SnapshotError> for CommandError {
                         size_diff, max_size.0, max_size,
                     )
                 } else {
-                    format!("it is {}; the maximum size allowed is ~{}.", size, max_size,)
+                    format!("it is {size}; the maximum size allowed is ~{max_size}.")
                 };
 
                 user_error(format!(
@@ -407,6 +407,7 @@ impl From<DiffRenderError> for CommandError {
             DiffRenderError::DiffGenerate(_) => user_error(err),
             DiffRenderError::Backend(err) => err.into(),
             DiffRenderError::AccessDenied { .. } => user_error(err),
+            DiffRenderError::InvalidRepoPath(_) => user_error(err),
             DiffRenderError::Io(err) => err.into(),
         }
     }
@@ -449,12 +450,9 @@ impl From<GitImportError> for CommandError {
             GitImportError::MissingHeadTarget { .. }
             | GitImportError::MissingRefAncestor { .. } => Some(
                 "\
-Is this Git repository a shallow or partial clone (cloned with the --depth or --filter \
-                 argument)?
-jj currently does not support shallow/partial clones. To use jj with this \
-                 repository, try
-unshallowing the repository (https://stackoverflow.com/q/6802145) or re-cloning with the full
-repository contents."
+Is this Git repository a partial clone (cloned with the --filter argument)?
+jj currently does not support partial clones. To use jj with this repository, try re-cloning with \
+                 the full repository contents."
                     .to_string(),
             ),
             GitImportError::RemoteReservedForLocalGitRepo => {
@@ -613,6 +611,10 @@ fn file_pattern_parse_error_hint(err: &FilePatternParseError) -> Option<String> 
 
 fn fileset_parse_error_hint(err: &FilesetParseError) -> Option<String> {
     match err.kind() {
+        FilesetParseErrorKind::SyntaxError => Some(String::from(
+            "See https://martinvonz.github.io/jj/latest/filesets/ for filesets syntax, or for how \
+             to match file paths.",
+        )),
         FilesetParseErrorKind::NoSuchFunction {
             name: _,
             candidates,
@@ -620,7 +622,6 @@ fn fileset_parse_error_hint(err: &FilesetParseError) -> Option<String> {
         FilesetParseErrorKind::InvalidArguments { .. } | FilesetParseErrorKind::Expression(_) => {
             find_source_parse_error_hint(&err)
         }
-        _ => None,
     }
 }
 

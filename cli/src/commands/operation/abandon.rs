@@ -18,7 +18,6 @@ use std::slice;
 
 use itertools::Itertools as _;
 use jj_lib::op_walk;
-use jj_lib::operation::Operation;
 
 use crate::cli_util::short_operation_hash;
 use crate::cli_util::CommandHelper;
@@ -65,9 +64,7 @@ pub fn cmd_op_abandon(
     let (abandon_root_op, abandon_head_ops) =
         if let Some((root_op_str, head_op_str)) = args.operation.split_once("..") {
             let root_op = if root_op_str.is_empty() {
-                let id = op_store.root_operation_id();
-                let data = op_store.read_operation(id)?;
-                Operation::new(op_store.clone(), id.clone(), data)
+                repo_loader.root_operation()
             } else {
                 resolve_op(root_op_str)?
             };
@@ -134,7 +131,7 @@ pub fn cmd_op_abandon(
         let mut locked_ws = workspace.start_working_copy_mutation()?;
         let old_op_id = locked_ws.locked_wc().old_operation_id();
         if let Some((_, new_id)) = reparented_head_ops().find(|(old, _)| old.id() == old_op_id) {
-            locked_ws.finish(new_id.clone())?
+            locked_ws.finish(new_id.clone())?;
         } else {
             writeln!(
                 ui.warning_default(),

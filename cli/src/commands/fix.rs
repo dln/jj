@@ -150,7 +150,7 @@ pub(crate) fn cmd_fix(
         workspace_command.parse_union_revsets(ui, &args.source)?
     }
     .evaluate_to_commit_ids()?
-    .collect();
+    .try_collect()?;
     workspace_command.check_rewritable(root_commits.iter())?;
     let matcher = workspace_command
         .parse_file_patterns(ui, &args.paths)?
@@ -173,7 +173,7 @@ pub(crate) fn cmd_fix(
     // reliably produce well formatted code anyway. Deduplicating inputs helps
     // to prevent quadratic growth in the number of tool executions required for
     // doing this in long chains of commits with disjoint sets of modified files.
-    let commits: Vec<_> = RevsetExpression::commits(root_commits.to_vec())
+    let commits: Vec<_> = RevsetExpression::commits(root_commits.clone())
         .descendants()
         .evaluate_programmatic(tx.base_repo().as_ref())?
         .iter()

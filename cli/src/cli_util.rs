@@ -64,7 +64,6 @@ use jj_lib::git;
 use jj_lib::git_backend::GitBackend;
 use jj_lib::gitignore::GitIgnoreError;
 use jj_lib::gitignore::GitIgnoreFile;
-use jj_lib::hex_util::to_reverse_hex;
 use jj_lib::id_prefix::IdPrefixContext;
 use jj_lib::matchers::Matcher;
 use jj_lib::merge::MergedTreeValue;
@@ -254,7 +253,7 @@ impl TracingSubscription {
             .modify(|filter| {
                 *filter = tracing_subscriber::EnvFilter::builder()
                     .with_default_directive(tracing::metadata::LevelFilter::DEBUG.into())
-                    .from_env_lossy()
+                    .from_env_lossy();
             })
             .map_err(|err| internal_error_with_message("failed to enable debug logging", err))?;
         tracing::info!("debug logging enabled");
@@ -382,6 +381,7 @@ impl CommandHelper {
         let op_head = self.resolve_operation(ui, workspace.repo_loader())?;
         let repo = workspace.repo_loader().load_at(&op_head)?;
         let env = self.workspace_environment(ui, &workspace)?;
+        revset_util::warn_unresolvable_trunk(ui, repo.as_ref(), &env.revset_parse_context())?;
         WorkspaceCommandHelper::new(ui, workspace, repo, env, self.is_at_head_operation())
     }
 
@@ -522,13 +522,15 @@ impl ReadonlyUserRepo {
     }
 }
 
-/// A bookmark that should be advanced to satisfy the "advance-bookmarks"
-/// feature. This is a helper for `WorkspaceCommandTransaction`. It provides a
-/// type-safe way to separate the work of checking whether a bookmark can be
-/// advanced and actually advancing it. Advancing the bookmark never fails, but
-/// can't be done until the new `CommitId` is available. Splitting the work in
-/// this way also allows us to identify eligible bookmarks without actually
-/// moving them and return config errors to the user early.
+/// A advanceable bookmark to satisfy the "advance-bookmarks" feature.
+///
+/// This is a helper for `WorkspaceCommandTransaction`. It provides a
+/// type-safe way to separate the work of checking whether a bookmark
+/// can be advanced and actually advancing it. Advancing the bookmark
+/// never fails, but can't be done until the new `CommitId` is
+/// available. Splitting the work in this way also allows us to
+/// identify eligible bookmarks without actually moving them and
+/// return config errors to the user early.
 pub struct AdvanceableBookmark {
     name: String,
     old_commit_id: CommitId,
@@ -760,6 +762,7 @@ impl WorkspaceCommandEnvironment {
         })?;
 
         if let Some(commit_id) = commit_id_iter.next() {
+            let commit_id = commit_id?;
             let error = if &commit_id == repo.store().root_commit_id() {
                 user_error(format!(
                     "The root commit {} is immutable",
@@ -1489,6 +1492,7 @@ impl WorkspaceCommandHelper {
             &self.op_summary_template_text,
             OperationTemplateLanguage::wrap_operation,
         )
+        .labeled("operation")
     }
 
     pub fn short_change_id_template(&self) -> TemplateRenderer<'_, Commit> {
@@ -1999,7 +2003,8 @@ Then run `jj squash` to move the resolution into the conflicted commit."#,
     }
 }
 
-/// A [`Transaction`] tied to a particular workspace.
+/// An ongoing [`Transaction`] tied to a particular workspace.
+///
 /// `WorkspaceCommandTransaction`s are created with
 /// [`WorkspaceCommandHelper::start_transaction`] and committed with
 /// [`WorkspaceCommandTransaction::finish`]. The inner `Transaction` can also be
@@ -2237,14 +2242,7 @@ pub fn check_stale_working_copy(
         // The working copy isn't stale, and no need to reload the repo.
         Ok(WorkingCopyFreshness::Fresh)
     } else {
-        let wc_operation_data = repo
-            .op_store()
-            .read_operation(locked_wc.old_operation_id())?;
-        let wc_operation = Operation::new(
-            repo.op_store().clone(),
-            locked_wc.old_operation_id().clone(),
-            wc_operation_data,
-        );
+        let wc_operation = repo.loader().load_operation(locked_wc.old_operation_id())?;
         let repo_operation = repo.operation();
         let ancestor_op = dag_walk::closest_common_node_ok(
             [Ok(wc_operation.clone())],
@@ -2650,17 +2648,15 @@ pub fn edit_temp_file(
 }
 
 pub fn short_commit_hash(commit_id: &CommitId) -> String {
-    commit_id.hex()[0..12].to_string()
+    format!("{commit_id:.12}")
 }
 
 pub fn short_change_hash(change_id: &ChangeId) -> String {
-    // TODO: We could avoid the unwrap() and make this more efficient by converting
-    // straight from binary.
-    to_reverse_hex(&change_id.hex()[0..12]).unwrap()
+    format!("{change_id:.12}")
 }
 
 pub fn short_operation_hash(operation_id: &OperationId) -> String {
-    operation_id.hex()[0..12].to_string()
+    format!("{operation_id:.12}")
 }
 
 /// Wrapper around a `DiffEditor` to conditionally start interactive session.
@@ -2837,7 +2833,7 @@ pub struct EarlyArgs {
     pub color: Option<ColorChoice>,
     /// Silence non-primary command output
     ///
-    /// For example, `jj file list ` will still list files, but it won't tell
+    /// For example, `jj file list` will still list files, but it won't tell
     /// you if the working copy was snapshotted or if descendants were rebased.
     ///
     /// Warnings and errors will still be printed.
@@ -2846,7 +2842,7 @@ pub struct EarlyArgs {
     // Option<bool>.
     pub quiet: Option<bool>,
     /// Disable the pager
-    #[arg(long, value_name = "WHEN", global = true, action = ArgAction::SetTrue)]
+    #[arg(long, global = true, action = ArgAction::SetTrue)]
     // Parsing with ignore_errors will crash if this is bool, so use
     // Option<bool>.
     pub no_pager: Option<bool>,
@@ -2912,7 +2908,7 @@ fn resolve_default_command(
     app: &Command,
     mut string_args: Vec<String>,
 ) -> Result<Vec<String>, CommandError> {
-    const PRIORITY_FLAGS: &[&str] = &["help", "--help", "-h", "--version", "-V"];
+    const PRIORITY_FLAGS: &[&str] = &["--help", "-h", "--version", "-V"];
 
     let has_priority_flag = string_args
         .iter()
@@ -3036,8 +3032,16 @@ fn handle_early_args(
     let early_matches = app
         .clone()
         .disable_version_flag(true)
+        // Do not emit DisplayHelp error
         .disable_help_flag(true)
-        .disable_help_subcommand(true)
+        // Do not stop parsing at -h/--help
+        .arg(
+            clap::Arg::new("help")
+                .short('h')
+                .long("help")
+                .global(true)
+                .action(ArgAction::Count),
+        )
         .ignore_errors(true)
         .try_get_matches_from(args)?;
     let mut args: EarlyArgs = EarlyArgs::from_arg_matches(&early_matches).unwrap();
@@ -3311,7 +3315,7 @@ impl CliRunner {
                 .flatten()
                 .map(|path| format!("- {}", path.display()))
                 .join("\n");
-            e.hinted(format!("Check the following config files:\n{}", paths))
+            e.hinted(format!("Check the following config files:\n{paths}"))
         })?;
 
         let string_args = expand_args(ui, &self.app, env::args_os(), &config)?;

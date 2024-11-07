@@ -560,14 +560,12 @@ impl Ui {
     }
 
     pub fn can_prompt() -> bool {
-        io::stdout().is_terminal()
+        io::stderr().is_terminal()
             || env::var("JJ_INTERACTIVE")
                 .map(|v| v == "1")
                 .unwrap_or(false)
     }
 
-    #[allow(unknown_lints)] // XXX FIXME (aseipp): nightly bogons; re-test this occasionally
-    #[allow(clippy::assigning_clones)]
     pub fn prompt(&self, prompt: &str) -> io::Result<String> {
         if !Self::can_prompt() {
             return Err(io::Error::new(
@@ -575,20 +573,21 @@ impl Ui {
                 "Cannot prompt for input since the output is not connected to a terminal",
             ));
         }
-        write!(self.stdout(), "{prompt}: ")?;
-        self.stdout().flush()?;
+        write!(self.stderr(), "{prompt}: ")?;
+        self.stderr().flush()?;
         let mut buf = String::new();
         io::stdin().read_line(&mut buf)?;
 
-        if let Some(trimmed) = buf.strip_suffix('\n') {
-            buf = trimmed.to_owned();
-        } else if buf.is_empty() {
+        if buf.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "Prompt cancelled by EOF",
             ));
         }
 
+        if let Some(trimmed) = buf.strip_suffix('\n') {
+            buf.truncate(trimmed.len());
+        }
         Ok(buf)
     }
 
@@ -602,7 +601,7 @@ impl Ui {
         if !Self::can_prompt() {
             if let Some(default) = default {
                 // Choose the default automatically without waiting.
-                writeln!(self.stdout(), "{prompt}: {default}")?;
+                writeln!(self.stderr(), "{prompt}: {default}")?;
                 return Ok(default.to_owned());
             }
         }
@@ -632,7 +631,7 @@ impl Ui {
         let default_choice = default.map(|c| if c { "Y" } else { "N" });
 
         let choice = self.prompt_choice(
-            &format!("{} {}", prompt, default_str),
+            &format!("{prompt} {default_str}"),
             &["y", "n", "yes", "no", "Yes", "No", "YES", "NO"],
             default_choice,
         )?;

@@ -388,7 +388,7 @@ fn commit_from_proto(mut proto: crate::protos::local_store::Commit) -> Commit {
         MergedTreeId::Merge(merge_builder.build())
     } else {
         assert_eq!(proto.root_tree.len(), 1);
-        MergedTreeId::Legacy(TreeId::new(proto.root_tree[0].to_vec()))
+        MergedTreeId::Legacy(TreeId::new(proto.root_tree[0].clone()))
     };
     let change_id = ChangeId::new(proto.change_id);
     Commit {
@@ -407,7 +407,7 @@ fn tree_to_proto(tree: &Tree) -> crate::protos::local_store::Tree {
     let mut proto = crate::protos::local_store::Tree::default();
     for entry in tree.entries() {
         proto.entries.push(crate::protos::local_store::tree::Entry {
-            name: entry.name().as_str().to_owned(),
+            name: entry.name().as_internal_str().to_owned(),
             value: Some(tree_value_to_proto(entry.value())),
         });
     }
@@ -513,10 +513,10 @@ fn conflict_to_proto(conflict: &Conflict) -> crate::protos::local_store::Conflic
 fn conflict_from_proto(proto: crate::protos::local_store::Conflict) -> Conflict {
     let mut conflict = Conflict::default();
     for term in proto.removes {
-        conflict.removes.push(conflict_term_from_proto(term))
+        conflict.removes.push(conflict_term_from_proto(term));
     }
     for term in proto.adds {
-        conflict.adds.push(conflict_term_from_proto(term))
+        conflict.adds.push(conflict_term_from_proto(term));
     }
     conflict
 }

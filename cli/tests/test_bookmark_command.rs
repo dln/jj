@@ -655,7 +655,7 @@ fn test_bookmark_delete_export() {
       @git: rlvkpnrz 65b6b74e (empty) (no description set)
     "###);
     insta::assert_snapshot!(stderr, @r###"
-    Hint: Bookmarkes marked as deleted will be deleted from the underlying Git repo on the next `jj git export`.
+    Hint: Bookmarks marked as deleted will be deleted from the underlying Git repo on the next `jj git export`.
     "###);
 
     test_env.jj_cmd_ok(&repo_path, &["git", "export"]);
@@ -709,7 +709,7 @@ fn test_bookmark_forget_fetched_bookmark() {
 
     // Set up a git repo with a bookmark and a jj repo that has it as a remote.
     let test_env = TestEnvironment::default();
-    test_env.add_config("git.auto-local-branch = true");
+    test_env.add_config("git.auto-local-bookmark = true");
     test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "repo"]);
     let repo_path = test_env.env_root().join("repo");
     let git_repo_path = test_env.env_root().join("git-repo");
@@ -833,7 +833,7 @@ fn test_bookmark_forget_deleted_or_nonexistent_bookmark() {
     // ======== Beginning of test setup ========
     // Set up a git repo with a bookmark and a jj repo that has it as a remote.
     let test_env = TestEnvironment::default();
-    test_env.add_config("git.auto-local-branch = true");
+    test_env.add_config("git.auto-local-bookmark = true");
     test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "repo"]);
     let repo_path = test_env.env_root().join("repo");
     let git_repo_path = test_env.env_root().join("git-repo");
@@ -928,7 +928,7 @@ fn test_bookmark_track_untrack() {
             "refs/heads/feature2",
         ],
     );
-    test_env.add_config("git.auto-local-branch = false");
+    test_env.add_config("git.auto-local-bookmark = false");
     let (_stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["git", "fetch"]);
     insta::assert_snapshot!(stderr, @r###"
     bookmark: feature1@origin [new] untracked
@@ -1039,7 +1039,7 @@ fn test_bookmark_track_untrack() {
             "refs/heads/feature3",
         ],
     );
-    test_env.add_config("git.auto-local-branch = true");
+    test_env.add_config("git.auto-local-bookmark = true");
     let (_stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["git", "fetch"]);
     insta::assert_snapshot!(stderr, @r###"
     bookmark: feature1@origin [updated] untracked
@@ -1130,7 +1130,7 @@ fn test_bookmark_track_untrack_patterns() {
     }
 
     // Fetch new commit without auto tracking
-    test_env.add_config("git.auto-local-branch = false");
+    test_env.add_config("git.auto-local-bookmark = false");
     let (_stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["git", "fetch"]);
     insta::assert_snapshot!(stderr, @r###"
     bookmark: feature1@origin [new] untracked
@@ -1235,7 +1235,7 @@ fn test_bookmark_track_untrack_patterns() {
 #[test]
 fn test_bookmark_list() {
     let test_env = TestEnvironment::default();
-    test_env.add_config("git.auto-local-branch = true");
+    test_env.add_config("git.auto-local-bookmark = true");
 
     // Initialize remote refs
     test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "remote"]);
@@ -1287,7 +1287,7 @@ fn test_bookmark_list() {
       @origin (ahead by 1 commits, behind by 1 commits): qpsqxpyq 38ef8af7 (empty) remote-unsync
     "###);
     insta::assert_snapshot!(stderr, @r###"
-    Hint: Bookmarkes marked as deleted will be *deleted permanently* on the remote on the next `jj git push`. Use `jj bookmark forget` to prevent this.
+    Hint: Bookmarks marked as deleted will be *deleted permanently* on the remote on the next `jj git push`. Use `jj bookmark forget` to prevent this.
     "###);
 
     let (stdout, stderr) = test_env.jj_cmd_ok(&local_path, &["bookmark", "list", "--all-remotes"]);
@@ -1302,7 +1302,7 @@ fn test_bookmark_list() {
     remote-untrack@origin: vmortlor 71a16b05 (empty) remote-untrack
     "###);
     insta::assert_snapshot!(stderr, @r###"
-    Hint: Bookmarkes marked as deleted will be *deleted permanently* on the remote on the next `jj git push`. Use `jj bookmark forget` to prevent this.
+    Hint: Bookmarks marked as deleted will be *deleted permanently* on the remote on the next `jj git push`. Use `jj bookmark forget` to prevent this.
     "###);
 
     let template = r#"
@@ -1406,14 +1406,14 @@ fn test_bookmark_list() {
     tracking_behind_count: <Error: Not a tracked remote ref>
     "###);
     insta::assert_snapshot!(stderr, @r###"
-    Hint: Bookmarkes marked as deleted will be *deleted permanently* on the remote on the next `jj git push`. Use `jj bookmark forget` to prevent this.
+    Hint: Bookmarks marked as deleted will be *deleted permanently* on the remote on the next `jj git push`. Use `jj bookmark forget` to prevent this.
     "###);
 }
 
 #[test]
 fn test_bookmark_list_filtered() {
     let test_env = TestEnvironment::default();
-    test_env.add_config("git.auto-local-branch = true");
+    test_env.add_config("git.auto-local-bookmark = true");
     test_env.add_config(r#"revset-aliases."immutable_heads()" = "none()""#);
 
     // Initialize remote refs
@@ -1471,7 +1471,7 @@ fn test_bookmark_list_filtered() {
       @origin (ahead by 1 commits, behind by 1 commits): xyxluytn hidden 3e9a5af6 (empty) remote-rewrite
     "###);
     insta::assert_snapshot!(stderr, @r###"
-    Hint: Bookmarkes marked as deleted will be *deleted permanently* on the remote on the next `jj git push`. Use `jj bookmark forget` to prevent this.
+    Hint: Bookmarks marked as deleted will be *deleted permanently* on the remote on the next `jj git push`. Use `jj bookmark forget` to prevent this.
     "###);
 
     let query =
@@ -1533,6 +1533,46 @@ fn test_bookmark_list_filtered() {
     "###);
     insta::assert_snapshot!(stderr, @"");
 
+    // Select bookmarks with --remote
+    let (stdout, stderr) = query(&["--remote", "origin"]);
+    insta::assert_snapshot!(stdout, @r#"
+    remote-delete (deleted)
+      @origin: yxusvupt dad5f298 (empty) remote-delete
+    remote-keep: nlwprzpn 911e9120 (empty) remote-keep
+      @origin: nlwprzpn 911e9120 (empty) remote-keep
+    remote-rewrite: xyxluytn e31634b6 (empty) rewritten
+      @origin (ahead by 1 commits, behind by 1 commits): xyxluytn hidden 3e9a5af6 (empty) remote-rewrite
+    "#);
+    insta::assert_snapshot!(stderr, @r#"
+    Hint: Bookmarks marked as deleted will be *deleted permanently* on the remote on the next `jj git push`. Use `jj bookmark forget` to prevent this.
+    "#);
+    let (stdout, stderr) = query(&["--remote", "glob:gi?"]);
+    insta::assert_snapshot!(stdout, @r#"
+    local-keep: kpqxywon c7b4c09c (empty) local-keep
+      @git: kpqxywon c7b4c09c (empty) local-keep
+    remote-keep: nlwprzpn 911e9120 (empty) remote-keep
+      @git: nlwprzpn 911e9120 (empty) remote-keep
+    remote-rewrite: xyxluytn e31634b6 (empty) rewritten
+      @git: xyxluytn e31634b6 (empty) rewritten
+    "#);
+    insta::assert_snapshot!(stderr, @"");
+    let (stdout, stderr) = query(&["--remote", "origin", "--remote", "git"]);
+    insta::assert_snapshot!(stdout, @r#"
+    local-keep: kpqxywon c7b4c09c (empty) local-keep
+      @git: kpqxywon c7b4c09c (empty) local-keep
+    remote-delete (deleted)
+      @origin: yxusvupt dad5f298 (empty) remote-delete
+    remote-keep: nlwprzpn 911e9120 (empty) remote-keep
+      @git: nlwprzpn 911e9120 (empty) remote-keep
+      @origin: nlwprzpn 911e9120 (empty) remote-keep
+    remote-rewrite: xyxluytn e31634b6 (empty) rewritten
+      @git: xyxluytn e31634b6 (empty) rewritten
+      @origin (ahead by 1 commits, behind by 1 commits): xyxluytn hidden 3e9a5af6 (empty) remote-rewrite
+    "#);
+    insta::assert_snapshot!(stderr, @r#"
+    Hint: Bookmarks marked as deleted will be *deleted permanently* on the remote on the next `jj git push`. Use `jj bookmark forget` to prevent this.
+    "#);
+
     // Can select deleted bookmark by name pattern, but not by revset.
     let (stdout, stderr) = query(&["remote-delete"]);
     insta::assert_snapshot!(stdout, @r###"
@@ -1540,7 +1580,7 @@ fn test_bookmark_list_filtered() {
       @origin: yxusvupt dad5f298 (empty) remote-delete
     "###);
     insta::assert_snapshot!(stderr, @r###"
-    Hint: Bookmarkes marked as deleted will be *deleted permanently* on the remote on the next `jj git push`. Use `jj bookmark forget` to prevent this.
+    Hint: Bookmarks marked as deleted will be *deleted permanently* on the remote on the next `jj git push`. Use `jj bookmark forget` to prevent this.
     "###);
     let (stdout, stderr) = query(&["-rbookmarks(remote-delete)"]);
     insta::assert_snapshot!(stdout, @r###"
@@ -1560,7 +1600,7 @@ fn test_bookmark_list_filtered() {
     remote-keep: nlwprzpn 911e9120 (empty) remote-keep
     "###);
     insta::assert_snapshot!(stderr, @r###"
-    Hint: Bookmarkes marked as deleted will be *deleted permanently* on the remote on the next `jj git push`. Use `jj bookmark forget` to prevent this.
+    Hint: Bookmarks marked as deleted will be *deleted permanently* on the remote on the next `jj git push`. Use `jj bookmark forget` to prevent this.
     "###);
 
     // Unmatched name pattern shouldn't be an error. A warning can be added later.
@@ -1578,12 +1618,27 @@ fn test_bookmark_list_filtered() {
       @origin (ahead by 1 commits, behind by 1 commits): xyxluytn hidden 3e9a5af6 (empty) remote-rewrite
     "###);
     insta::assert_snapshot!(stderr, @"");
+
+    // … but still filtered by --remote
+    let (stdout, stderr) = query(&[
+        "local-keep",
+        "-rbookmarks(remote-rewrite)",
+        "--remote",
+        "git",
+    ]);
+    insta::assert_snapshot!(stdout, @r#"
+    local-keep: kpqxywon c7b4c09c (empty) local-keep
+      @git: kpqxywon c7b4c09c (empty) local-keep
+    remote-rewrite: xyxluytn e31634b6 (empty) rewritten
+      @git: xyxluytn e31634b6 (empty) rewritten
+    "#);
+    insta::assert_snapshot!(stderr, @"");
 }
 
 #[test]
 fn test_bookmark_list_much_remote_divergence() {
     let test_env = TestEnvironment::default();
-    test_env.add_config("git.auto-local-branch = true");
+    test_env.add_config("git.auto-local-bookmark = true");
 
     // Initialize remote refs
     test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "remote"]);
@@ -1628,7 +1683,7 @@ fn test_bookmark_list_much_remote_divergence() {
 #[test]
 fn test_bookmark_list_tracked() {
     let test_env = TestEnvironment::default();
-    test_env.add_config("git.auto-local-branch = true");
+    test_env.add_config("git.auto-local-bookmark = true");
 
     // Initialize remote refs
     test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "remote"]);
@@ -1732,7 +1787,7 @@ fn test_bookmark_list_tracked() {
       @upstream: lolpmnqw 32fa6da0 (empty) upstream-sync
     "###);
     insta::assert_snapshot!(stderr, @r###"
-    Hint: Bookmarkes marked as deleted will be *deleted permanently* on the remote on the next `jj git push`. Use `jj bookmark forget` to prevent this.
+    Hint: Bookmarks marked as deleted will be *deleted permanently* on the remote on the next `jj git push`. Use `jj bookmark forget` to prevent this.
     "###);
 
     let (stdout, stderr) = test_env.jj_cmd_ok(&local_path, &["bookmark", "list", "--tracked"]);
@@ -1749,7 +1804,24 @@ fn test_bookmark_list_tracked() {
     "###
     );
     insta::assert_snapshot!(stderr, @r###"
-    Hint: Bookmarkes marked as deleted will be *deleted permanently* on the remote on the next `jj git push`. Use `jj bookmark forget` to prevent this.
+    Hint: Bookmarks marked as deleted will be *deleted permanently* on the remote on the next `jj git push`. Use `jj bookmark forget` to prevent this.
+    "###);
+
+    let (stdout, stderr) = test_env.jj_cmd_ok(
+        &local_path,
+        &["bookmark", "list", "--tracked", "--remote", "origin"],
+    );
+    insta::assert_snapshot!(stdout, @r#"
+    remote-delete (deleted)
+      @origin: mnmymoky 203e60eb (empty) remote-delete
+    remote-sync: zwtyzrop c761c7ea (empty) remote-sync
+      @origin: zwtyzrop c761c7ea (empty) remote-sync
+    remote-unsync: nmzmmopx e1da745b (empty) local-only
+      @origin (ahead by 1 commits, behind by 1 commits): qpsqxpyq 38ef8af7 (empty) remote-unsync
+    "#
+    );
+    insta::assert_snapshot!(stderr, @r###"
+    Hint: Bookmarks marked as deleted will be *deleted permanently* on the remote on the next `jj git push`. Use `jj bookmark forget` to prevent this.
     "###);
 
     let (stdout, stderr) = test_env.jj_cmd_ok(

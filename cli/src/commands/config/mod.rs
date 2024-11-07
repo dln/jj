@@ -17,6 +17,7 @@ mod get;
 mod list;
 mod path;
 mod set;
+mod unset;
 
 use tracing::instrument;
 
@@ -30,20 +31,22 @@ use self::path::cmd_config_path;
 use self::path::ConfigPathArgs;
 use self::set::cmd_config_set;
 use self::set::ConfigSetArgs;
+use self::unset::cmd_config_unset;
+use self::unset::ConfigUnsetArgs;
 use crate::cli_util::CommandHelper;
 use crate::command_error::CommandError;
 use crate::config::ConfigSource;
 use crate::ui::Ui;
 
 #[derive(clap::Args, Clone, Debug)]
-#[command(group = clap::ArgGroup::new("config_level").multiple(false).required(true))]
+#[group(id = "config_level", multiple = false, required = true)]
 pub(crate) struct ConfigLevelArgs {
     /// Target the user-level config
-    #[arg(long, group = "config_level")]
+    #[arg(long)]
     user: bool,
 
     /// Target the repo-level config
-    #[arg(long, group = "config_level")]
+    #[arg(long)]
     repo: bool,
 }
 
@@ -82,6 +85,8 @@ pub(crate) enum ConfigCommand {
     Path(ConfigPathArgs),
     #[command(visible_alias("s"))]
     Set(ConfigSetArgs),
+    #[command(visible_alias("u"))]
+    Unset(ConfigUnsetArgs),
 }
 
 #[instrument(skip_all)]
@@ -96,5 +101,6 @@ pub(crate) fn cmd_config(
         ConfigCommand::List(args) => cmd_config_list(ui, command, args),
         ConfigCommand::Path(args) => cmd_config_path(ui, command, args),
         ConfigCommand::Set(args) => cmd_config_set(ui, command, args),
+        ConfigCommand::Unset(args) => cmd_config_unset(ui, command, args),
     }
 }

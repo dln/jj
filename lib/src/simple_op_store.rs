@@ -55,6 +55,7 @@ use crate::op_store::RefTarget;
 use crate::op_store::RemoteRef;
 use crate::op_store::RemoteRefState;
 use crate::op_store::RemoteView;
+use crate::op_store::RootOperationData;
 use crate::op_store::View;
 use crate::op_store::ViewId;
 use crate::op_store::WorkspaceId;
@@ -81,8 +82,9 @@ impl From<DecodeError> for OpStoreError {
 #[derive(Debug)]
 pub struct SimpleOpStore {
     path: PathBuf,
-    empty_view_id: ViewId,
+    root_data: RootOperationData,
     root_operation_id: OperationId,
+    root_view_id: ViewId,
 }
 
 impl SimpleOpStore {
@@ -91,18 +93,19 @@ impl SimpleOpStore {
     }
 
     /// Creates an empty OpStore, panics if it already exists
-    pub fn init(store_path: &Path) -> Self {
+    pub fn init(store_path: &Path, root_data: RootOperationData) -> Self {
         fs::create_dir(store_path.join("views")).unwrap();
         fs::create_dir(store_path.join("operations")).unwrap();
-        Self::load(store_path)
+        Self::load(store_path, root_data)
     }
 
     /// Load an existing OpStore
-    pub fn load(store_path: &Path) -> Self {
+    pub fn load(store_path: &Path, root_data: RootOperationData) -> Self {
         SimpleOpStore {
             path: store_path.to_path_buf(),
-            empty_view_id: ViewId::from_bytes(&[0; VIEW_ID_LENGTH]),
+            root_data,
             root_operation_id: OperationId::from_bytes(&[0; OPERATION_ID_LENGTH]),
+            root_view_id: ViewId::from_bytes(&[0; VIEW_ID_LENGTH]),
         }
     }
 
@@ -129,8 +132,8 @@ impl OpStore for SimpleOpStore {
     }
 
     fn read_view(&self, id: &ViewId) -> OpStoreResult<View> {
-        if *id == self.empty_view_id {
-            return Ok(View::default());
+        if *id == self.root_view_id {
+            return Ok(View::make_root(self.root_data.root_commit_id.clone()));
         }
 
         let path = self.view_path(id);
@@ -163,7 +166,7 @@ impl OpStore for SimpleOpStore {
 
     fn read_operation(&self, id: &OperationId) -> OpStoreResult<Operation> {
         if *id == self.root_operation_id {
-            return Ok(Operation::make_root(self.empty_view_id.clone()));
+            return Ok(Operation::make_root(self.root_view_id.clone()));
         }
 
         let path = self.operation_path(id);
@@ -459,7 +462,7 @@ fn view_to_proto(view: &View) -> crate::protos::op_store::View {
 }
 
 fn view_from_proto(proto: crate::protos::op_store::View) -> View {
-    let mut view = View::default();
+    let mut view = View::empty();
     // For compatibility with old repos before we had support for multiple working
     // copies
     #[allow(deprecated)]
@@ -820,7 +823,10 @@ mod tests {
     #[test]
     fn test_read_write_view() {
         let temp_dir = testutils::new_temp_dir();
-        let store = SimpleOpStore::init(temp_dir.path());
+        let root_data = RootOperationData {
+            root_commit_id: CommitId::from_hex("000000"),
+        };
+        let store = SimpleOpStore::init(temp_dir.path(), root_data);
         let view = create_view();
         let view_id = store.write_view(&view).unwrap();
         let read_view = store.read_view(&view_id).unwrap();
@@ -830,7 +836,10 @@ mod tests {
     #[test]
     fn test_read_write_operation() {
         let temp_dir = testutils::new_temp_dir();
-        let store = SimpleOpStore::init(temp_dir.path());
+        let root_data = RootOperationData {
+            root_commit_id: CommitId::from_hex("000000"),
+        };
+        let store = SimpleOpStore::init(temp_dir.path(), root_data);
         let operation = create_operation();
         let op_id = store.write_operation(&operation).unwrap();
         let read_operation = store.read_operation(&op_id).unwrap();

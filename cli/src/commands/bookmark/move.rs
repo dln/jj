@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use itertools::Itertools as _;
-use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::RefTarget;
 use jj_lib::str_util::StringPattern;
@@ -42,10 +41,15 @@ use crate::ui::Ui;
 #[command(group(clap::ArgGroup::new("source").multiple(true).required(true)))]
 pub struct BookmarkMoveArgs {
     /// Move bookmarks from the given revisions
+    // We intentionally do not support the short `-f` for `--from` since it
+    // could be confused with a shorthand for `--force`, and people might not
+    // realize they need `-B`/`--allow-backwards` instead.
     #[arg(long, group = "source", value_name = "REVISIONS")]
     from: Vec<RevisionArg>,
 
     /// Move bookmarks to this revision
+    // We intentionally do not support the short `-t` for `--to` since we don't
+    // support `-f` for `--from`.
     #[arg(long, default_value = "@", value_name = "REVISION")]
     to: RevisionArg,
 
@@ -72,25 +76,41 @@ pub fn cmd_bookmark_move(
 
     let target_commit = workspace_command.resolve_single_rev(ui, &args.to)?;
     let matched_bookmarks = {
-        let is_source_commit = if !args.from.is_empty() {
-            workspace_command
+        let is_source_ref: Box<dyn Fn(&RefTarget) -> _> = if !args.from.is_empty() {
+            let is_source_commit = workspace_command
                 .parse_union_revsets(ui, &args.from)?
                 .evaluate()?
-                .containing_fn()
+                .containing_fn();
+            Box::new(move |target: &RefTarget| {
+                for id in target.added_ids() {
+                    if is_source_commit(id)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            })
         } else {
-            Box::new(|_: &CommitId| true)
+            Box::new(|_| Ok(true))
         };
         let mut bookmarks = if !args.names.is_empty() {
             find_bookmarks_with(&args.names, |pattern| {
                 repo.view()
                     .local_bookmarks_matching(pattern)
-                    .filter(|(_, target)| target.added_ids().any(&is_source_commit))
+                    .filter_map(|(name, target)| {
+                        is_source_ref(target)
+                            .map(|matched| matched.then_some((name, target)))
+                            .transpose()
+                    })
             })?
         } else {
             repo.view()
                 .local_bookmarks()
-                .filter(|(_, target)| target.added_ids().any(&is_source_commit))
-                .collect()
+                .filter_map(|(name, target)| {
+                    is_source_ref(target)
+                        .map(|matched| matched.then_some((name, target)))
+                        .transpose()
+                })
+                .try_collect()?
         };
         // Noop matches aren't error, but should be excluded from stats.
         bookmarks.retain(|(_, old_target)| old_target.as_normal() != Some(target_commit.id()));

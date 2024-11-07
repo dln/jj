@@ -88,7 +88,7 @@ fn test_git_fetch_with_default_config() {
 #[test]
 fn test_git_fetch_default_remote() {
     let test_env = TestEnvironment::default();
-    test_env.add_config("git.auto-local-branch = true");
+    test_env.add_config("git.auto-local-bookmark = true");
     test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "repo"]);
     let repo_path = test_env.env_root().join("repo");
     add_git_remote(&test_env, &repo_path, "origin");
@@ -103,7 +103,7 @@ fn test_git_fetch_default_remote() {
 #[test]
 fn test_git_fetch_single_remote() {
     let test_env = TestEnvironment::default();
-    test_env.add_config("git.auto-local-branch = true");
+    test_env.add_config("git.auto-local-bookmark = true");
     test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "repo"]);
     let repo_path = test_env.env_root().join("repo");
     add_git_remote(&test_env, &repo_path, "rem1");
@@ -122,7 +122,7 @@ fn test_git_fetch_single_remote() {
 #[test]
 fn test_git_fetch_single_remote_all_remotes_flag() {
     let test_env = TestEnvironment::default();
-    test_env.add_config("git.auto-local-branch = true");
+    test_env.add_config("git.auto-local-bookmark = true");
     test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "repo"]);
     let repo_path = test_env.env_root().join("repo");
     add_git_remote(&test_env, &repo_path, "rem1");
@@ -140,7 +140,7 @@ fn test_git_fetch_single_remote_all_remotes_flag() {
 #[test]
 fn test_git_fetch_single_remote_from_arg() {
     let test_env = TestEnvironment::default();
-    test_env.add_config("git.auto-local-branch = true");
+    test_env.add_config("git.auto-local-bookmark = true");
     test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "repo"]);
     let repo_path = test_env.env_root().join("repo");
     add_git_remote(&test_env, &repo_path, "rem1");
@@ -155,7 +155,7 @@ fn test_git_fetch_single_remote_from_arg() {
 #[test]
 fn test_git_fetch_single_remote_from_config() {
     let test_env = TestEnvironment::default();
-    test_env.add_config("git.auto-local-branch = true");
+    test_env.add_config("git.auto-local-bookmark = true");
     test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "repo"]);
     let repo_path = test_env.env_root().join("repo");
     add_git_remote(&test_env, &repo_path, "rem1");
@@ -171,7 +171,7 @@ fn test_git_fetch_single_remote_from_config() {
 #[test]
 fn test_git_fetch_multiple_remotes() {
     let test_env = TestEnvironment::default();
-    test_env.add_config("git.auto-local-branch = true");
+    test_env.add_config("git.auto-local-bookmark = true");
     test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "repo"]);
     let repo_path = test_env.env_root().join("repo");
     add_git_remote(&test_env, &repo_path, "rem1");
@@ -192,7 +192,7 @@ fn test_git_fetch_multiple_remotes() {
 #[test]
 fn test_git_fetch_all_remotes() {
     let test_env = TestEnvironment::default();
-    test_env.add_config("git.auto-local-branch = true");
+    test_env.add_config("git.auto-local-bookmark = true");
     test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "repo"]);
     let repo_path = test_env.env_root().join("repo");
     add_git_remote(&test_env, &repo_path, "rem1");
@@ -210,7 +210,7 @@ fn test_git_fetch_all_remotes() {
 #[test]
 fn test_git_fetch_multiple_remotes_from_config() {
     let test_env = TestEnvironment::default();
-    test_env.add_config("git.auto-local-branch = true");
+    test_env.add_config("git.auto-local-bookmark = true");
     test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "repo"]);
     let repo_path = test_env.env_root().join("repo");
     add_git_remote(&test_env, &repo_path, "rem1");
@@ -265,7 +265,7 @@ fn test_git_fetch_nonexistent_remote_from_config() {
 #[test]
 fn test_git_fetch_from_remote_named_git() {
     let test_env = TestEnvironment::default();
-    test_env.add_config("git.auto-local-branch = true");
+    test_env.add_config("git.auto-local-bookmark = true");
     let repo_path = test_env.env_root().join("repo");
     init_git_remote(&test_env, "git");
     let git_repo = git2::Repository::init(&repo_path).unwrap();
@@ -311,7 +311,7 @@ fn test_git_fetch_from_remote_named_git() {
 #[test]
 fn test_git_fetch_prune_before_updating_tips() {
     let test_env = TestEnvironment::default();
-    test_env.add_config("git.auto-local-branch = true");
+    test_env.add_config("git.auto-local-bookmark = true");
     test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "repo"]);
     let repo_path = test_env.env_root().join("repo");
     add_git_remote(&test_env, &repo_path, "origin");
@@ -339,7 +339,7 @@ fn test_git_fetch_prune_before_updating_tips() {
 #[test]
 fn test_git_fetch_conflicting_bookmarks() {
     let test_env = TestEnvironment::default();
-    test_env.add_config("git.auto-local-branch = true");
+    test_env.add_config("git.auto-local-bookmark = true");
     test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "repo"]);
     let repo_path = test_env.env_root().join("repo");
     add_git_remote(&test_env, &repo_path, "rem1");
@@ -367,7 +367,7 @@ fn test_git_fetch_conflicting_bookmarks() {
 #[test]
 fn test_git_fetch_conflicting_bookmarks_colocated() {
     let test_env = TestEnvironment::default();
-    test_env.add_config("git.auto-local-branch = true");
+    test_env.add_config("git.auto-local-bookmark = true");
     let repo_path = test_env.env_root().join("repo");
     let _git_repo = git2::Repository::init(&repo_path).unwrap();
     // create_colocated_repo_and_bookmarks_from_trunk1(&test_env, &repo_path);
@@ -430,7 +430,7 @@ fn create_trunk2_and_rebase_bookmarks(test_env: &TestEnvironment, repo_path: &Pa
 #[test]
 fn test_git_fetch_all() {
     let test_env = TestEnvironment::default();
-    test_env.add_config("git.auto-local-branch = true");
+    test_env.add_config("git.auto-local-bookmark = true");
     test_env.add_config(r#"revset-aliases."immutable_heads()" = "none()""#);
     let source_git_repo_path = test_env.env_root().join("source");
     let _git_repo = git2::Repository::init(source_git_repo_path.clone()).unwrap();
@@ -579,7 +579,7 @@ fn test_git_fetch_all() {
 #[test]
 fn test_git_fetch_some_of_many_bookmarks() {
     let test_env = TestEnvironment::default();
-    test_env.add_config("git.auto-local-branch = true");
+    test_env.add_config("git.auto-local-bookmark = true");
     test_env.add_config(r#"revset-aliases."immutable_heads()" = "none()""#);
     let source_git_repo_path = test_env.env_root().join("source");
     let _git_repo = git2::Repository::init(source_git_repo_path.clone()).unwrap();
@@ -795,7 +795,7 @@ fn test_git_fetch_some_of_many_bookmarks() {
 #[test]
 fn test_git_fetch_bookmarks_some_missing() {
     let test_env = TestEnvironment::default();
-    test_env.add_config("git.auto-local-branch = true");
+    test_env.add_config("git.auto-local-bookmark = true");
     test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "repo"]);
     let repo_path = test_env.env_root().join("repo");
     add_git_remote(&test_env, &repo_path, "origin");
@@ -883,7 +883,7 @@ fn test_git_fetch_bookmarks_some_missing() {
 #[test]
 fn test_git_fetch_undo() {
     let test_env = TestEnvironment::default();
-    test_env.add_config("git.auto-local-branch = true");
+    test_env.add_config("git.auto-local-bookmark = true");
     let source_git_repo_path = test_env.env_root().join("source");
     let _git_repo = git2::Repository::init(source_git_repo_path.clone()).unwrap();
 
@@ -932,7 +932,7 @@ fn test_git_fetch_undo() {
     let (stdout, stderr) = test_env.jj_cmd_ok(&target_jj_repo_path, &["undo"]);
     insta::assert_snapshot!(stdout, @"");
     insta::assert_snapshot!(stderr, @r#"
-    Undid operation bbebbf6a6ebe 2001-02-03 04:05:18.000 +07:00 - 2001-02-03 04:05:18.000 +07:00 fetch from git remote(s) origin
+    Undid operation: eb2029853b02 (2001-02-03 08:05:18) fetch from git remote(s) origin
     "#);
     // The undo works as expected
     insta::assert_snapshot!(get_log_output(&test_env, &target_jj_repo_path), @r###"
@@ -960,7 +960,7 @@ fn test_git_fetch_undo() {
 #[test]
 fn test_fetch_undo_what() {
     let test_env = TestEnvironment::default();
-    test_env.add_config("git.auto-local-branch = true");
+    test_env.add_config("git.auto-local-bookmark = true");
     let source_git_repo_path = test_env.env_root().join("source");
     let _git_repo = git2::Repository::init(source_git_repo_path.clone()).unwrap();
 
@@ -1018,7 +1018,7 @@ fn test_fetch_undo_what() {
     );
     insta::assert_snapshot!(stdout, @"");
     insta::assert_snapshot!(stderr, @r#"
-    Restored to operation b51416386f26 2001-02-03 04:05:07.000 +07:00 - 2001-02-03 04:05:07.000 +07:00 add workspace 'default'
+    Restored to operation: eac759b9ab75 (2001-02-03 08:05:07) add workspace 'default'
     "#);
     insta::assert_snapshot!(get_bookmark_output(&test_env, &repo_path), @r###"
     b (deleted)
@@ -1047,7 +1047,7 @@ fn test_fetch_undo_what() {
     );
     insta::assert_snapshot!(stdout, @"");
     insta::assert_snapshot!(stderr, @r#"
-    Restored to operation b51416386f26 2001-02-03 04:05:07.000 +07:00 - 2001-02-03 04:05:07.000 +07:00 add workspace 'default'
+    Restored to operation: eac759b9ab75 (2001-02-03 08:05:07) add workspace 'default'
     "#);
     insta::assert_snapshot!(get_bookmark_output(&test_env, &repo_path), @r###"
     newbookmark: qpvuntsm 230dd059 (empty) (no description set)
@@ -1057,7 +1057,7 @@ fn test_fetch_undo_what() {
 #[test]
 fn test_git_fetch_remove_fetch() {
     let test_env = TestEnvironment::default();
-    test_env.add_config("git.auto-local-branch = true");
+    test_env.add_config("git.auto-local-bookmark = true");
     test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "repo"]);
     let repo_path = test_env.env_root().join("repo");
     add_git_remote(&test_env, &repo_path, "origin");
@@ -1101,7 +1101,7 @@ fn test_git_fetch_remove_fetch() {
 #[test]
 fn test_git_fetch_rename_fetch() {
     let test_env = TestEnvironment::default();
-    test_env.add_config("git.auto-local-branch = true");
+    test_env.add_config("git.auto-local-bookmark = true");
     test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "repo"]);
     let repo_path = test_env.env_root().join("repo");
     add_git_remote(&test_env, &repo_path, "origin");
@@ -1142,7 +1142,7 @@ fn test_git_fetch_rename_fetch() {
 #[test]
 fn test_git_fetch_removed_bookmark() {
     let test_env = TestEnvironment::default();
-    test_env.add_config("git.auto-local-branch = true");
+    test_env.add_config("git.auto-local-bookmark = true");
     let source_git_repo_path = test_env.env_root().join("source");
     let _git_repo = git2::Repository::init(source_git_repo_path.clone()).unwrap();
 
@@ -1234,7 +1234,7 @@ fn test_git_fetch_removed_bookmark() {
 #[test]
 fn test_git_fetch_removed_parent_bookmark() {
     let test_env = TestEnvironment::default();
-    test_env.add_config("git.auto-local-branch = true");
+    test_env.add_config("git.auto-local-bookmark = true");
     let source_git_repo_path = test_env.env_root().join("source");
     let _git_repo = git2::Repository::init(source_git_repo_path.clone()).unwrap();
 
@@ -1347,7 +1347,7 @@ fn test_git_fetch_remote_only_bookmark() {
         .unwrap();
 
     // Fetch using git.auto_local_bookmark = true
-    test_env.add_config("git.auto-local-branch = true");
+    test_env.add_config("git.auto-local-bookmark = true");
     test_env.jj_cmd_ok(&repo_path, &["git", "fetch", "--remote=origin"]);
     insta::assert_snapshot!(get_bookmark_output(&test_env, &repo_path), @r###"
     feature1: mzyxwzks 9f01a0e0 message
@@ -1366,7 +1366,7 @@ fn test_git_fetch_remote_only_bookmark() {
         .unwrap();
 
     // Fetch using git.auto_local_bookmark = false
-    test_env.add_config("git.auto-local-branch = false");
+    test_env.add_config("git.auto-local-bookmark = false");
     test_env.jj_cmd_ok(&repo_path, &["git", "fetch", "--remote=origin"]);
     insta::assert_snapshot!(get_log_output(&test_env, &repo_path), @r###"
     ◆  9f01a0e04879 message feature1 feature2@origin

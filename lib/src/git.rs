@@ -21,6 +21,7 @@ use std::collections::HashSet;
 use std::default::Default;
 use std::fmt;
 use std::io::Read;
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::str;
 
@@ -179,7 +180,7 @@ fn resolve_git_ref_to_commit_id(
 
 #[derive(Error, Debug)]
 pub enum GitImportError {
-    #[error("Failed to read Git HEAD target commit {id}", id=id.hex())]
+    #[error("Failed to read Git HEAD target commit {id}")]
     MissingHeadTarget {
         id: CommitId,
         #[source]
@@ -380,6 +381,7 @@ fn abandon_unreachable_commits(
         .evaluate_programmatic(mut_repo)
         .unwrap()
         .iter()
+        .map(Result::unwrap) // TODO: Return error to caller
         .collect_vec();
     for abandoned_commit in &abandoned_commits {
         mut_repo.record_abandoned_commit(abandoned_commit.clone());
@@ -539,13 +541,13 @@ fn remotely_pinned_commit_ids(view: &View) -> Vec<CommitId> {
         .collect()
 }
 
-/// Imports `HEAD@git` from the underlying Git repo.
+/// Imports HEAD from the underlying Git repo.
 ///
 /// Unlike `import_refs()`, the old HEAD branch is not abandoned because HEAD
 /// move doesn't always mean the old HEAD branch has been rewritten.
 ///
 /// Unlike `reset_head()`, this function doesn't move the working-copy commit to
-/// the child of the new `HEAD@git` revision.
+/// the child of the new HEAD revision.
 pub fn import_head(mut_repo: &mut MutableRepo) -> Result<(), GitImportError> {
     let store = mut_repo.store();
     let git_backend = get_git_backend(store).ok_or(GitImportError::UnexpectedBackend)?;
@@ -936,7 +938,7 @@ fn update_git_ref(
     Ok(())
 }
 
-/// Ensures `HEAD@git` is detached and pointing to the `new_oid`. If `new_oid`
+/// Ensures Git HEAD is detached and pointing to the `new_oid`. If `new_oid`
 /// is `None` (meaning absent), dummy placeholder ref will be set.
 fn update_git_head(
     git_repo: &gix::Repository,
@@ -979,7 +981,7 @@ fn update_git_head(
     Ok(())
 }
 
-/// Sets `HEAD@git` to the parent of the given working-copy commit and resets
+/// Sets Git HEAD to the parent of the given working-copy commit and resets
 /// the Git index.
 pub fn reset_head(
     mut_repo: &mut MutableRepo,
@@ -1010,7 +1012,7 @@ pub fn reset_head(
             false
         };
         let skip_reset = if is_same_tree {
-            // `HEAD@git` already points to a commit with the correct tree contents,
+            // HEAD already points to a commit with the correct tree contents,
             // so we only need to reset the Git index. We can skip the reset if
             // the Git index is empty (i.e. `git add` was never used).
             // In large repositories, this is around 2x faster if the Git index is empty
@@ -1244,6 +1246,7 @@ pub fn fetch(
     branch_names: &[StringPattern],
     callbacks: RemoteCallbacks<'_>,
     git_settings: &GitSettings,
+    depth: Option<NonZeroU32>,
 ) -> Result<GitFetchStats, GitFetchError> {
     // Perform a `git fetch` on the local git repo, updating the remote-tracking
     // branches in the git repo.
@@ -1260,6 +1263,9 @@ pub fn fetch(
     fetch_options.proxy_options(proxy_options);
     let callbacks = callbacks.into_git();
     fetch_options.remote_callbacks(callbacks);
+    if let Some(depth) = depth {
+        fetch_options.depth(depth.get().try_into().unwrap_or(i32::MAX));
+    }
     // At this point, we are only updating Git's remote tracking branches, not the
     // local branches.
     let refspecs: Vec<_> = branch_names
@@ -1782,10 +1788,10 @@ pub fn parse_gitmodules(
             // TODO Git warns when a duplicate config entry is found, we should
             // consider doing the same.
             ("path", PartialSubmoduleConfig { path: None, .. }) => {
-                map_entry.path = Some(config_value.to_string())
+                map_entry.path = Some(config_value.to_string());
             }
             ("url", PartialSubmoduleConfig { url: None, .. }) => {
-                map_entry.url = Some(config_value.to_string())
+                map_entry.url = Some(config_value.to_string());
             }
             _ => (),
         };

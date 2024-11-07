@@ -19,7 +19,7 @@ use std::str;
 const GIT_HEAD_PATH: &str = "../.git/HEAD";
 const JJ_OP_HEADS_PATH: &str = "../.jj/repo/op_heads/heads";
 
-fn main() -> std::io::Result<()> {
+fn main() {
     let version = std::env::var("CARGO_PKG_VERSION").unwrap();
 
     if Path::new(GIT_HEAD_PATH).exists() {
@@ -33,12 +33,18 @@ fn main() -> std::io::Result<()> {
     println!("cargo:rerun-if-env-changed=NIX_JJ_GIT_HASH");
 
     if let Some(git_hash) = get_git_hash() {
-        println!("cargo:rustc-env=JJ_VERSION={}-{}", version, git_hash);
+        println!("cargo:rustc-env=JJ_VERSION={version}-{git_hash}");
     } else {
-        println!("cargo:rustc-env=JJ_VERSION={}", version);
+        println!("cargo:rustc-env=JJ_VERSION={version}");
     }
 
-    Ok(())
+    let docs_symlink_path = Path::new("docs");
+    println!("cargo:rerun-if-changed={}", docs_symlink_path.display());
+    if docs_symlink_path.join("index.md").exists() {
+        println!("cargo:rustc-env=JJ_DOCS_DIR=docs/");
+    } else {
+        println!("cargo:rustc-env=JJ_DOCS_DIR=../docs/");
+    }
 }
 
 fn get_git_hash() -> Option<String> {

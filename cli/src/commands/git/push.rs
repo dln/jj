@@ -46,9 +46,9 @@ use crate::command_error::user_error;
 use crate::command_error::user_error_with_hint;
 use crate::command_error::CommandError;
 use crate::commands::git::get_single_remote;
-use crate::commands::git::map_git_error;
 use crate::formatter::Formatter;
 use crate::git_util::get_git_repo;
+use crate::git_util::map_git_error;
 use crate::git_util::with_remote_git_callbacks;
 use crate::git_util::GitSidebandProgressMessageWriter;
 use crate::ui::Ui;
@@ -84,7 +84,7 @@ pub struct GitPushArgs {
     /// By default, the specified name matches exactly. Use `glob:` prefix to
     /// select bookmarks by wildcard pattern. For details, see
     /// https://martinvonz.github.io/jj/latest/revsets#string-patterns.
-    #[arg(long, short, value_parser = StringPattern::parse)]
+    #[arg(long, short, alias="branch", value_parser = StringPattern::parse)]
     bookmark: Vec<StringPattern>,
     /// Push all bookmarks (including deleted bookmarks)
     #[arg(long)]
@@ -123,7 +123,7 @@ pub struct GitPushArgs {
 
 fn make_bookmark_term(bookmark_names: &[impl fmt::Display]) -> String {
     match bookmark_names {
-        [bookmark_name] => format!("bookmark {}", bookmark_name),
+        [bookmark_name] => format!("bookmark {bookmark_name}"),
         bookmark_names => format!("bookmarks {}", bookmark_names.iter().join(", ")),
     }
 }
@@ -336,7 +336,7 @@ fn validate_commits_ready_to_push(
             .evaluate()?
             .containing_fn()
     } else {
-        Box::new(|_: &CommitId| false)
+        Box::new(|_: &CommitId| Ok(false))
     };
 
     for commit in workspace_helper
@@ -362,7 +362,7 @@ fn validate_commits_ready_to_push(
         if commit.has_conflict()? {
             reasons.push("it has conflicts");
         }
-        if !args.allow_private && is_private(commit.id()) {
+        if !args.allow_private && is_private(commit.id())? {
             reasons.push("it is private");
         }
         if !reasons.is_empty() {
@@ -600,25 +600,28 @@ fn find_bookmarks_targeted_by_revisions<'a>(
 ) -> Result<Vec<(&'a str, LocalAndRemoteRef<'a>)>, CommandError> {
     let mut revision_commit_ids = HashSet::new();
     if use_default_revset {
-        let Some(wc_commit_id) = workspace_command.get_wc_commit_id().cloned() else {
-            return Err(user_error("Nothing checked out in this workspace"));
-        };
-        let current_bookmarks_expression = RevsetExpression::remote_bookmarks(
+        // remote_bookmarks(remote=<remote>)..@
+        let workspace_id = workspace_command.workspace_id();
+        let expression = RevsetExpression::remote_bookmarks(
             StringPattern::everything(),
             StringPattern::exact(remote_name),
             None,
         )
-        .range(&RevsetExpression::commit(wc_commit_id))
+        .range(&RevsetExpression::working_copy(workspace_id.clone()))
         .intersection(&RevsetExpression::bookmarks(StringPattern::everything()));
-        let current_bookmarks_revset = current_bookmarks_expression
-            .evaluate_programmatic(workspace_command.repo().as_ref())?;
-        revision_commit_ids.extend(current_bookmarks_revset.iter());
-        if revision_commit_ids.is_empty() {
+        let mut commit_ids = workspace_command
+            .attach_revset_evaluator(expression)
+            .evaluate_to_commit_ids()?
+            .peekable();
+        if commit_ids.peek().is_none() {
             writeln!(
                 ui.warning_default(),
                 "No bookmarks found in the default push revset: \
                  remote_bookmarks(remote={remote_name})..@"
             )?;
+        }
+        for commit_id in commit_ids {
+            revision_commit_ids.insert(commit_id?);
         }
     }
     for rev_arg in revisions {
@@ -631,7 +634,9 @@ fn find_bookmarks_targeted_by_revisions<'a>(
                 "No bookmarks point to the specified revisions: {rev_arg}"
             )?;
         }
-        revision_commit_ids.extend(commit_ids);
+        for commit_id in commit_ids {
+            revision_commit_ids.insert(commit_id?);
+        }
     }
     let bookmarks_targeted = workspace_command
         .repo()

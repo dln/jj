@@ -26,7 +26,6 @@ use jj_lib::workspace::Workspace;
 use testutils::commit_with_tree;
 use testutils::create_tree;
 use testutils::write_working_copy_file;
-use testutils::TestRepo;
 use testutils::TestWorkspace;
 
 #[test]
@@ -58,7 +57,7 @@ fn test_concurrent_checkout() {
     let mut ws2 = Workspace::load(
         &settings,
         &workspace1_root,
-        &TestRepo::default_store_factories(),
+        &test_workspace1.env.default_store_factories(),
         &default_working_copy_factories(),
     )
     .unwrap();
@@ -75,7 +74,7 @@ fn test_concurrent_checkout() {
     let ws3 = Workspace::load(
         &settings,
         &workspace1_root,
-        &TestRepo::default_store_factories(),
+        &test_workspace1.env.default_store_factories(),
         &default_working_copy_factories(),
     )
     .unwrap();
@@ -113,6 +112,7 @@ fn test_checkout_parallel() {
 
     thread::scope(|s| {
         for tree_id in &tree_ids {
+            let test_env = &test_workspace.env;
             let op_id = repo.op_id().clone();
             let tree_ids = tree_ids.clone();
             let commit = commit_with_tree(repo.store(), tree_id.clone());
@@ -122,7 +122,7 @@ fn test_checkout_parallel() {
                 let mut workspace = Workspace::load(
                     &settings,
                     &workspace_root,
-                    &TestRepo::default_store_factories(),
+                    &test_env.default_store_factories(),
                     &default_working_copy_factories(),
                 )
                 .unwrap();
@@ -163,7 +163,7 @@ fn test_racy_checkout() {
         let ws = &mut test_workspace.workspace;
         ws.check_out(op_id.clone(), None, &commit).unwrap();
         assert_eq!(
-            std::fs::read(path.to_fs_path(&workspace_root)).unwrap(),
+            std::fs::read(path.to_fs_path_unchecked(&workspace_root)).unwrap(),
             b"1".to_vec()
         );
         // A file written right after checkout (hopefully, from the test's perspective,

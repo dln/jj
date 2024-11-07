@@ -51,9 +51,10 @@ pub(crate) struct NewArgs {
     /// Parent(s) of the new change
     #[arg(default_value = "@")]
     pub(crate) revisions: Vec<RevisionArg>,
-    /// Ignored (but lets you pass `-r` for consistency with other commands)
-    #[arg(short = 'r', hide = true, action = clap::ArgAction::Count)]
-    unused_revision: u8,
+    /// Ignored (but lets you pass `-d`/`-r` for consistency with other
+    /// commands)
+    #[arg(short = 'd', hide = true, short_alias = 'r',  action = clap::ArgAction::Count)]
+    unused_destination: u8,
     /// The change description to use
     #[arg(long = "message", short, value_name = "MESSAGE")]
     message_paragraphs: Vec<String>,
@@ -242,6 +243,7 @@ fn ensure_no_commit_loop(
         .iter()
         .next()
     {
+        let commit_id = commit_id?;
         return Err(user_error(format!(
             "Refusing to create a loop: commit {} would be both an ancestor and a descendant of \
              the new commit",

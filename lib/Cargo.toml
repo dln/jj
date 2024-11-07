@@ -48,6 +48,7 @@ git2 = { workspace = true, optional = true }
 gix = { workspace = true, optional = true }
 gix-filter = { workspace = true, optional = true }
 glob = { workspace = true }
+hashbrown = { workspace = true }
 hex = { workspace = true }
 ignore = { workspace = true }
 indexmap = { workspace = true }
@@ -64,6 +65,7 @@ rand_chacha = { workspace = true }
 rayon = { workspace = true }
 ref-cast = { workspace = true }
 regex = { workspace = true }
+same-file = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 smallvec = { workspace = true }
@@ -100,3 +102,6 @@ git = ["dep:git2", "dep:gix", "dep:gix-filter"]
 vendored-openssl = ["git2/vendored-openssl"]
 watchman = ["dep:tokio", "dep:watchman_client"]
 testing = ["git"]
+
+[lints]
+workspace = true
