@@ -21,25 +21,32 @@ use std::sync::Mutex;
 use chrono::DateTime;
 use rand::prelude::*;
 use rand_chacha::ChaCha20Rng;
+use serde::Deserialize;
 
 use crate::backend::ChangeId;
 use crate::backend::Commit;
 use crate::backend::Signature;
 use crate::backend::Timestamp;
+use crate::config::ConfigError;
+use crate::config::ConfigTable;
+use crate::config::ConfigValue;
+use crate::config::StackedConfig;
+use crate::config::ToConfigNamePath;
+use crate::conflicts::ConflictMarkerStyle;
 use crate::fmt_util::binary_prefix;
 use crate::fsmonitor::FsmonitorSettings;
 use crate::signing::SignBehavior;
 
 #[derive(Debug, Clone)]
 pub struct UserSettings {
-    config: config::Config,
+    config: StackedConfig,
     timestamp: Option<Timestamp>,
     rng: Arc<JJRng>,
 }
 
 #[derive(Debug, Clone)]
 pub struct RepoSettings {
-    _config: config::Config,
+    _config: StackedConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -49,12 +56,12 @@ pub struct GitSettings {
 }
 
 impl GitSettings {
-    pub fn from_config(config: &config::Config) -> Self {
-        let auto_local_bookmark = config
+    pub fn from_settings(settings: &UserSettings) -> Self {
+        let auto_local_bookmark = settings
             .get_bool("git.auto-local-bookmark")
-            .or_else(|_| config.get_bool("git.auto-local-branch"))
+            .or_else(|_| settings.get_bool("git.auto-local-branch"))
             .unwrap_or(false);
-        let abandon_unreachable_commits = config
+        let abandon_unreachable_commits = settings
             .get_bool("git.abandon-unreachable-commits")
             .unwrap_or(true);
         GitSettings {
@@ -88,10 +95,7 @@ pub struct SignSettings {
 impl SignSettings {
     /// Load the signing settings from the config.
     pub fn from_settings(settings: &UserSettings) -> Self {
-        let sign_all = settings
-            .config()
-            .get_bool("signing.sign-all")
-            .unwrap_or(false);
+        let sign_all = settings.get_bool("signing.sign-all").unwrap_or(false);
         Self {
             behavior: if sign_all {
                 SignBehavior::Own
@@ -99,7 +103,7 @@ impl SignSettings {
                 SignBehavior::Keep
             },
             user_email: settings.user_email(),
-            key: settings.config().get_string("signing.key").ok(),
+            key: settings.get_string("signing.key").ok(),
         }
     }
 
@@ -117,8 +121,9 @@ impl SignSettings {
     }
 }
 
-fn get_timestamp_config(config: &config::Config, key: &str) -> Option<Timestamp> {
-    match config.get_string(key) {
+fn get_timestamp_config(config: &StackedConfig, key: &'static str) -> Option<Timestamp> {
+    // TODO: Maybe switch to native TOML date-time type?
+    match config.get::<String>(key) {
         Ok(timestamp_str) => match DateTime::parse_from_rfc3339(&timestamp_str) {
             Ok(datetime) => Some(Timestamp::from_datetime(datetime)),
             Err(_) => None,
@@ -127,17 +132,10 @@ fn get_timestamp_config(config: &config::Config, key: &str) -> Option<Timestamp>
     }
 }
 
-fn get_rng_seed_config(config: &config::Config) -> Option<u64> {
-    config
-        .get_string("debug.randomness-seed")
-        .ok()
-        .and_then(|str| str.parse().ok())
-}
-
 impl UserSettings {
-    pub fn from_config(config: config::Config) -> Self {
+    pub fn from_config(config: StackedConfig) -> Self {
         let timestamp = get_timestamp_config(&config, "debug.commit-timestamp");
-        let rng_seed = get_rng_seed_config(&config);
+        let rng_seed = config.get::<u64>("debug.randomness-seed").ok();
         UserSettings {
             config,
             timestamp,
@@ -147,7 +145,7 @@ impl UserSettings {
 
     // TODO: Reconsider UserSettings/RepoSettings abstraction. See
     // https://github.com/martinvonz/jj/issues/616#issuecomment-1345170699
-    pub fn with_repo(&self, _repo_path: &Path) -> Result<RepoSettings, config::ConfigError> {
+    pub fn with_repo(&self, _repo_path: &Path) -> Result<RepoSettings, ConfigError> {
         let config = self.config.clone();
         Ok(RepoSettings { _config: config })
     }
@@ -157,18 +155,18 @@ impl UserSettings {
     }
 
     pub fn user_name(&self) -> String {
-        self.config.get_string("user.name").unwrap_or_default()
+        self.get_string("user.name").unwrap_or_default()
     }
 
     // Must not be changed to avoid git pushing older commits with no set name
     pub const USER_NAME_PLACEHOLDER: &'static str = "(no name configured)";
 
     pub fn user_email(&self) -> String {
-        self.config.get_string("user.email").unwrap_or_default()
+        self.get_string("user.email").unwrap_or_default()
     }
 
-    pub fn fsmonitor_settings(&self) -> Result<FsmonitorSettings, config::ConfigError> {
-        FsmonitorSettings::from_config(&self.config)
+    pub fn fsmonitor_settings(&self) -> Result<FsmonitorSettings, ConfigError> {
+        FsmonitorSettings::from_settings(self)
     }
 
     // Must not be changed to avoid git pushing older commits with no set email
@@ -184,35 +182,31 @@ impl UserSettings {
     }
 
     pub fn operation_hostname(&self) -> String {
-        self.config
-            .get_string("operation.hostname")
+        self.get_string("operation.hostname")
             .unwrap_or_else(|_| whoami::fallible::hostname().expect("valid hostname"))
     }
 
     pub fn operation_username(&self) -> String {
-        self.config
-            .get_string("operation.username")
+        self.get_string("operation.username")
             .unwrap_or_else(|_| whoami::username())
     }
 
     pub fn push_bookmark_prefix(&self) -> String {
-        self.config
-            .get_string("git.push-bookmark-prefix")
+        self.get_string("git.push-bookmark-prefix")
             .unwrap_or_else(|_| "push-".to_string())
     }
 
     pub fn push_branch_prefix(&self) -> Option<String> {
-        self.config.get_string("git.push-branch-prefix").ok()
+        self.get_string("git.push-branch-prefix").ok()
     }
 
     pub fn default_description(&self) -> String {
-        self.config()
-            .get_string("ui.default-description")
+        self.get_string("ui.default-description")
             .unwrap_or_default()
     }
 
     pub fn default_revset(&self) -> String {
-        self.config.get_string("revsets.log").unwrap_or_default()
+        self.get_string("revsets.log").unwrap_or_default()
     }
 
     pub fn signature(&self) -> Signature {
@@ -225,28 +219,28 @@ impl UserSettings {
     }
 
     pub fn allow_native_backend(&self) -> bool {
-        self.config
-            .get_bool("ui.allow-init-native")
-            .unwrap_or(false)
+        self.get_bool("ui.allow-init-native").unwrap_or(false)
     }
 
-    pub fn config(&self) -> &config::Config {
+    /// Returns low-level config object.
+    ///
+    /// You should typically use `settings.get_<type>()` methods instead.
+    pub fn config(&self) -> &StackedConfig {
         &self.config
     }
 
     pub fn git_settings(&self) -> GitSettings {
-        GitSettings::from_config(&self.config)
+        GitSettings::from_settings(self)
     }
 
-    pub fn max_new_file_size(&self) -> Result<u64, config::ConfigError> {
+    pub fn max_new_file_size(&self) -> Result<u64, ConfigError> {
         let cfg = self
-            .config
             .get::<HumanByteSize>("snapshot.max-new-file-size")
             .map(|x| x.0);
         match cfg {
             Ok(0) => Ok(u64::MAX),
             x @ Ok(_) => x,
-            Err(config::ConfigError::NotFound(_)) => Ok(1024 * 1024),
+            Err(ConfigError::NotFound(_)) => Ok(1024 * 1024),
             e @ Err(_) => e,
         }
     }
@@ -254,12 +248,55 @@ impl UserSettings {
     // separate from sign_settings as those two are needed in pretty different
     // places
     pub fn signing_backend(&self) -> Option<String> {
-        let backend = self.config.get_string("signing.backend").ok()?;
+        let backend = self.get_string("signing.backend").ok()?;
         (backend.as_str() != "none").then_some(backend)
     }
 
     pub fn sign_settings(&self) -> SignSettings {
         SignSettings::from_settings(self)
+    }
+
+    pub fn conflict_marker_style(&self) -> Result<ConflictMarkerStyle, ConfigError> {
+        Ok(self
+            .get("ui.conflict-marker-style")
+            .optional()?
+            .unwrap_or_default())
+    }
+}
+
+/// General-purpose accessors.
+impl UserSettings {
+    /// Looks up value of the specified type `T` by `name`.
+    pub fn get<'de, T: Deserialize<'de>>(
+        &self,
+        name: impl ToConfigNamePath,
+    ) -> Result<T, ConfigError> {
+        self.config.get(name)
+    }
+
+    /// Looks up string value by `name`.
+    pub fn get_string(&self, name: impl ToConfigNamePath) -> Result<String, ConfigError> {
+        self.get(name)
+    }
+
+    /// Looks up integer value by `name`.
+    pub fn get_int(&self, name: impl ToConfigNamePath) -> Result<i64, ConfigError> {
+        self.get(name)
+    }
+
+    /// Looks up boolean value by `name`.
+    pub fn get_bool(&self, name: impl ToConfigNamePath) -> Result<bool, ConfigError> {
+        self.get(name)
+    }
+
+    /// Looks up generic value by `name`.
+    pub fn get_value(&self, name: impl ToConfigNamePath) -> Result<ConfigValue, ConfigError> {
+        self.config.get_value(name)
+    }
+
+    /// Looks up sub table by `name`.
+    pub fn get_table(&self, name: impl ToConfigNamePath) -> Result<ConfigTable, ConfigError> {
+        self.config.get_table(name)
     }
 }
 
@@ -290,14 +327,14 @@ impl JJRng {
 }
 
 pub trait ConfigResultExt<T> {
-    fn optional(self) -> Result<Option<T>, config::ConfigError>;
+    fn optional(self) -> Result<Option<T>, ConfigError>;
 }
 
-impl<T> ConfigResultExt<T> for Result<T, config::ConfigError> {
-    fn optional(self) -> Result<Option<T>, config::ConfigError> {
+impl<T> ConfigResultExt<T> for Result<T, ConfigError> {
+    fn optional(self) -> Result<Option<T>, ConfigError> {
         match self {
             Ok(value) => Ok(Some(value)),
-            Err(config::ConfigError::NotFound(_)) => Ok(None),
+            Err(ConfigError::NotFound(_)) => Ok(None),
             Err(err) => Err(err),
         }
     }

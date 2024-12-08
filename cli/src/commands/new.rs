@@ -16,11 +16,13 @@ use std::collections::HashSet;
 use std::io::Write;
 use std::rc::Rc;
 
+use clap_complete::ArgValueCandidates;
 use itertools::Itertools;
 use jj_lib::backend::CommitId;
 use jj_lib::commit::CommitIteratorExt;
 use jj_lib::repo::ReadonlyRepo;
 use jj_lib::repo::Repo;
+use jj_lib::revset::ResolvedRevsetExpression;
 use jj_lib::revset::RevsetExpression;
 use jj_lib::revset::RevsetIteratorExt;
 use jj_lib::rewrite::merge_commit_trees;
@@ -32,6 +34,7 @@ use crate::cli_util::CommandHelper;
 use crate::cli_util::RevisionArg;
 use crate::command_error::user_error;
 use crate::command_error::CommandError;
+use crate::complete;
 use crate::description_util::join_message_paragraphs;
 use crate::ui::Ui;
 
@@ -49,7 +52,7 @@ use crate::ui::Ui;
 #[derive(clap::Args, Clone, Debug)]
 pub(crate) struct NewArgs {
     /// Parent(s) of the new change
-    #[arg(default_value = "@")]
+    #[arg(default_value = "@", add = ArgValueCandidates::new(complete::all_revisions))]
     pub(crate) revisions: Vec<RevisionArg>,
     /// Ignored (but lets you pass `-d`/`-r` for consistency with other
     /// commands)
@@ -69,7 +72,8 @@ pub(crate) struct NewArgs {
         long,
         short = 'A',
         visible_alias = "after",
-        conflicts_with = "revisions"
+        conflicts_with = "revisions",
+        add = ArgValueCandidates::new(complete::all_revisions),
     )]
     insert_after: Vec<RevisionArg>,
     /// Insert the new change before the given commit(s)
@@ -77,7 +81,8 @@ pub(crate) struct NewArgs {
         long,
         short = 'B',
         visible_alias = "before",
-        conflicts_with = "revisions"
+        conflicts_with = "revisions",
+        add = ArgValueCandidates::new(complete::mutable_revisions),
     )]
     insert_before: Vec<RevisionArg>,
 }
@@ -157,7 +162,7 @@ pub(crate) fn cmd_new(
             .children()
             .minus(&parents_expression.ancestors());
         children_commits = children_expression
-            .evaluate_programmatic(workspace_command.repo().as_ref())?
+            .evaluate(workspace_command.repo().as_ref())?
             .iter()
             .commits(workspace_command.repo().store())
             .try_collect()?;
@@ -234,12 +239,12 @@ pub(crate) fn cmd_new(
 /// parents of the new commit.
 fn ensure_no_commit_loop(
     repo: &ReadonlyRepo,
-    children_expression: &Rc<RevsetExpression>,
-    parents_expression: &Rc<RevsetExpression>,
+    children_expression: &Rc<ResolvedRevsetExpression>,
+    parents_expression: &Rc<ResolvedRevsetExpression>,
 ) -> Result<(), CommandError> {
     if let Some(commit_id) = children_expression
         .dag_range_to(parents_expression)
-        .evaluate_programmatic(repo)?
+        .evaluate(repo)?
         .iter()
         .next()
     {

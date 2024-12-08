@@ -15,6 +15,7 @@
 use std::slice;
 
 use itertools::Itertools as _;
+use jj_lib::config::ConfigError;
 use jj_lib::op_walk;
 use jj_lib::operation::Operation;
 use jj_lib::repo::RepoLoader;
@@ -121,7 +122,7 @@ fn do_op_log(
         );
         let text = match &args.template {
             Some(value) => value.to_owned(),
-            None => settings.config().get_string("templates.op_log")?,
+            None => settings.get_string("templates.op_log")?,
         };
         template = workspace_env
             .parse_template(
@@ -144,7 +145,7 @@ fn do_op_log(
 
     let diff_formats = diff_formats_for_log(settings, &args.diff_format, args.patch)?;
     let maybe_show_op_diff = if args.op_diff || !diff_formats.is_empty() {
-        let template_text = settings.config().get_string("templates.commit_summary")?;
+        let template_text = settings.get_string("templates.commit_summary")?;
         let show = move |ui: &Ui,
                          formatter: &mut dyn Formatter,
                          op: &Operation,
@@ -166,8 +167,15 @@ fn do_op_log(
                 )?
             };
             let path_converter = workspace_env.path_converter();
-            let diff_renderer = (!diff_formats.is_empty())
-                .then(|| DiffRenderer::new(repo.as_ref(), path_converter, diff_formats.clone()));
+            let conflict_marker_style = workspace_env.conflict_marker_style();
+            let diff_renderer = (!diff_formats.is_empty()).then(|| {
+                DiffRenderer::new(
+                    repo.as_ref(),
+                    path_converter,
+                    conflict_marker_style,
+                    diff_formats.clone(),
+                )
+            });
 
             show_op_diff(
                 ui,
@@ -239,14 +247,8 @@ fn do_op_log(
     Ok(())
 }
 
-fn get_node_template(
-    style: GraphStyle,
-    settings: &UserSettings,
-) -> Result<String, config::ConfigError> {
-    let symbol = settings
-        .config()
-        .get_string("templates.op_log_node")
-        .optional()?;
+fn get_node_template(style: GraphStyle, settings: &UserSettings) -> Result<String, ConfigError> {
+    let symbol = settings.get_string("templates.op_log_node").optional()?;
     let default = if style.is_ascii() {
         "builtin_op_log_node_ascii"
     } else {

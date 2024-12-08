@@ -32,10 +32,10 @@ use crate::object_id::PrefixResolution;
 use crate::repo::Repo;
 use crate::revset::DefaultSymbolResolver;
 use crate::revset::RevsetEvaluationError;
-use crate::revset::RevsetExpression;
 use crate::revset::RevsetExtensions;
 use crate::revset::RevsetResolutionError;
 use crate::revset::SymbolResolverExtension;
+use crate::revset::UserRevsetExpression;
 
 #[derive(Debug, Error)]
 pub enum IdPrefixIndexLoadError {
@@ -46,7 +46,7 @@ pub enum IdPrefixIndexLoadError {
 }
 
 struct DisambiguationData {
-    expression: Rc<RevsetExpression>,
+    expression: Rc<UserRevsetExpression>,
     indexes: OnceCell<Indexes>,
 }
 
@@ -64,11 +64,10 @@ impl DisambiguationData {
     ) -> Result<&Indexes, IdPrefixIndexLoadError> {
         self.indexes.get_or_try_init(|| {
             let symbol_resolver = DefaultSymbolResolver::new(repo, extensions);
-            let resolved_expression = self
+            let revset = self
                 .expression
-                .clone()
-                .resolve_user_expression(repo, &symbol_resolver)?;
-            let revset = resolved_expression.evaluate(repo)?;
+                .resolve_user_expression(repo, &symbol_resolver)?
+                .evaluate(repo)?;
 
             let commit_change_ids: Vec<_> = revset.commit_change_ids().try_collect()?;
             let mut commit_index = IdIndex::with_capacity(commit_change_ids.len());
@@ -124,7 +123,7 @@ impl IdPrefixContext {
         }
     }
 
-    pub fn disambiguate_within(mut self, expression: Rc<RevsetExpression>) -> Self {
+    pub fn disambiguate_within(mut self, expression: Rc<UserRevsetExpression>) -> Self {
         self.disambiguation = Some(DisambiguationData {
             expression,
             indexes: OnceCell::new(),

@@ -20,6 +20,9 @@
 
 use std::collections::hash_map;
 use std::collections::HashMap;
+use std::iter;
+use std::ops::Range;
+use std::rc::Rc;
 
 use bstr::BStr;
 use bstr::BString;
@@ -29,8 +32,9 @@ use pollster::FutureExt;
 use crate::backend::BackendError;
 use crate::backend::CommitId;
 use crate::commit::Commit;
-use crate::conflicts::materialize_merge_result;
+use crate::conflicts::materialize_merge_result_to_bytes;
 use crate::conflicts::materialize_tree_value;
+use crate::conflicts::ConflictMarkerStyle;
 use crate::conflicts::MaterializedTreeValue;
 use crate::diff::Diff;
 use crate::diff::DiffHunkKind;
@@ -40,6 +44,7 @@ use crate::graph::GraphEdgeType;
 use crate::merged_tree::MergedTree;
 use crate::repo::Repo;
 use crate::repo_path::RepoPath;
+use crate::revset::ResolvedRevsetExpression;
 use crate::revset::RevsetEvaluationError;
 use crate::revset::RevsetExpression;
 use crate::revset::RevsetFilterPredicate;
@@ -57,9 +62,46 @@ impl FileAnnotation {
     ///
     /// For each line, the `commit_id` points to the originator commit of the
     /// line. The `line` includes newline character.
-    pub fn lines(&self) -> impl Iterator<Item = (&CommitId, &BStr)> {
+    pub fn lines(&self) -> impl Iterator<Item = (Option<&CommitId>, &BStr)> {
         itertools::zip_eq(&self.line_map, self.text.split_inclusive(|b| *b == b'\n'))
-            .map(|(commit_id, line)| (commit_id.as_ref().unwrap(), line.as_ref()))
+            .map(|(commit_id, line)| (commit_id.as_ref(), line.as_ref()))
+    }
+
+    /// Returns iterator over `(commit_id, line_range)`s.
+    ///
+    /// For each line, the `commit_id` points to the originator commit of the
+    /// line. The `line_range` is a slice range in the file `text`. Consecutive
+    /// ranges having the same `commit_id` are not compacted.
+    pub fn line_ranges(&self) -> impl Iterator<Item = (Option<&CommitId>, Range<usize>)> {
+        let ranges = self
+            .text
+            .split_inclusive(|b| *b == b'\n')
+            .scan(0, |total, line| {
+                let start = *total;
+                *total += line.len();
+                Some(start..*total)
+            });
+        itertools::zip_eq(&self.line_map, ranges)
+            .map(|(commit_id, range)| (commit_id.as_ref(), range))
+    }
+
+    /// Returns iterator over compacted `(commit_id, line_range)`s.
+    ///
+    /// Consecutive ranges having the same `commit_id` are merged into one.
+    pub fn compact_line_ranges(&self) -> impl Iterator<Item = (Option<&CommitId>, Range<usize>)> {
+        let mut ranges = self.line_ranges();
+        let mut acc = ranges.next();
+        iter::from_fn(move || {
+            let (acc_commit_id, acc_range) = acc.as_mut()?;
+            for (cur_commit_id, cur_range) in ranges.by_ref() {
+                if *acc_commit_id == cur_commit_id {
+                    acc_range.end = cur_range.end;
+                } else {
+                    return acc.replace((cur_commit_id, cur_range));
+                }
+            }
+            acc.take()
+        })
     }
 
     /// File content at the starting commit.
@@ -82,13 +124,17 @@ struct Source {
 }
 
 impl Source {
+    fn new(text: BString) -> Self {
+        Source {
+            line_map: Vec::new(),
+            text,
+        }
+    }
+
     fn load(commit: &Commit, file_path: &RepoPath) -> Result<Self, BackendError> {
         let tree = commit.tree()?;
         let text = get_file_contents(commit.store(), file_path, &tree)?;
-        Ok(Source {
-            line_map: Vec::new(),
-            text: text.into(),
-        })
+        Ok(Self::new(text))
     }
 
     fn fill_line_map(&mut self) {
@@ -102,16 +148,50 @@ impl Source {
 type OriginalLineMap = Vec<Option<CommitId>>;
 
 /// Get line by line annotations for a specific file path in the repo.
+///
+/// The `domain` expression narrows the range of ancestors to search. It will be
+/// intersected as `domain & ::starting_commit & files(file_path)`. The
+/// `starting_commit` is assumed to be included in the `domain`.
+///
 /// If the file is not found, returns empty results.
 pub fn get_annotation_for_file(
     repo: &dyn Repo,
     starting_commit: &Commit,
+    domain: &Rc<ResolvedRevsetExpression>,
     file_path: &RepoPath,
 ) -> Result<FileAnnotation, RevsetEvaluationError> {
-    let mut source = Source::load(starting_commit, file_path)?;
+    let source = Source::load(starting_commit, file_path)?;
+    compute_file_annotation(repo, starting_commit.id(), domain, file_path, source)
+}
+
+/// Get line by line annotations for a specific file path starting with the
+/// given content.
+///
+/// The file content at the `starting_commit` is set to `starting_text`. This is
+/// typically one of the file contents in the conflict or merged-parent tree.
+///
+/// See [`get_annotation_for_file()`] for the other arguments.
+pub fn get_annotation_with_file_content(
+    repo: &dyn Repo,
+    starting_commit_id: &CommitId,
+    domain: &Rc<ResolvedRevsetExpression>,
+    file_path: &RepoPath,
+    starting_text: impl Into<Vec<u8>>,
+) -> Result<FileAnnotation, RevsetEvaluationError> {
+    let source = Source::new(BString::new(starting_text.into()));
+    compute_file_annotation(repo, starting_commit_id, domain, file_path, source)
+}
+
+fn compute_file_annotation(
+    repo: &dyn Repo,
+    starting_commit_id: &CommitId,
+    domain: &Rc<ResolvedRevsetExpression>,
+    file_path: &RepoPath,
+    mut source: Source,
+) -> Result<FileAnnotation, RevsetEvaluationError> {
     source.fill_line_map();
     let text = source.text.clone();
-    let line_map = process_commits(repo, starting_commit.id(), source, file_path)?;
+    let line_map = process_commits(repo, starting_commit_id, source, domain, file_path)?;
     Ok(FileAnnotation { line_map, text })
 }
 
@@ -122,17 +202,19 @@ fn process_commits(
     repo: &dyn Repo,
     starting_commit_id: &CommitId,
     starting_source: Source,
+    domain: &Rc<ResolvedRevsetExpression>,
     file_name: &RepoPath,
 ) -> Result<OriginalLineMap, RevsetEvaluationError> {
     let predicate = RevsetFilterPredicate::File(FilesetExpression::file_path(file_name.to_owned()));
+    // TODO: If the domain isn't a contiguous range, changes masked out by it
+    // might not be caught by the closest ancestor revision. For example,
+    // domain=merges() would pick up almost nothing because merge revisions
+    // are usually empty. Perhaps, we want to query `files(file_path,
+    // within_sub_graph=domain)`, not `domain & files(file_path)`.
+    let ancestors = RevsetExpression::commit(starting_commit_id.clone()).ancestors();
     let revset = RevsetExpression::commit(starting_commit_id.clone())
-        .union(
-            &RevsetExpression::commit(starting_commit_id.clone())
-                .ancestors()
-                .filtered(predicate),
-        )
-        .evaluate_programmatic(repo)
-        .map_err(|e| e.expect_backend_error())?;
+        .union(&domain.intersection(&ancestors).filtered(predicate))
+        .evaluate(repo)?;
 
     let mut original_line_map = vec![None; starting_source.line_map.len()];
     let mut commit_source_map = HashMap::from([(starting_commit_id.clone(), starting_source)]);
@@ -171,9 +253,6 @@ fn process_commit(
     };
 
     for parent_edge in edges {
-        if parent_edge.edge_type == GraphEdgeType::Missing {
-            continue;
-        }
         let parent_commit_id = &parent_edge.target;
         let parent_source = match commit_source_map.entry(parent_commit_id.clone()) {
             hash_map::Entry::Occupied(entry) => entry.into_mut(),
@@ -215,7 +294,10 @@ fn process_commit(
         } else {
             itertools::merge(parent_source.line_map.iter().copied(), new_parent_line_map).collect()
         };
-        if parent_source.line_map.is_empty() {
+        // If an omitted parent had the file, leave these lines unresolved.
+        // TODO: These unresolved lines could be copied to the original_line_map
+        // as Err(commit_id) or something instead of None.
+        if parent_source.line_map.is_empty() || parent_edge.edge_type == GraphEdgeType::Missing {
             commit_source_map.remove(parent_commit_id);
         }
     }
@@ -262,7 +344,7 @@ fn get_file_contents(
     store: &Store,
     path: &RepoPath,
     tree: &MergedTree,
-) -> Result<Vec<u8>, BackendError> {
+) -> Result<BString, BackendError> {
     let file_value = tree.path_value(path)?;
     let effective_file_value = materialize_tree_value(store, path, file_value).block_on()?;
     match effective_file_value {
@@ -275,19 +357,94 @@ fn get_file_contents(
                     id,
                     source: Box::new(e),
                 })?;
-            Ok(file_contents)
+            Ok(file_contents.into())
         }
-        MaterializedTreeValue::FileConflict { id, contents, .. } => {
-            let mut materialized_conflict_buffer = Vec::new();
-            materialize_merge_result(&contents, &mut materialized_conflict_buffer).map_err(
-                |io_err| BackendError::ReadFile {
-                    path: path.to_owned(),
-                    source: Box::new(io_err),
-                    id: id.first().clone().unwrap(),
-                },
-            )?;
-            Ok(materialized_conflict_buffer)
-        }
-        _ => Ok(Vec::new()),
+        MaterializedTreeValue::FileConflict { contents, .. } => Ok(
+            materialize_merge_result_to_bytes(&contents, ConflictMarkerStyle::default()),
+        ),
+        _ => Ok(BString::default()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_lines_iterator_empty() {
+        let annotation = FileAnnotation {
+            line_map: vec![],
+            text: "".into(),
+        };
+        assert_eq!(annotation.lines().collect_vec(), vec![]);
+        assert_eq!(annotation.line_ranges().collect_vec(), vec![]);
+        assert_eq!(annotation.compact_line_ranges().collect_vec(), vec![]);
+    }
+
+    #[test]
+    fn test_lines_iterator_with_content() {
+        let commit_id1 = CommitId::from_hex("111111");
+        let commit_id2 = CommitId::from_hex("222222");
+        let commit_id3 = CommitId::from_hex("333333");
+        let annotation = FileAnnotation {
+            line_map: vec![
+                Some(commit_id1.clone()),
+                Some(commit_id2.clone()),
+                Some(commit_id3.clone()),
+            ],
+            text: "foo\n\nbar\n".into(),
+        };
+        assert_eq!(
+            annotation.lines().collect_vec(),
+            vec![
+                (Some(&commit_id1), "foo\n".as_ref()),
+                (Some(&commit_id2), "\n".as_ref()),
+                (Some(&commit_id3), "bar\n".as_ref()),
+            ]
+        );
+        assert_eq!(
+            annotation.line_ranges().collect_vec(),
+            vec![
+                (Some(&commit_id1), 0..4),
+                (Some(&commit_id2), 4..5),
+                (Some(&commit_id3), 5..9),
+            ]
+        );
+        assert_eq!(
+            annotation.compact_line_ranges().collect_vec(),
+            vec![
+                (Some(&commit_id1), 0..4),
+                (Some(&commit_id2), 4..5),
+                (Some(&commit_id3), 5..9),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_lines_iterator_compaction() {
+        let commit_id1 = CommitId::from_hex("111111");
+        let commit_id2 = CommitId::from_hex("222222");
+        let commit_id3 = CommitId::from_hex("333333");
+        let annotation = FileAnnotation {
+            line_map: vec![
+                Some(commit_id1.clone()),
+                Some(commit_id1.clone()),
+                Some(commit_id2.clone()),
+                Some(commit_id1.clone()),
+                Some(commit_id3.clone()),
+                Some(commit_id3.clone()),
+                Some(commit_id3.clone()),
+            ],
+            text: "\n".repeat(7).into(),
+        };
+        assert_eq!(
+            annotation.compact_line_ranges().collect_vec(),
+            vec![
+                (Some(&commit_id1), 0..2),
+                (Some(&commit_id2), 2..3),
+                (Some(&commit_id1), 3..4),
+                (Some(&commit_id3), 4..7),
+            ]
+        );
     }
 }

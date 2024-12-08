@@ -12,15 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use clap_complete::ArgValueCandidates;
+use jj_lib::config::ConfigNamePathBuf;
+use jj_lib::config::ConfigSource;
 use tracing::instrument;
 
 use super::ConfigLevelArgs;
 use crate::cli_util::CommandHelper;
 use crate::command_error::CommandError;
+use crate::complete;
+use crate::config::resolved_config_values;
 use crate::config::to_toml_value;
 use crate::config::AnnotatedValue;
-use crate::config::ConfigNamePathBuf;
-use crate::config::ConfigSource;
 use crate::generic_templater::GenericTemplateLanguage;
 use crate::template_builder::TemplateLanguage as _;
 use crate::templater::TemplatePropertyExt as _;
@@ -31,6 +34,7 @@ use crate::ui::Ui;
 #[command(mut_group("config_level", |g| g.required(false)))]
 pub struct ConfigListArgs {
     /// An optional name of a specific config option to look up.
+    #[arg(add = ArgValueCandidates::new(complete::config_keys))]
     pub name: Option<ConfigNamePathBuf>,
     /// Whether to explicitly include built-in default values in the list.
     #[arg(long, conflicts_with = "config_level")]
@@ -40,7 +44,7 @@ pub struct ConfigListArgs {
     pub include_overridden: bool,
     #[command(flatten)]
     pub level: ConfigLevelArgs,
-    // TODO(#1047): Support --show-origin using LayeredConfigs.
+    // TODO(#1047): Support --show-origin using StackedConfig.
     /// Render each variable using the given template
     ///
     /// The following keywords are defined:
@@ -64,10 +68,7 @@ pub fn cmd_config_list(
         let language = config_template_language();
         let text = match &args.template {
             Some(value) => value.to_owned(),
-            None => command
-                .settings()
-                .config()
-                .get_string("templates.config_list")?,
+            None => command.settings().get_string("templates.config_list")?,
         };
         command
             .parse_template(ui, &language, &text, GenericTemplateLanguage::wrap_self)?
@@ -78,7 +79,7 @@ pub fn cmd_config_list(
     let mut formatter = ui.stdout_formatter();
     let name_path = args.name.clone().unwrap_or_else(ConfigNamePathBuf::root);
     let mut wrote_values = false;
-    for annotated in command.resolved_config_values(&name_path)? {
+    for annotated in resolved_config_values(command.settings().config(), &name_path) {
         // Remove overridden values.
         if annotated.is_overridden && !args.include_overridden {
             continue;
@@ -115,9 +116,8 @@ pub fn cmd_config_list(
 fn config_template_language() -> GenericTemplateLanguage<'static, AnnotatedValue> {
     type L = GenericTemplateLanguage<'static, AnnotatedValue>;
     let mut language = L::new();
-    // "name" instead of "path" to avoid confusion with the source file path
     language.add_keyword("name", |self_property| {
-        let out_property = self_property.map(|annotated| annotated.path.to_string());
+        let out_property = self_property.map(|annotated| annotated.name.to_string());
         Ok(L::wrap_string(out_property))
     });
     language.add_keyword("value", |self_property| {

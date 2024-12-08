@@ -31,6 +31,8 @@ The following operators are supported.
 * `x.f()`: Method call.
 * `-x`: Negate integer value.
 * `!x`: Logical not.
+* `x == y`, `x != y`: Logical equal/not equal. Operands must be either
+  `Boolean`, `Integer`, or `String`.
 * `x && y`: Logical and, short-circuiting.
 * `x || y`: Logical or, short-circuiting.
 * `x ++ y`: Concatenate `x` and `y` templates.
@@ -59,7 +61,7 @@ The following functions are defined.
   the content. The `label` is evaluated as a space-separated string.
 * `raw_escape_sequence(content: Template) -> Template`: Preserves any escape
   sequences in `content` (i.e., bypasses sanitization) and strips labels.
-  Note: This function is intended for escape sequences and as such, it's output
+  Note: This function is intended for escape sequences and as such, its output
   is expected to be invisible / of no display width. Outputting content with
   nonzero display width may break wrapping, indentation etc.
 * `if(condition: Boolean, then: Template[, else: Template]) -> Template`:

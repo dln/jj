@@ -20,12 +20,14 @@ use std::fmt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
-use std::slice;
-use std::str::FromStr;
 
-use config::Source;
 use itertools::Itertools;
-use jj_lib::settings::ConfigResultExt as _;
+use jj_lib::config::ConfigError;
+use jj_lib::config::ConfigLayer;
+use jj_lib::config::ConfigNamePathBuf;
+use jj_lib::config::ConfigSource;
+use jj_lib::config::ConfigValue;
+use jj_lib::config::StackedConfig;
 use regex::Captures;
 use regex::Regex;
 use thiserror::Error;
@@ -34,6 +36,9 @@ use tracing::instrument;
 use crate::command_error::user_error;
 use crate::command_error::user_error_with_message;
 use crate::command_error::CommandError;
+
+// TODO(#879): Consider generating entire schema dynamically vs. static file.
+pub const CONFIG_SCHEMA: &str = include_str!("config-schema.json");
 
 /// Parses a TOML value expression. Interprets the given value as string if it
 /// can't be parsed.
@@ -46,9 +51,9 @@ pub fn parse_toml_value_or_bare_string(value_str: &str) -> toml_edit::Value {
     }
 }
 
-pub fn to_toml_value(value: &config::Value) -> Result<toml_edit::Value, config::ConfigError> {
-    fn type_error<T: fmt::Display>(message: T) -> config::ConfigError {
-        config::ConfigError::Message(message.to_string())
+pub fn to_toml_value(value: &ConfigValue) -> Result<toml_edit::Value, ConfigError> {
+    fn type_error<T: fmt::Display>(message: T) -> ConfigError {
+        ConfigError::Message(message.to_string())
     }
     // It's unlikely that the config object contained unsupported values, but
     // there's no guarantee. For example, values coming from environment
@@ -73,276 +78,79 @@ pub fn to_toml_value(value: &config::Value) -> Result<toml_edit::Value, config::
 }
 
 #[derive(Error, Debug)]
-pub enum ConfigError {
+pub enum ConfigEnvError {
     #[error(transparent)]
-    ConfigReadError(#[from] config::ConfigError),
+    ConfigReadError(#[from] ConfigError),
     #[error("Both {0} and {1} exist. Please consolidate your configs in one of them.")]
     AmbiguousSource(PathBuf, PathBuf),
     #[error(transparent)]
     ConfigCreateError(#[from] std::io::Error),
 }
 
-/// Dotted config name path.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct ConfigNamePathBuf(Vec<toml_edit::Key>);
-
-impl ConfigNamePathBuf {
-    /// Creates an empty path pointing to the root table.
-    ///
-    /// This isn't a valid TOML key expression, but provided for convenience.
-    pub fn root() -> Self {
-        ConfigNamePathBuf(vec![])
-    }
-
-    /// Returns true if the path is empty (i.e. pointing to the root table.)
-    pub fn is_root(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    /// Returns iterator of path components (or keys.)
-    pub fn components(&self) -> slice::Iter<'_, toml_edit::Key> {
-        self.0.iter()
-    }
-
-    /// Appends the given `key` component.
-    pub fn push(&mut self, key: impl Into<toml_edit::Key>) {
-        self.0.push(key.into());
-    }
-
-    /// Looks up value in the given `config`.
-    ///
-    /// This is a workaround for the `config.get()` API, which doesn't support
-    /// literal path expression. If we implement our own config abstraction,
-    /// this method should be moved there.
-    pub fn lookup_value(
-        &self,
-        config: &config::Config,
-    ) -> Result<config::Value, config::ConfigError> {
-        // Use config.get() if the TOML keys can be converted to config path
-        // syntax. This should be cheaper than cloning the whole config map.
-        let (key_prefix, components) = self.split_safe_prefix();
-        let value: config::Value = match &key_prefix {
-            Some(key) => config.get(key)?,
-            None => config.collect()?.into(),
-        };
-        components
-            .iter()
-            .try_fold(value, |value, key| {
-                let mut table = value.into_table().ok()?;
-                table.remove(key.get())
-            })
-            .ok_or_else(|| config::ConfigError::NotFound(self.to_string()))
-    }
-
-    /// Splits path to dotted literal expression and remainder.
-    ///
-    /// The literal expression part doesn't contain meta characters other than
-    /// ".", therefore it can be passed in to `config.get()`.
-    /// https://github.com/mehcode/config-rs/issues/110
-    fn split_safe_prefix(&self) -> (Option<Cow<'_, str>>, &[toml_edit::Key]) {
-        // https://github.com/mehcode/config-rs/blob/v0.13.4/src/path/parser.rs#L15
-        let is_ident = |key: &str| {
-            key.chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-        };
-        let pos = self.0.iter().take_while(|&k| is_ident(k)).count();
-        let safe_key = match pos {
-            0 => None,
-            1 => Some(Cow::Borrowed(self.0[0].get())),
-            _ => Some(Cow::Owned(self.0[..pos].iter().join("."))),
-        };
-        (safe_key, &self.0[pos..])
-    }
-}
-
-impl<K: Into<toml_edit::Key>> FromIterator<K> for ConfigNamePathBuf {
-    fn from_iter<I: IntoIterator<Item = K>>(iter: I) -> Self {
-        let keys = iter.into_iter().map(|k| k.into()).collect();
-        ConfigNamePathBuf(keys)
-    }
-}
-
-impl FromStr for ConfigNamePathBuf {
-    type Err = toml_edit::TomlError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        // TOML parser ensures that the returned vec is not empty.
-        toml_edit::Key::parse(s).map(ConfigNamePathBuf)
-    }
-}
-
-impl AsRef<[toml_edit::Key]> for ConfigNamePathBuf {
-    fn as_ref(&self) -> &[toml_edit::Key] {
-        &self.0
-    }
-}
-
-impl fmt::Display for ConfigNamePathBuf {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut components = self.0.iter().fuse();
-        if let Some(key) = components.next() {
-            write!(f, "{key}")?;
-        }
-        components.try_for_each(|key| write!(f, ".{key}"))
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ConfigSource {
-    Default,
-    Env,
-    // TODO: Track explicit file paths, especially for when user config is a dir.
-    User,
-    Repo,
-    CommandArg,
-}
-
+/// Configuration variable with its source information.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AnnotatedValue {
-    pub path: ConfigNamePathBuf,
-    pub value: config::Value,
+    /// Dotted name path to the configuration variable.
+    pub name: ConfigNamePathBuf,
+    /// Configuration value.
+    pub value: ConfigValue,
+    /// Source of the configuration value.
     pub source: ConfigSource,
+    // TODO: add source file path
+    /// True if this value is overridden in higher precedence layers.
     pub is_overridden: bool,
 }
 
-/// Set of configs which can be merged as needed.
-///
-/// Sources from the lowest precedence:
-/// 1. Default
-/// 2. Base environment variables
-/// 3. [User config](https://martinvonz.github.io/jj/latest/config/)
-/// 4. Repo config `.jj/repo/config.toml`
-/// 5. TODO: Workspace config `.jj/config.toml`
-/// 6. Override environment variables
-/// 7. Command-line arguments `--config-toml`
-#[derive(Clone, Debug)]
-pub struct LayeredConfigs {
-    default: config::Config,
-    env_base: config::Config,
-    user: Option<config::Config>,
-    repo: Option<config::Config>,
-    env_overrides: config::Config,
-    arg_overrides: Option<config::Config>,
-}
-
-impl LayeredConfigs {
-    /// Initializes configs with infallible sources.
-    pub fn from_environment(default: config::Config) -> Self {
-        LayeredConfigs {
-            default,
-            env_base: env_base(),
-            user: None,
-            repo: None,
-            env_overrides: env_overrides(),
-            arg_overrides: None,
-        }
-    }
-
-    #[instrument]
-    pub fn read_user_config(&mut self) -> Result<(), ConfigError> {
-        self.user = existing_config_path()?
-            .map(|path| read_config_path(&path))
-            .transpose()?;
-        Ok(())
-    }
-
-    pub fn user_config_path(&self) -> Result<Option<PathBuf>, ConfigError> {
-        existing_config_path()
-    }
-
-    #[instrument]
-    pub fn read_repo_config(&mut self, repo_path: &Path) -> Result<(), ConfigError> {
-        self.repo = Some(read_config_file(&self.repo_config_path(repo_path))?);
-        Ok(())
-    }
-
-    pub fn repo_config_path(&self, repo_path: &Path) -> PathBuf {
-        repo_path.join("config.toml")
-    }
-
-    pub fn parse_config_args(&mut self, toml_strs: &[String]) -> Result<(), ConfigError> {
-        let config = toml_strs
-            .iter()
-            .fold(config::Config::builder(), |builder, s| {
-                builder.add_source(config::File::from_str(s, config::FileFormat::Toml))
-            })
-            .build()?;
-        self.arg_overrides = Some(config);
-        Ok(())
-    }
-
-    /// Creates new merged config.
-    pub fn merge(&self) -> config::Config {
-        self.sources()
-            .into_iter()
-            .map(|(_, config)| config)
-            .fold(config::Config::builder(), |builder, source| {
-                builder.add_source(source.clone())
-            })
-            .build()
-            .expect("loaded configs should be merged without error")
-    }
-
-    pub fn sources(&self) -> Vec<(ConfigSource, &config::Config)> {
-        let config_sources = [
-            (ConfigSource::Default, Some(&self.default)),
-            (ConfigSource::Env, Some(&self.env_base)),
-            (ConfigSource::User, self.user.as_ref()),
-            (ConfigSource::Repo, self.repo.as_ref()),
-            (ConfigSource::Env, Some(&self.env_overrides)),
-            (ConfigSource::CommandArg, self.arg_overrides.as_ref()),
-        ];
-        config_sources
-            .into_iter()
-            .filter_map(|(source, config)| config.map(|c| (source, c)))
-            .collect_vec()
-    }
-
-    pub fn resolved_config_values(
-        &self,
-        filter_prefix: &ConfigNamePathBuf,
-    ) -> Result<Vec<AnnotatedValue>, ConfigError> {
-        // Collect annotated values from each config.
-        let mut config_vals = vec![];
-        for (source, config) in self.sources() {
-            let Some(top_value) = filter_prefix.lookup_value(config).optional()? else {
-                continue;
-            };
-            let mut config_stack = vec![(filter_prefix.clone(), &top_value)];
-            while let Some((path, value)) = config_stack.pop() {
-                match &value.kind {
-                    config::ValueKind::Table(table) => {
-                        // TODO: Remove sorting when config crate maintains deterministic ordering.
-                        for (k, v) in table.iter().sorted_by_key(|(k, _)| *k).rev() {
-                            let mut key_path = path.clone();
-                            key_path.push(k);
-                            config_stack.push((key_path, v));
-                        }
+/// Collects values under the given `filter_prefix` name recursively, from all
+/// layers.
+pub fn resolved_config_values(
+    stacked_config: &StackedConfig,
+    filter_prefix: &ConfigNamePathBuf,
+) -> Vec<AnnotatedValue> {
+    // Collect annotated values from each config.
+    let mut config_vals = vec![];
+    for layer in stacked_config.layers() {
+        // TODO: Err(item) means all descendant paths are overridden by the
+        // current layer. For example, the default ui.pager.<field> should be
+        // marked as overridden if user had ui.pager = [...] set.
+        let Ok(Some(top_item)) = layer.look_up_item(filter_prefix) else {
+            continue;
+        };
+        let mut config_stack = vec![(filter_prefix.clone(), top_item)];
+        while let Some((name, item)) = config_stack.pop() {
+            match &item.kind {
+                config::ValueKind::Table(table) => {
+                    // TODO: Remove sorting when config crate maintains deterministic ordering.
+                    for (k, v) in table.iter().sorted_by_key(|(k, _)| *k).rev() {
+                        let mut sub_name = name.clone();
+                        sub_name.push(k);
+                        config_stack.push((sub_name, v));
                     }
-                    _ => {
-                        config_vals.push(AnnotatedValue {
-                            path,
-                            value: value.to_owned(),
-                            source: source.clone(),
-                            // Note: Value updated below.
-                            is_overridden: false,
-                        });
-                    }
+                }
+                _ => {
+                    config_vals.push(AnnotatedValue {
+                        name,
+                        value: item.to_owned(),
+                        source: layer.source,
+                        // Note: Value updated below.
+                        is_overridden: false,
+                    });
                 }
             }
         }
-
-        // Walk through config values in reverse order and mark each overridden value as
-        // overridden.
-        let mut keys_found = HashSet::new();
-        for val in config_vals.iter_mut().rev() {
-            val.is_overridden = !keys_found.insert(&val.path);
-        }
-
-        Ok(config_vals)
     }
+
+    // Walk through config values in reverse order and mark each overridden value as
+    // overridden.
+    let mut names_found = HashSet::new();
+    for val in config_vals.iter_mut().rev() {
+        val.is_overridden = !names_found.insert(&val.name);
+    }
+
+    config_vals
 }
 
+#[derive(Clone, Debug)]
 enum ConfigPath {
     /// Existing config file path.
     Existing(PathBuf),
@@ -390,22 +198,14 @@ fn create_config_file(path: &Path) -> std::io::Result<std::fs::File> {
 
 // The struct exists so that we can mock certain global values in unit tests.
 #[derive(Clone, Default, Debug)]
-struct ConfigEnv {
+struct UnresolvedConfigEnv {
     config_dir: Option<PathBuf>,
     home_dir: Option<PathBuf>,
     jj_config: Option<String>,
 }
 
-impl ConfigEnv {
-    fn new() -> Self {
-        ConfigEnv {
-            config_dir: dirs::config_dir(),
-            home_dir: dirs::home_dir(),
-            jj_config: env::var("JJ_CONFIG").ok(),
-        }
-    }
-
-    fn config_path(self) -> Result<ConfigPath, ConfigError> {
+impl UnresolvedConfigEnv {
+    fn resolve(self) -> Result<ConfigPath, ConfigEnvError> {
         if let Some(path) = self.jj_config {
             // TODO: We should probably support colon-separated (std::env::split_paths)
             return Ok(ConfigPath::new(Some(PathBuf::from(path))));
@@ -424,44 +224,136 @@ impl ConfigEnv {
         use ConfigPath::*;
         match (platform_config_path, home_config_path) {
             (Existing(platform_config_path), Existing(home_config_path)) => Err(
-                ConfigError::AmbiguousSource(platform_config_path, home_config_path),
+                ConfigEnvError::AmbiguousSource(platform_config_path, home_config_path),
             ),
             (Existing(path), _) | (_, Existing(path)) => Ok(Existing(path)),
             (New(path), _) | (_, New(path)) => Ok(New(path)),
             (Unavailable, Unavailable) => Ok(Unavailable),
         }
     }
+}
 
-    fn existing_config_path(self) -> Result<Option<PathBuf>, ConfigError> {
-        match self.config_path()? {
-            ConfigPath::Existing(path) => Ok(Some(path)),
-            _ => Ok(None),
+#[derive(Clone, Debug)]
+pub struct ConfigEnv {
+    user_config_path: ConfigPath,
+    repo_config_path: ConfigPath,
+}
+
+impl ConfigEnv {
+    /// Initializes configuration loader based on environment variables.
+    pub fn from_environment() -> Result<Self, ConfigEnvError> {
+        let env = UnresolvedConfigEnv {
+            config_dir: dirs::config_dir(),
+            home_dir: dirs::home_dir(),
+            jj_config: env::var("JJ_CONFIG").ok(),
+        };
+        Ok(ConfigEnv {
+            user_config_path: env.resolve()?,
+            repo_config_path: ConfigPath::Unavailable,
+        })
+    }
+
+    /// Returns a path to the existing user-specific config file or directory.
+    pub fn existing_user_config_path(&self) -> Option<&Path> {
+        match &self.user_config_path {
+            ConfigPath::Existing(path) => Some(path),
+            _ => None,
         }
     }
 
-    fn new_config_path(self) -> Result<Option<PathBuf>, ConfigError> {
-        match self.config_path()? {
+    /// Returns a path to the user-specific config file.
+    ///
+    /// If no config file is found, tries to guess a reasonable new location for
+    /// it. If a path to a new config file is returned, the parent directory may
+    /// be created as a result of this call.
+    pub fn new_user_config_path(&self) -> Result<Option<&Path>, ConfigEnvError> {
+        match &self.user_config_path {
             ConfigPath::Existing(path) => Ok(Some(path)),
             ConfigPath::New(path) => {
-                create_config_file(&path)?;
+                // TODO: Maybe we shouldn't create new file here. Not all
+                // callers need an empty file. For example, "jj config path"
+                // should be a readonly operation. "jj config set" doesn't have
+                // to create an empty file to be overwritten. Since it's unclear
+                // who and when to update ConfigPath::New(_) to ::Existing(_),
+                // it's probably better to not cache the path existence.
+                create_config_file(path)?;
                 Ok(Some(path))
             }
             ConfigPath::Unavailable => Ok(None),
         }
     }
+
+    /// Loads user-specific config files into the given `config`. The old
+    /// user-config layers will be replaced if any.
+    #[instrument]
+    pub fn reload_user_config(&self, config: &mut StackedConfig) -> Result<(), ConfigError> {
+        config.remove_layers(ConfigSource::User);
+        if let Some(path) = self.existing_user_config_path() {
+            if path.is_dir() {
+                config.load_dir(ConfigSource::User, path)?;
+            } else {
+                config.load_file(ConfigSource::User, path)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Sets the directory where repo-specific config file is stored. The path
+    /// is usually `.jj/repo`.
+    pub fn reset_repo_path(&mut self, path: &Path) {
+        self.repo_config_path = ConfigPath::new(Some(path.join("config.toml")));
+    }
+
+    /// Returns a path to the existing repo-specific config file.
+    pub fn existing_repo_config_path(&self) -> Option<&Path> {
+        match &self.repo_config_path {
+            ConfigPath::Existing(path) => Some(path),
+            _ => None,
+        }
+    }
+
+    /// Returns a path to the repo-specific config file.
+    pub fn new_repo_config_path(&self) -> Option<&Path> {
+        match &self.repo_config_path {
+            ConfigPath::Existing(path) => Some(path),
+            ConfigPath::New(path) => Some(path),
+            ConfigPath::Unavailable => None,
+        }
+    }
+
+    /// Loads repo-specific config file into the given `config`. The old
+    /// repo-config layer will be replaced if any.
+    #[instrument]
+    pub fn reload_repo_config(&self, config: &mut StackedConfig) -> Result<(), ConfigError> {
+        config.remove_layers(ConfigSource::Repo);
+        if let Some(path) = self.existing_repo_config_path() {
+            config.load_file(ConfigSource::Repo, path)?;
+        }
+        Ok(())
+    }
 }
 
-pub fn existing_config_path() -> Result<Option<PathBuf>, ConfigError> {
-    ConfigEnv::new().existing_config_path()
-}
-
-/// Returns a path to the user-specific config file.
+/// Initializes stacked config with the given `default` and infallible sources.
 ///
-/// If no config file is found, tries to guess a reasonable new
-/// location for it. If a path to a new config file is returned, the
-/// parent directory may be created as a result of this call.
-pub fn new_config_path() -> Result<Option<PathBuf>, ConfigError> {
-    ConfigEnv::new().new_config_path()
+/// Sources from the lowest precedence:
+/// 1. Default
+/// 2. Base environment variables
+/// 3. [User config](https://martinvonz.github.io/jj/latest/config/)
+/// 4. Repo config `.jj/repo/config.toml`
+/// 5. TODO: Workspace config `.jj/config.toml`
+/// 6. Override environment variables
+/// 7. Command-line arguments `--config-toml`
+///
+/// This function sets up 1, 2, and 6.
+pub fn config_from_environment(default: config::Config) -> StackedConfig {
+    let mut config = StackedConfig::empty();
+    config.add_layer(ConfigLayer::with_data(ConfigSource::Default, default));
+    config.add_layer(ConfigLayer::with_data(ConfigSource::EnvBase, env_base()));
+    config.add_layer(ConfigLayer::with_data(
+        ConfigSource::EnvOverrides,
+        env_overrides(),
+    ));
+    config
 }
 
 /// Environment variables that should be overridden by config values
@@ -521,7 +413,7 @@ fn env_overrides() -> config::Config {
             .set_override("debug.commit-timestamp", value)
             .unwrap();
     }
-    if let Ok(value) = env::var("JJ_RANDOMNESS_SEED") {
+    if let Ok(Ok(value)) = env::var("JJ_RANDOMNESS_SEED").map(|s| s.parse::<i64>()) {
         builder = builder
             .set_override("debug.randomness-seed", value)
             .unwrap();
@@ -543,47 +435,18 @@ fn env_overrides() -> config::Config {
     builder.build().unwrap()
 }
 
-fn read_config_file(path: &Path) -> Result<config::Config, config::ConfigError> {
-    config::Config::builder()
-        .add_source(
-            config::File::from(path)
-                .required(false)
-                .format(config::FileFormat::Toml),
-        )
-        .build()
-}
-
-fn read_config_path(config_path: &Path) -> Result<config::Config, config::ConfigError> {
-    let mut files = vec![];
-    if config_path.is_dir() {
-        if let Ok(read_dir) = config_path.read_dir() {
-            // TODO: Walk the directory recursively?
-            for dir_entry in read_dir.flatten() {
-                let path = dir_entry.path();
-                if path.is_file() {
-                    files.push(path);
-                }
-            }
-        }
-        files.sort();
-    } else {
-        files.push(config_path.to_owned());
-    }
-
-    files
+/// Parses `--config-toml` arguments.
+pub fn parse_config_args(toml_strs: &[String]) -> Result<ConfigLayer, ConfigError> {
+    let config = toml_strs
         .iter()
-        .fold(config::Config::builder(), |builder, path| {
-            // TODO: Accept other formats and/or accept only certain file extensions?
-            builder.add_source(
-                config::File::from(path.as_ref())
-                    .required(false)
-                    .format(config::FileFormat::Toml),
-            )
+        .fold(config::Config::builder(), |builder, s| {
+            builder.add_source(config::File::from_str(s, config::FileFormat::Toml))
         })
-        .build()
+        .build()?;
+    Ok(ConfigLayer::with_data(ConfigSource::CommandArg, config))
 }
 
-fn read_config(path: &Path) -> Result<toml_edit::Document, CommandError> {
+fn read_config(path: &Path) -> Result<toml_edit::ImDocument<String>, CommandError> {
     let config_toml = std::fs::read_to_string(path).or_else(|err| {
         match err.kind() {
             // If config doesn't exist yet, read as empty and we'll write one.
@@ -602,7 +465,7 @@ fn read_config(path: &Path) -> Result<toml_edit::Document, CommandError> {
     })
 }
 
-fn write_config(path: &Path, doc: &toml_edit::Document) -> Result<(), CommandError> {
+fn write_config(path: &Path, doc: &toml_edit::DocumentMut) -> Result<(), CommandError> {
     std::fs::write(path, doc.to_string()).map_err(|err| {
         user_error_with_message(
             format!("Failed to write file {path}", path = path.display()),
@@ -616,7 +479,7 @@ pub fn write_config_value_to_file(
     value: toml_edit::Value,
     path: &Path,
 ) -> Result<(), CommandError> {
-    let mut doc = read_config(path)?;
+    let mut doc = read_config(path)?.into_mut();
 
     // Apply config value
     let mut target_table = doc.as_table_mut();
@@ -652,7 +515,7 @@ pub fn remove_config_value_from_file(
     key: &ConfigNamePathBuf,
     path: &Path,
 ) -> Result<(), CommandError> {
-    let mut doc = read_config(path)?;
+    let mut doc = read_config(path)?.into_mut();
 
     // Find target table
     let mut key_iter = key.components();
@@ -660,18 +523,26 @@ pub fn remove_config_value_from_file(
     let target_table = key_iter.try_fold(doc.as_table_mut(), |table, key| {
         table
             .get_mut(key)
-            .ok_or_else(|| config::ConfigError::NotFound(key.to_string()))
+            .ok_or_else(|| ConfigError::NotFound(key.to_string()))
             .and_then(|table| {
-                table.as_table_mut().ok_or_else(|| {
-                    config::ConfigError::Message(format!(r#""{key}" is not a table"#))
-                })
+                table
+                    .as_table_mut()
+                    .ok_or_else(|| ConfigError::Message(format!(r#""{key}" is not a table"#)))
             })
     })?;
 
     // Remove config value
-    target_table
-        .remove(last_key)
-        .ok_or_else(|| config::ConfigError::NotFound(key.to_string()))?;
+    match target_table.entry(last_key) {
+        toml_edit::Entry::Occupied(entry) => {
+            if entry.get().is_table() {
+                return Err(user_error(format!("Won't remove table {key}")));
+            }
+            entry.remove();
+        }
+        toml_edit::Entry::Vacant(_) => {
+            return Err(ConfigError::NotFound(key.to_string()).into());
+        }
+    }
 
     write_config(path, &doc)
 }
@@ -814,66 +685,30 @@ impl TryFrom<Vec<String>> for NonEmptyCommandArgsVec {
 
 #[cfg(test)]
 mod tests {
+    use anyhow::anyhow;
+    use assert_matches::assert_matches;
+    use indoc::indoc;
     use maplit::hashmap;
 
     use super::*;
 
     #[test]
-    fn test_split_safe_config_name_path() {
-        let parse = |s| ConfigNamePathBuf::from_str(s).unwrap();
-        let key = |s: &str| toml_edit::Key::new(s);
-
-        // Empty (or root) path isn't recognized by config::Config::get()
-        assert_eq!(
-            ConfigNamePathBuf::root().split_safe_prefix(),
-            (None, [].as_slice())
-        );
-
-        assert_eq!(
-            parse("Foo-bar_1").split_safe_prefix(),
-            (Some("Foo-bar_1".into()), [].as_slice())
-        );
-        assert_eq!(
-            parse("'foo()'").split_safe_prefix(),
-            (None, [key("foo()")].as_slice())
-        );
-        assert_eq!(
-            parse("foo.'bar()'").split_safe_prefix(),
-            (Some("foo".into()), [key("bar()")].as_slice())
-        );
-        assert_eq!(
-            parse("foo.'bar()'.baz").split_safe_prefix(),
-            (Some("foo".into()), [key("bar()"), key("baz")].as_slice())
-        );
-        assert_eq!(
-            parse("foo.bar").split_safe_prefix(),
-            (Some("foo.bar".into()), [].as_slice())
-        );
-        assert_eq!(
-            parse("foo.bar.'baz()'").split_safe_prefix(),
-            (Some("foo.bar".into()), [key("baz()")].as_slice())
-        );
-    }
-
-    #[test]
     fn test_command_args() {
-        let config = config::Config::builder()
-            .set_override("empty_array", Vec::<String>::new())
-            .unwrap()
-            .set_override("empty_string", "")
-            .unwrap()
-            .set_override("array", vec!["emacs", "-nw"])
-            .unwrap()
-            .set_override("string", "emacs -nw")
-            .unwrap()
-            .set_override("structured.env.KEY1", "value1")
-            .unwrap()
-            .set_override("structured.env.KEY2", "value2")
-            .unwrap()
-            .set_override("structured.command", vec!["emacs", "-nw"])
-            .unwrap()
-            .build()
-            .unwrap();
+        let mut config = StackedConfig::empty();
+        config.add_layer(
+            ConfigLayer::parse(
+                ConfigSource::User,
+                indoc! {"
+                    empty_array = []
+                    empty_string = ''
+                    array = ['emacs', '-nw']
+                    string = 'emacs -nw'
+                    structured.env = { KEY1 = 'value1', KEY2 = 'value2' }
+                    structured.command = ['emacs', '-nw']
+                "},
+            )
+            .unwrap(),
+        );
 
         assert!(config.get::<CommandNameAndArgs>("empty_array").is_err());
 
@@ -920,27 +755,16 @@ mod tests {
     }
 
     #[test]
-    fn test_layered_configs_resolved_config_values_empty() {
-        let empty_config = config::Config::default();
-        let layered_configs = LayeredConfigs {
-            default: empty_config.clone(),
-            env_base: empty_config.clone(),
-            user: None,
-            repo: None,
-            env_overrides: empty_config,
-            arg_overrides: None,
-        };
+    fn test_resolved_config_values_empty() {
+        let config = StackedConfig::empty();
         assert_eq!(
-            layered_configs
-                .resolved_config_values(&ConfigNamePathBuf::root())
-                .unwrap(),
+            resolved_config_values(&config, &ConfigNamePathBuf::root()),
             []
         );
     }
 
     #[test]
-    fn test_layered_configs_resolved_config_values_single_key() {
-        let empty_config = config::Config::default();
+    fn test_resolved_config_values_single_key() {
         let env_base_config = config::Config::builder()
             .set_override("user.name", "base-user-name")
             .unwrap()
@@ -953,26 +777,28 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let layered_configs = LayeredConfigs {
-            default: empty_config.clone(),
-            env_base: env_base_config,
-            user: None,
-            repo: Some(repo_config),
-            env_overrides: empty_config,
-            arg_overrides: None,
-        };
+        let mut config = StackedConfig::empty();
+        config.add_layer(ConfigLayer::with_data(
+            ConfigSource::EnvBase,
+            env_base_config,
+        ));
+        config.add_layer(ConfigLayer::with_data(ConfigSource::Repo, repo_config));
         // Note: "email" is alphabetized, before "name" from same layer.
         insta::assert_debug_snapshot!(
-            layered_configs.resolved_config_values(&ConfigNamePathBuf::root()).unwrap(),
-            @r###"
+            resolved_config_values(&config, &ConfigNamePathBuf::root()),
+            @r#"
         [
             AnnotatedValue {
-                path: ConfigNamePathBuf(
+                name: ConfigNamePathBuf(
                     [
                         Key {
                             key: "user",
                             repr: None,
-                            decor: Decor {
+                            leaf_decor: Decor {
+                                prefix: "default",
+                                suffix: "default",
+                            },
+                            dotted_decor: Decor {
                                 prefix: "default",
                                 suffix: "default",
                             },
@@ -980,7 +806,11 @@ mod tests {
                         Key {
                             key: "email",
                             repr: None,
-                            decor: Decor {
+                            leaf_decor: Decor {
+                                prefix: "default",
+                                suffix: "default",
+                            },
+                            dotted_decor: Decor {
                                 prefix: "default",
                                 suffix: "default",
                             },
@@ -993,16 +823,20 @@ mod tests {
                         "base@user.email",
                     ),
                 },
-                source: Env,
+                source: EnvBase,
                 is_overridden: true,
             },
             AnnotatedValue {
-                path: ConfigNamePathBuf(
+                name: ConfigNamePathBuf(
                     [
                         Key {
                             key: "user",
                             repr: None,
-                            decor: Decor {
+                            leaf_decor: Decor {
+                                prefix: "default",
+                                suffix: "default",
+                            },
+                            dotted_decor: Decor {
                                 prefix: "default",
                                 suffix: "default",
                             },
@@ -1010,7 +844,11 @@ mod tests {
                         Key {
                             key: "name",
                             repr: None,
-                            decor: Decor {
+                            leaf_decor: Decor {
+                                prefix: "default",
+                                suffix: "default",
+                            },
+                            dotted_decor: Decor {
                                 prefix: "default",
                                 suffix: "default",
                             },
@@ -1023,16 +861,20 @@ mod tests {
                         "base-user-name",
                     ),
                 },
-                source: Env,
+                source: EnvBase,
                 is_overridden: false,
             },
             AnnotatedValue {
-                path: ConfigNamePathBuf(
+                name: ConfigNamePathBuf(
                     [
                         Key {
                             key: "user",
                             repr: None,
-                            decor: Decor {
+                            leaf_decor: Decor {
+                                prefix: "default",
+                                suffix: "default",
+                            },
+                            dotted_decor: Decor {
                                 prefix: "default",
                                 suffix: "default",
                             },
@@ -1040,7 +882,11 @@ mod tests {
                         Key {
                             key: "email",
                             repr: None,
-                            decor: Decor {
+                            leaf_decor: Decor {
+                                prefix: "default",
+                                suffix: "default",
+                            },
+                            dotted_decor: Decor {
                                 prefix: "default",
                                 suffix: "default",
                             },
@@ -1057,13 +903,12 @@ mod tests {
                 is_overridden: false,
             },
         ]
-        "###
+        "#
         );
     }
 
     #[test]
-    fn test_layered_configs_resolved_config_values_filter_path() {
-        let empty_config = config::Config::default();
+    fn test_resolved_config_values_filter_path() {
         let user_config = config::Config::builder()
             .set_override("test-table1.foo", "user-FOO")
             .unwrap()
@@ -1076,27 +921,24 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let layered_configs = LayeredConfigs {
-            default: empty_config.clone(),
-            env_base: empty_config.clone(),
-            user: Some(user_config),
-            repo: Some(repo_config),
-            env_overrides: empty_config,
-            arg_overrides: None,
-        };
+        let mut config = StackedConfig::empty();
+        config.add_layer(ConfigLayer::with_data(ConfigSource::User, user_config));
+        config.add_layer(ConfigLayer::with_data(ConfigSource::Repo, repo_config));
         insta::assert_debug_snapshot!(
-            layered_configs
-                .resolved_config_values(&ConfigNamePathBuf::from_iter(["test-table1"]))
-                .unwrap(),
-            @r###"
+            resolved_config_values(&config, &ConfigNamePathBuf::from_iter(["test-table1"])),
+            @r#"
         [
             AnnotatedValue {
-                path: ConfigNamePathBuf(
+                name: ConfigNamePathBuf(
                     [
                         Key {
                             key: "test-table1",
                             repr: None,
-                            decor: Decor {
+                            leaf_decor: Decor {
+                                prefix: "default",
+                                suffix: "default",
+                            },
+                            dotted_decor: Decor {
                                 prefix: "default",
                                 suffix: "default",
                             },
@@ -1104,7 +946,11 @@ mod tests {
                         Key {
                             key: "foo",
                             repr: None,
-                            decor: Decor {
+                            leaf_decor: Decor {
+                                prefix: "default",
+                                suffix: "default",
+                            },
+                            dotted_decor: Decor {
                                 prefix: "default",
                                 suffix: "default",
                             },
@@ -1121,12 +967,16 @@ mod tests {
                 is_overridden: false,
             },
             AnnotatedValue {
-                path: ConfigNamePathBuf(
+                name: ConfigNamePathBuf(
                     [
                         Key {
                             key: "test-table1",
                             repr: None,
-                            decor: Decor {
+                            leaf_decor: Decor {
+                                prefix: "default",
+                                suffix: "default",
+                            },
+                            dotted_decor: Decor {
                                 prefix: "default",
                                 suffix: "default",
                             },
@@ -1134,7 +984,11 @@ mod tests {
                         Key {
                             key: "bar",
                             repr: None,
-                            decor: Decor {
+                            leaf_decor: Decor {
+                                prefix: "default",
+                                suffix: "default",
+                            },
+                            dotted_decor: Decor {
                                 prefix: "default",
                                 suffix: "default",
                             },
@@ -1151,7 +1005,7 @@ mod tests {
                 is_overridden: false,
             },
         ]
-        "###
+        "#
         );
     }
 
@@ -1159,7 +1013,7 @@ mod tests {
     fn test_config_path_home_dir_existing() -> anyhow::Result<()> {
         TestCase {
             files: vec!["home/.jjconfig.toml"],
-            cfg: ConfigEnv {
+            env: UnresolvedConfigEnv {
                 home_dir: Some("home".into()),
                 ..Default::default()
             },
@@ -1172,7 +1026,7 @@ mod tests {
     fn test_config_path_home_dir_new() -> anyhow::Result<()> {
         TestCase {
             files: vec![],
-            cfg: ConfigEnv {
+            env: UnresolvedConfigEnv {
                 home_dir: Some("home".into()),
                 ..Default::default()
             },
@@ -1185,7 +1039,7 @@ mod tests {
     fn test_config_path_config_dir_existing() -> anyhow::Result<()> {
         TestCase {
             files: vec!["config/jj/config.toml"],
-            cfg: ConfigEnv {
+            env: UnresolvedConfigEnv {
                 config_dir: Some("config".into()),
                 ..Default::default()
             },
@@ -1198,7 +1052,7 @@ mod tests {
     fn test_config_path_config_dir_new() -> anyhow::Result<()> {
         TestCase {
             files: vec![],
-            cfg: ConfigEnv {
+            env: UnresolvedConfigEnv {
                 config_dir: Some("config".into()),
                 ..Default::default()
             },
@@ -1211,7 +1065,7 @@ mod tests {
     fn test_config_path_new_prefer_config_dir() -> anyhow::Result<()> {
         TestCase {
             files: vec![],
-            cfg: ConfigEnv {
+            env: UnresolvedConfigEnv {
                 config_dir: Some("config".into()),
                 home_dir: Some("home".into()),
                 ..Default::default()
@@ -1225,7 +1079,7 @@ mod tests {
     fn test_config_path_jj_config_existing() -> anyhow::Result<()> {
         TestCase {
             files: vec!["custom.toml"],
-            cfg: ConfigEnv {
+            env: UnresolvedConfigEnv {
                 jj_config: Some("custom.toml".into()),
                 ..Default::default()
             },
@@ -1238,7 +1092,7 @@ mod tests {
     fn test_config_path_jj_config_new() -> anyhow::Result<()> {
         TestCase {
             files: vec![],
-            cfg: ConfigEnv {
+            env: UnresolvedConfigEnv {
                 jj_config: Some("custom.toml".into()),
                 ..Default::default()
             },
@@ -1251,7 +1105,7 @@ mod tests {
     fn test_config_path_config_pick_config_dir() -> anyhow::Result<()> {
         TestCase {
             files: vec!["config/jj/config.toml"],
-            cfg: ConfigEnv {
+            env: UnresolvedConfigEnv {
                 home_dir: Some("home".into()),
                 config_dir: Some("config".into()),
                 ..Default::default()
@@ -1265,7 +1119,7 @@ mod tests {
     fn test_config_path_config_pick_home_dir() -> anyhow::Result<()> {
         TestCase {
             files: vec!["home/.jjconfig.toml"],
-            cfg: ConfigEnv {
+            env: UnresolvedConfigEnv {
                 home_dir: Some("home".into()),
                 config_dir: Some("config".into()),
                 ..Default::default()
@@ -1279,7 +1133,7 @@ mod tests {
     fn test_config_path_none() -> anyhow::Result<()> {
         TestCase {
             files: vec![],
-            cfg: Default::default(),
+            env: Default::default(),
             want: Want::None,
         }
         .run()
@@ -1288,20 +1142,12 @@ mod tests {
     #[test]
     fn test_config_path_ambiguous() -> anyhow::Result<()> {
         let tmp = setup_config_fs(&vec!["home/.jjconfig.toml", "config/jj/config.toml"])?;
-        let cfg = ConfigEnv {
+        let env = UnresolvedConfigEnv {
             home_dir: Some(tmp.path().join("home")),
             config_dir: Some(tmp.path().join("config")),
             ..Default::default()
         };
-        use assert_matches::assert_matches;
-        assert_matches!(
-            cfg.clone().existing_config_path(),
-            Err(ConfigError::AmbiguousSource(_, _))
-        );
-        assert_matches!(
-            cfg.clone().new_config_path(),
-            Err(ConfigError::AmbiguousSource(_, _))
-        );
+        assert_matches!(env.resolve(), Err(ConfigEnvError::AmbiguousSource(_, _)));
         Ok(())
     }
 
@@ -1325,49 +1171,67 @@ mod tests {
 
     struct TestCase {
         files: Vec<&'static str>,
-        cfg: ConfigEnv,
+        env: UnresolvedConfigEnv,
         want: Want,
     }
 
     impl TestCase {
-        fn config(&self, root: &Path) -> ConfigEnv {
-            ConfigEnv {
-                config_dir: self.cfg.config_dir.as_ref().map(|p| root.join(p)),
-                home_dir: self.cfg.home_dir.as_ref().map(|p| root.join(p)),
+        fn resolve(&self, root: &Path) -> Result<ConfigEnv, ConfigEnvError> {
+            let env = UnresolvedConfigEnv {
+                config_dir: self.env.config_dir.as_ref().map(|p| root.join(p)),
+                home_dir: self.env.home_dir.as_ref().map(|p| root.join(p)),
                 jj_config: self
-                    .cfg
+                    .env
                     .jj_config
                     .as_ref()
                     .map(|p| root.join(p).to_str().unwrap().to_string()),
-            }
+            };
+            Ok(ConfigEnv {
+                user_config_path: env.resolve()?,
+                repo_config_path: ConfigPath::Unavailable,
+            })
         }
 
-        fn run(self) -> anyhow::Result<()> {
-            use anyhow::anyhow;
+        fn run(&self) -> anyhow::Result<()> {
             let tmp = setup_config_fs(&self.files)?;
+            self.check_existing(&tmp)?;
+            self.check_new(&tmp)?;
+            Ok(())
+        }
 
-            let check = |name, f: fn(ConfigEnv) -> Result<_, _>, want: Option<_>| {
-                let got = f(self.config(tmp.path())).map_err(|e| anyhow!("{name}: {e}"))?;
-                let want = want.map(|p| tmp.path().join(p));
-                if got != want {
-                    Err(anyhow!("{name}: got {got:?}, want {want:?}"))
-                } else {
-                    Ok(got)
-                }
-            };
+        fn check_existing(&self, tmp: &tempfile::TempDir) -> anyhow::Result<()> {
+            let want = match self.want {
+                Want::None => None,
+                Want::New(_) => None,
+                Want::ExistingAndNew(want) => Some(want),
+            }
+            .map(|p| tmp.path().join(p));
+            let env = self
+                .resolve(tmp.path())
+                .map_err(|e| anyhow!("existing_config_path: {e}"))?;
+            let got = env.existing_user_config_path();
+            if got != want.as_deref() {
+                return Err(anyhow!("existing_config_path: got {got:?}, want {want:?}"));
+            }
+            Ok(())
+        }
 
-            let (want_existing, want_new) = match self.want {
-                Want::None => (None, None),
-                Want::New(want) => (None, Some(want)),
-                Want::ExistingAndNew(want) => (Some(want), Some(want)),
-            };
-
-            check(
-                "existing_config_path",
-                ConfigEnv::existing_config_path,
-                want_existing,
-            )?;
-            let got = check("new_config_path", ConfigEnv::new_config_path, want_new)?;
+        fn check_new(&self, tmp: &tempfile::TempDir) -> anyhow::Result<()> {
+            let want = match self.want {
+                Want::None => None,
+                Want::New(want) => Some(want),
+                Want::ExistingAndNew(want) => Some(want),
+            }
+            .map(|p| tmp.path().join(p));
+            let env = self
+                .resolve(tmp.path())
+                .map_err(|e| anyhow!("new_config_path: {e}"))?;
+            let got = env
+                .new_user_config_path()
+                .map_err(|e| anyhow!("new_config_path: {e}"))?;
+            if got != want.as_deref() {
+                return Err(anyhow!("new_config_path: got {got:?}, want {want:?}"));
+            }
             if let Some(path) = got {
                 if !Path::new(&path).is_file() {
                     return Err(anyhow!(

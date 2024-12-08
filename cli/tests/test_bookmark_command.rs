@@ -196,7 +196,7 @@ fn test_bookmark_move() {
 
     // Delete bookmark locally, but is still tracking remote
     test_env.jj_cmd_ok(&repo_path, &["describe", "@-", "-mcommit"]);
-    test_env.jj_cmd_ok(&repo_path, &["git", "push", "-r@-"]);
+    test_env.jj_cmd_ok(&repo_path, &["git", "push", "--allow-new", "-r@-"]);
     test_env.jj_cmd_ok(&repo_path, &["bookmark", "delete", "foo"]);
     insta::assert_snapshot!(get_bookmark_output(&test_env, &repo_path), @r###"
     foo (deleted)
@@ -441,7 +441,7 @@ fn test_bookmark_rename() {
     test_env.jj_cmd_ok(&repo_path, &["new"]);
     test_env.jj_cmd_ok(&repo_path, &["describe", "-m=commit-2"]);
     test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", "bremote"]);
-    test_env.jj_cmd_ok(&repo_path, &["git", "push", "-b=bremote"]);
+    test_env.jj_cmd_ok(&repo_path, &["git", "push", "--allow-new", "-b=bremote"]);
     let (_stdout, stderr) =
         test_env.jj_cmd_ok(&repo_path, &["bookmark", "rename", "bremote", "bremote2"]);
     insta::assert_snapshot!(stderr, @r###"
@@ -940,12 +940,12 @@ fn test_bookmark_track_untrack() {
     feature2@origin: sptzoqmo 7b33f629 commit 1
     main@origin: sptzoqmo 7b33f629 commit 1
     "###);
-    insta::assert_snapshot!(get_log_output(&test_env, &repo_path), @r###"
-    ◆  feature1@origin feature2@origin main@origin 7b33f6295eda
-    │ @   230dd059e1b0
+    insta::assert_snapshot!(get_log_output(&test_env, &repo_path), @r#"
+    @   230dd059e1b0
+    │ ◆  feature1@origin feature2@origin main@origin 7b33f6295eda
     ├─╯
     ◆   000000000000
-    "###);
+    "#);
 
     // Track new bookmark. Local bookmark should be created.
     test_env.jj_cmd_ok(
@@ -988,12 +988,12 @@ fn test_bookmark_track_untrack() {
     main: sptzoqmo 7b33f629 commit 1
       @origin: sptzoqmo 7b33f629 commit 1
     "###);
-    insta::assert_snapshot!(get_log_output(&test_env, &repo_path), @r###"
-    ◆  feature1 feature1@origin feature2@origin main 7b33f6295eda
-    │ @   230dd059e1b0
+    insta::assert_snapshot!(get_log_output(&test_env, &repo_path), @r#"
+    @   230dd059e1b0
+    │ ◆  feature1 feature1@origin feature2@origin main 7b33f6295eda
     ├─╯
     ◆   000000000000
-    "###);
+    "#);
 
     // Fetch new commit. Only tracking bookmark "main" should be merged.
     create_remote_commit(
@@ -1018,14 +1018,14 @@ fn test_bookmark_track_untrack() {
     main: mmqqkyyt 40dabdaf commit 2
       @origin: mmqqkyyt 40dabdaf commit 2
     "###);
-    insta::assert_snapshot!(get_log_output(&test_env, &repo_path), @r###"
-    ◆  feature1@origin feature2@origin main 40dabdaf4abe
+    insta::assert_snapshot!(get_log_output(&test_env, &repo_path), @r#"
+    @   230dd059e1b0
+    │ ◆  feature1@origin feature2@origin main 40dabdaf4abe
+    ├─╯
     │ ○  feature1 7b33f6295eda
     ├─╯
-    │ @   230dd059e1b0
-    ├─╯
     ◆   000000000000
-    "###);
+    "#);
 
     // Fetch new commit with auto tracking. Tracking bookmark "main" and new
     // bookmark "feature3" should be merged.
@@ -1057,14 +1057,14 @@ fn test_bookmark_track_untrack() {
     main: wwnpyzpo 3f0f86fa commit 3
       @origin: wwnpyzpo 3f0f86fa commit 3
     "###);
-    insta::assert_snapshot!(get_log_output(&test_env, &repo_path), @r###"
-    ◆  feature1@origin feature2@origin feature3 main 3f0f86fa0e57
+    insta::assert_snapshot!(get_log_output(&test_env, &repo_path), @r#"
+    @   230dd059e1b0
+    │ ◆  feature1@origin feature2@origin feature3 main 3f0f86fa0e57
+    ├─╯
     │ ○  feature1 7b33f6295eda
     ├─╯
-    │ @   230dd059e1b0
-    ├─╯
     ◆   000000000000
-    "###);
+    "#);
 }
 
 #[test]
@@ -1081,7 +1081,7 @@ fn test_bookmark_track_conflict() {
     );
     test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", "main"]);
     test_env.jj_cmd_ok(&repo_path, &["describe", "-m", "a"]);
-    test_env.jj_cmd_ok(&repo_path, &["git", "push", "-b", "main"]);
+    test_env.jj_cmd_ok(&repo_path, &["git", "push", "--allow-new", "-b", "main"]);
     test_env.jj_cmd_ok(&repo_path, &["bookmark", "untrack", "main@origin"]);
     test_env.jj_cmd_ok(
         &repo_path,
@@ -1447,9 +1447,9 @@ fn test_bookmark_list_filtered() {
             &local_path,
             &["log", "-r::(bookmarks() | remote_bookmarks())", "-T", template],
         ),
-        @r###"
-    ○  e31634b64294 remote-rewrite*
-    │ @  c7b4c09cd77c local-keep
+        @r#"
+    @  c7b4c09cd77c local-keep
+    │ ○  e31634b64294 remote-rewrite*
     ├─╯
     │ ○  3e9a5af6ef15 remote-rewrite@origin (hidden)
     ├─╯
@@ -1458,7 +1458,7 @@ fn test_bookmark_list_filtered() {
     │ ○  911e912015fb remote-keep
     ├─╯
     ◆  000000000000
-    "###);
+    "#);
 
     // All bookmarks are listed by default.
     let (stdout, stderr) = test_env.jj_cmd_ok(&local_path, &["bookmark", "list"]);
@@ -1757,6 +1757,7 @@ fn test_bookmark_list_tracked() {
         &[
             "git",
             "push",
+            "--allow-new",
             "--remote",
             "upstream",
             "--bookmark",

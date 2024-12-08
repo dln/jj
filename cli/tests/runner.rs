@@ -9,15 +9,16 @@ fn test_no_forgotten_test_files() {
 }
 
 mod test_abandon_command;
+mod test_absorb_command;
 mod test_acls;
 mod test_advance_bookmarks;
 mod test_alias;
 mod test_backout_command;
 mod test_bookmark_command;
 mod test_builtin_aliases;
-mod test_checkout;
 mod test_commit_command;
 mod test_commit_template;
+mod test_completion;
 mod test_concurrent_operations;
 mod test_config_command;
 mod test_copy_detection;
@@ -50,7 +51,6 @@ mod test_immutable_commits;
 mod test_init_command;
 mod test_interdiff_command;
 mod test_log_command;
-mod test_move_command;
 mod test_new_command;
 mod test_next_prev_commands;
 mod test_operations;

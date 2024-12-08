@@ -16,6 +16,113 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed bugs
 
+## [0.24.0] - 2024-12-04
+
+### Breaking changes
+
+* `jj move` has been removed. It was deprecated in 0.16.0.
+
+* `jj checkout` and the built-in alias `jj co` have been removed.
+  It was deprecated in 0.14.0.
+
+* `jj merge` has been removed. It was deprecated in 0.14.0.
+
+* `jj git push` no longer pushes new bookmarks by default. Use `--allow-new` to
+  bypass this restriction.
+
+* Lines prefixed with "JJ:" in commit descriptions and in sparse patterns (from
+  `jj sparse edit`) are now stripped even if they are not immediately followed
+  by a space. [#5004](https://github.com/martinvonz/jj/issues/5004)
+
+### Deprecations
+
+### New features
+
+* Templates now support the `==` and `!=` logical operators for `Boolean`,
+  `Integer`, and `String` types.
+
+* New command `jj absorb` that moves changes to stack of mutable revisions.
+
+* New command `jj util exec` that can be used for arbitrary aliases.
+
+* `jj rebase -b` can now be used with the `--insert-after` and `--insert-before`
+  options, like `jj rebase -r` and `jj rebase -s`.
+
+* A preview of improved shell completions was added. Please refer to the
+  [documentation](https://martinvonz.github.io/jj/latest/install-and-setup/#command-line-completion)
+  to activate them. They additionally complete context-dependent, dynamic values
+  like bookmarks, aliases, revisions, operations and files.
+
+* Added the config setting `snapshot.auto-update-stale` for automatically
+  running `jj workspace update-stale` when applicable.
+
+* `jj duplicate` now accepts `--destination`, `--insert-after` and
+  `--insert-before` options to customize the location of the duplicated
+  revisions.
+
+* `jj log` now displays the working-copy branch first.
+
+* New `fork_point()` revset function can be used to obtain the fork point
+  of multiple commits.
+
+* The `tags()` revset function now takes an optional `pattern` argument,
+  mirroring that of `bookmarks()`.
+
+* Several commands now support `-f/-t` shorthands for `--from/--to`:
+  - `diff`
+  - `diffedit`
+  - `interdiff`
+  - `op diff`
+  - `restore`
+
+* New `ui.conflict-marker-style` config option to change how conflicts are
+  materialized in the working copy. The default option ("diff") renders
+  conflicts as a snapshot with a list of diffs to apply to the snapshot.
+  The new "snapshot" option renders conflicts as a series of snapshots, showing
+  each side and base of the conflict. The new "git" option replicates Git's
+  "diff3" conflict style, meaning it is more likely to work with external tools,
+  but it doesn't support conflicts with more than 2 sides.
+
+* New `merge-tools.<TOOL>.conflict-marker-style` config option to override the
+  conflict marker style used for a specific merge tool.
+
+* New `merge-tools.<TOOL>.merge-conflict-exit-codes` config option to allow a
+  merge tool to exit with a non-zero code to indicate that not all conflicts
+  were resolved.
+
+* `jj simplify-parents` now supports configuring the default revset when no
+   `--source` or `--revisions` arguments are provided with the
+   `revsets.simplify-parents` config.
+
+### Fixed bugs
+
+* `jj config unset <TABLE-NAME>` no longer removes a table (such as `[ui]`.)
+
+
+### Contributors
+
+Thanks to the people who made this release happen!
+
+* Austin Seipp (@thoughtpolice)
+* Benjamin Tan (@bnjmnt4n)
+* Daniel Ploch (@torquestomp)
+* Emily (@neongreen)
+* Essien Ita Essien (@essiene)
+* Herman J. Radtke III (@hjr3)
+* Ilya Grigoriev (@ilyagr)
+* Joaquín Triñanes (@JoaquinTrinanes)
+* Lars Francke (@lfrancke)
+* Luke Randall (@lukerandall)
+* Martin von Zweigbergk (@martinvonz)
+* Nathanael Huffman (@nathanaelhuffman)
+* Philip Metzger (@PhilipMetzger)
+* Remo Senekowitsch (@senekor)
+* Robin Stocker (@robinst)
+* Scott Taylor (@scott2000)
+* Shane Sveller (@shanesveller)
+* Tim Janik (@tim-janik)
+* Yuya Nishihara (@yuja)
+
 ## [0.23.0] - 2024-11-06
 
 ### Security fixes
@@ -108,7 +215,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 * Error on `trunk()` revset resolution is now handled gracefully.
   [#4616](https://github.com/martinvonz/jj/issues/4616)
 
-* Updated the built-in diff editor `scm-record` to version 
+* Updated the built-in diff editor `scm-record` to version
   [0.4.0](https://github.com/arxanas/scm-record/releases/tag/v0.4.0), which
   includes multiple fixes.
 

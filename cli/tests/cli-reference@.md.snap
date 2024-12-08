@@ -13,6 +13,7 @@ This document contains the help content for the `jj` command-line program.
 
 * [`jj`↴](#jj)
 * [`jj abandon`↴](#jj-abandon)
+* [`jj absorb`↴](#jj-absorb)
 * [`jj backout`↴](#jj-backout)
 * [`jj bookmark`↴](#jj-bookmark)
 * [`jj bookmark create`↴](#jj-bookmark-create)
@@ -93,6 +94,7 @@ This document contains the help content for the `jj` command-line program.
 * [`jj util`↴](#jj-util)
 * [`jj util completion`↴](#jj-util-completion)
 * [`jj util config-schema`↴](#jj-util-config-schema)
+* [`jj util exec`↴](#jj-util-exec)
 * [`jj util gc`↴](#jj-util-gc)
 * [`jj util mangen`↴](#jj-util-mangen)
 * [`jj util markdown-help`↴](#jj-util-markdown-help)
@@ -120,14 +122,15 @@ To get started, see the tutorial at https://martinvonz.github.io/jj/latest/tutor
 ###### **Subcommands:**
 
 * `abandon` — Abandon a revision
+* `absorb` — Move changes from a revision into the stack of mutable revisions
 * `backout` — Apply the reverse of a revision on top of another revision
-* `bookmark` — Manage bookmarks
+* `bookmark` — Manage bookmarks [default alias: b]
 * `commit` — Update the description and create a new change on top
 * `config` — Manage config options
 * `describe` — Update the change description or other metadata
 * `diff` — Compare file contents between two revisions
 * `diffedit` — Touch up the content changes in a revision with a diff editor
-* `duplicate` — Create a new change with the same content as an existing one
+* `duplicate` — Create new changes with the same content as existing ones
 * `edit` — Sets the specified revision as the working-copy revision
 * `evolog` — Show how a change has evolved over time
 * `file` — File operations
@@ -165,7 +168,7 @@ To get started, see the tutorial at https://martinvonz.github.io/jj/latest/tutor
    By default, Jujutsu searches for the closest .jj/ directory in an ancestor of the current working directory.
 * `--ignore-working-copy` — Don't snapshot the working copy, and don't update it
 
-   By default, Jujutsu snapshots the working copy at the beginning of every command. The working copy is also updated at the end of the command, if the command modified the working-copy commit (`@`). If you want to avoid snapshotting the working copy and instead see a possibly stale working copy commit, you can use `--ignore-working-copy`. This may be useful e.g. in a command prompt, especially if you have another process that commits the working copy.
+   By default, Jujutsu snapshots the working copy at the beginning of every command. The working copy is also updated at the end of the command, if the command modified the working-copy commit (`@`). If you want to avoid snapshotting the working copy and instead see a possibly stale working-copy commit, you can use `--ignore-working-copy`. This may be useful e.g. in a command prompt, especially if you have another process that commits the working copy.
 
    Loading the repository at a specific operation with `--at-operation` implies `--ignore-working-copy`.
 * `--ignore-immutable` — Allow rewriting immutable commits
@@ -219,6 +222,33 @@ If a working-copy commit gets abandoned, it will be given a new, empty commit. T
 
 
 
+## `jj absorb`
+
+Move changes from a revision into the stack of mutable revisions
+
+This command splits changes in the source revision and moves each change to the closest mutable ancestor where the corresponding lines were modified last. If the destination revision cannot be determined unambiguously, the change will be left in the source revision.
+
+The modification made by `jj absorb` can be reviewed by `jj op show -p`.
+
+**Usage:** `jj absorb [OPTIONS] [PATHS]...`
+
+###### **Arguments:**
+
+* `<PATHS>` — Move only changes to these paths (instead of all paths)
+
+###### **Options:**
+
+* `-f`, `--from <FROM>` — Source revision to absorb from
+
+  Default value: `@`
+* `-t`, `--into <INTO>` — Destination revisions to absorb into
+
+   Only ancestors of the source revision will be considered.
+
+  Default value: `mutable()`
+
+
+
 ## `jj backout`
 
 Apply the reverse of a revision on top of another revision
@@ -238,7 +268,7 @@ Apply the reverse of a revision on top of another revision
 
 ## `jj bookmark`
 
-Manage bookmarks
+Manage bookmarks [default alias: b]
 
 For information about bookmarks, see https://martinvonz.github.io/jj/latest/bookmarks.
 
@@ -660,8 +690,8 @@ With the `--from` and/or `--to` options, shows the difference from/to the given 
 * `-r`, `--revision <REVISION>` — Show changes in this revision, compared to its parent(s)
 
    If the revision is a merge commit, this shows changes *from* the automatic merge of the contents of all of its parents *to* the contents of the revision itself.
-* `--from <FROM>` — Show changes from this revision
-* `--to <TO>` — Show changes to this revision
+* `-f`, `--from <FROM>` — Show changes from this revision
+* `-t`, `--to <TO>` — Show changes to this revision
 * `-s`, `--summary` — For each path, show only whether it was modified, added, or deleted
 * `--stat` — Show a histogram of the changes
 * `--types` — For each path, show only its type before and after
@@ -700,10 +730,10 @@ See `jj restore` if you want to move entire files from one revision to another. 
 * `-r`, `--revision <REVISION>` — The revision to touch up
 
    Defaults to @ if neither --to nor --from are specified.
-* `--from <FROM>` — Show changes from this revision
+* `-f`, `--from <FROM>` — Show changes from this revision
 
    Defaults to @ if --to is specified.
-* `--to <TO>` — Edit changes in this revision
+* `-t`, `--to <TO>` — Edit changes in this revision
 
    Defaults to @ if --from is specified.
 * `--tool <NAME>` — Specify diff editor to be used
@@ -715,15 +745,23 @@ See `jj restore` if you want to move entire files from one revision to another. 
 
 ## `jj duplicate`
 
-Create a new change with the same content as an existing one
+Create new changes with the same content as existing ones
 
-**Usage:** `jj duplicate [REVISIONS]...`
+When none of the `--destination`, `--insert-after`, or `--insert-before` arguments are provided, commits will be duplicated onto their existing parents or onto other newly duplicated commits.
+
+When any of the `--destination`, `--insert-after`, or `--insert-before` arguments are provided, the roots of the specified commits will be duplicated onto the destination indicated by the arguments. Other specified commits will be duplicated onto these newly duplicated commits. If the `--insert-after` or `--insert-before` arguments are provided, the new children indicated by the arguments will be rebased onto the heads of the specified commits.
+
+**Usage:** `jj duplicate [OPTIONS] [REVISIONS]...`
 
 ###### **Arguments:**
 
-* `<REVISIONS>` — The revision(s) to duplicate
+* `<REVISIONS>` — The revision(s) to duplicate (default: @)
 
-  Default value: `@`
+###### **Options:**
+
+* `-d`, `--destination <DESTINATION>` — The revision(s) to duplicate onto (can be repeated to create a merge commit)
+* `-A`, `--insert-after <INSERT_AFTER>` — The revision(s) to insert after (can be repeated to create a merge commit)
+* `-B`, `--insert-before <INSERT_BEFORE>` — The revision(s) to insert before (can be repeated to create a merge commit)
 
 
 
@@ -1056,10 +1094,12 @@ If a working-copy commit gets abandoned, it will be given a new, empty commit. T
 
 * `-b`, `--branch <BRANCH>` — Fetch only some of the branches
 
-   By default, the specified name matches exactly. Use `glob:` prefix to expand `*` as a glob. The other wildcard characters aren't supported.
+   By default, the specified name matches exactly. Use `glob:` prefix to expand `*` as a glob, e.g. `--branch 'glob:push-*'`. Other wildcard characters such as `?` are *not* supported.
 
   Default value: `glob:*`
 * `--remote <REMOTE>` — The remote to fetch from (only named remotes are supported, can be repeated)
+
+   This defaults to the `git.fetch` setting. If that is not configured, and if there are multiple remotes, the remote named "origin" will be used.
 * `--all-remotes` — Fetch from all remotes
 
 
@@ -1107,7 +1147,7 @@ Create a new Git backed repo
 
 Push to a Git remote
 
-By default, pushes any bookmarks pointing to `remote_bookmarks(remote=<remote>)..@`. Use `--bookmark` to push specific bookmarks. Use `--all` to push all bookmarks. Use `--change` to generate bookmark names based on the change IDs of specific commits.
+By default, pushes tracking bookmarks pointing to `remote_bookmarks(remote=<remote>)..@`. Use `--bookmark` to push specific bookmarks. Use `--all` to push all bookmarks. Use `--change` to generate bookmark names based on the change IDs of specific commits.
 
 Before the command actually moves, creates, or deletes a remote bookmark, it makes several [safety checks]. If there is a problem, you may need to run `jj git fetch --remote <remote name>` and/or resolve some [bookmark conflicts].
 
@@ -1120,20 +1160,27 @@ Before the command actually moves, creates, or deletes a remote bookmark, it mak
 ###### **Options:**
 
 * `--remote <REMOTE>` — The remote to push to (only named remotes are supported)
+
+   This defaults to the `git.push` setting. If that is not configured, and if there are multiple remotes, the remote named "origin" will be used. Unlike in Git, the default remote is not derived from the tracked remote bookmarks.
 * `-b`, `--bookmark <BOOKMARK>` — Push only this bookmark, or bookmarks matching a pattern (can be repeated)
 
    By default, the specified name matches exactly. Use `glob:` prefix to select bookmarks by wildcard pattern. For details, see https://martinvonz.github.io/jj/latest/revsets#string-patterns.
-* `--all` — Push all bookmarks (including deleted bookmarks)
+* `--all` — Push all bookmarks (including new and deleted bookmarks)
 * `--tracked` — Push all tracked bookmarks (including deleted bookmarks)
 
    This usually means that the bookmark was already pushed to or fetched from the relevant remote. For details, see https://martinvonz.github.io/jj/latest/bookmarks#remotes-and-tracked-bookmarks
 * `--deleted` — Push all deleted bookmarks
 
    Only tracked bookmarks can be successfully deleted on the remote. A warning will be printed if any untracked bookmarks on the remote correspond to missing local bookmarks.
+* `-N`, `--allow-new` — Allow pushing new bookmarks
+
+   Newly-created remote bookmarks will be tracked automatically.
 * `--allow-empty-description` — Allow pushing commits with empty descriptions
 * `--allow-private` — Allow pushing commits that are private
 * `-r`, `--revisions <REVISIONS>` — Push bookmarks pointing to these commits (can be repeated)
 * `-c`, `--change <CHANGE>` — Push this commit by creating a bookmark based on its change ID (can be repeated)
+
+   The created bookmark will be tracked automatically. Use the `git.push-bookmark-prefix` setting to change the prefix for generated names.
 * `--dry-run` — Only display what will change on the remote
 
 
@@ -1268,8 +1315,8 @@ This excludes changes from other commits by temporarily rebasing `--from` onto `
 
 ###### **Options:**
 
-* `--from <FROM>` — Show changes from this revision
-* `--to <TO>` — Show changes to this revision
+* `-f`, `--from <FROM>` — Show changes from this revision
+* `-t`, `--to <TO>` — Show changes to this revision
 * `-s`, `--summary` — For each path, show only whether it was modified, added, or deleted
 * `--stat` — Show a histogram of the changes
 * `--types` — For each path, show only its type before and after
@@ -1291,9 +1338,11 @@ This excludes changes from other commits by temporarily rebasing `--from` onto `
 
 Show revision history
 
-Renders a graphical view of the project's history, ordered with children before parents. By default, the output only includes mutable revisions, along with some additional revisions for context.
+Renders a graphical view of the project's history, ordered with children before parents. By default, the output only includes mutable revisions, along with some additional revisions for context. Use `jj log -r ::` to see all revisions. See `jj help -k revsets` (or https://martinvonz.github.io/jj/latest/revsets/) for information about the syntax.
 
 Spans of revisions that are not included in the graph per `--revisions` are rendered as a synthetic node labeled "(elided revisions)".
+
+The working-copy commit is indicated by a `@` symbol in the graph. Immutable revisions (https://martinvonz.github.io/jj/latest/config/#set-of-immutable-commits) have a `◆` symbol. Other commits have a `○` symbol. To customize these symbols, see https://martinvonz.github.io/jj/latest/config/#node-style.
 
 **Usage:** `jj log [OPTIONS] [PATHS]...`
 
@@ -1313,7 +1362,11 @@ Spans of revisions that are not included in the graph per `--revisions` are rend
 * `--no-graph` — Don't show the graph, show a flat list of revisions
 * `-T`, `--template <TEMPLATE>` — Render each revision using the given template
 
-   For the syntax, see https://martinvonz.github.io/jj/latest/templates/
+   Run `jj log -T` to list the built-in templates.
+
+   You can also specify arbitrary template expressions. For the syntax, see https://martinvonz.github.io/jj/latest/templates/.
+
+   If not specified, this defaults to the `templates.log` setting.
 * `-p`, `--patch` — Show patch
 * `-s`, `--summary` — For each path, show only whether it was modified, added, or deleted
 * `--stat` — Show a histogram of the changes
@@ -1389,8 +1442,6 @@ B   =>   @
 |        |
 @        A
 ```
-If your working-copy commit already has visible children, then `--edit` is
-implied.
 
 **Usage:** `jj next [OPTIONS] [OFFSET]`
 
@@ -1458,8 +1509,8 @@ Compare changes to the repository between two operations
 ###### **Options:**
 
 * `--operation <OPERATION>` — Show repository changes in this operation, compared to its parent
-* `--from <FROM>` — Show repository changes from this operation
-* `--to <TO>` — Show repository changes to this operation
+* `-f`, `--from <FROM>` — Show repository changes from this operation
+* `-t`, `--to <TO>` — Show repository changes to this operation
 * `--no-graph` — Don't show the graph, show a flat list of modified changes
 * `-p`, `--patch` — Show patch of modifications to changes
 
@@ -1682,8 +1733,6 @@ B        B
 |        |
 A        A
 ```
-If the working copy revision already has visible children, then `--edit` is
-implied
 
 **Usage:** `jj prev [OPTIONS] [OFFSET]`
 
@@ -1814,11 +1863,7 @@ commit. This is true in general; it is not specific to this command.
    If none of `-b`, `-s`, or `-r` is provided, then the default is `-b @`.
 * `-d`, `--destination <DESTINATION>` — The revision(s) to rebase onto (can be repeated to create a merge commit)
 * `-A`, `--insert-after <INSERT_AFTER>` — The revision(s) to insert after (can be repeated to create a merge commit)
-
-   Only works with `-r` and `-s`.
 * `-B`, `--insert-before <INSERT_BEFORE>` — The revision(s) to insert before (can be repeated to create a merge commit)
-
-   Only works with `-r` and `-s`.
 * `--skip-emptied` — If true, when rebasing would produce an empty commit, the commit is abandoned. It will not be abandoned if it was already empty before the rebase. Will never skip merge commits with multiple non-empty parents
 
 
@@ -1867,8 +1912,8 @@ See `jj diffedit` if you'd like to restore portions of files rather than entire 
 
 ###### **Options:**
 
-* `--from <FROM>` — Revision to restore from (source)
-* `--to <TO>` — Revision to restore into (destination)
+* `-f`, `--from <FROM>` — Revision to restore from (source)
+* `-t`, `--to <TO>` — Revision to restore into (destination)
 * `-c`, `--changes-in <REVISION>` — Undo the changes in a revision as compared to the merge of its parents.
 
    This undoes the changes that can be seen with `jj diff -r REVISION`. If `REVISION` only has a single parent, this option is equivalent to `jj restore --to REVISION --from REVISION-`.
@@ -1928,12 +1973,14 @@ Removes all parents of each of the specified revisions that are also indirect an
 
 In other words, for all (A, B, C) where A has (B, C) as parents and C is an ancestor of B, A will be rewritten to have only B as a parent instead of B+C.
 
-**Usage:** `jj simplify-parents <--source <SOURCE>|--revisions <REVISIONS>>`
+**Usage:** `jj simplify-parents [OPTIONS]`
 
 ###### **Options:**
 
 * `-s`, `--source <SOURCE>` — Simplify specified revision(s) together with their trees of descendants (can be repeated)
 * `-r`, `--revisions <REVISIONS>` — Simplify specified revision(s) (can be repeated)
+
+   If both `--source` and `--revisions` are not provided, this defaults to the `revsets.simplify-parents` setting, or `reachable(@, mutable())` if it is not set.
 
 
 
@@ -2116,6 +2163,7 @@ Infrequently used commands such as for generating shell completions
 
 * `completion` — Print a command-line-completion script
 * `config-schema` — Print the JSON schema for the jj TOML config format
+* `exec` — Execute an external command via jj
 * `gc` — Run backend-dependent garbage collection
 * `mangen` — Print a ROFF (manpage)
 * `markdown-help` — Print the CLI help for all subcommands in Markdown
@@ -2161,9 +2209,66 @@ Print the JSON schema for the jj TOML config format
 
 
 
+## `jj util exec`
+
+Execute an external command via jj
+
+This is useful for arbitrary aliases.
+
+!! WARNING !!
+
+The following technique just provides a convenient syntax for running
+arbitrary code on your system. Using it irresponsibly may cause damage
+ranging from breaking the behavior of `jj undo` to wiping your file system.
+Exercise the same amount of caution while writing these aliases as you would
+when typing commands into the terminal!
+
+This feature may be removed or replaced by an embedded scripting language in
+the future.
+
+Let's assume you have a script called "my-jj-script" in you $PATH and you
+would like to execute it as "jj my-script". You would add the following line
+to your configuration file to achieve that:
+
+```toml
+[aliases]
+my-script = ["util", "exec", "--", "my-jj-script"]
+#                            ^^^^
+# This makes sure that flags are passed to your script instead of parsed by jj.
+```
+
+If you don't want to manage your script as a separate file, you can even
+inline it into your config file:
+
+```toml
+[aliases]
+my-inline-script = ["util", "exec", "--", "bash", "-c", """
+#!/usr/bin/env bash
+set -euo pipefail
+echo "Look Ma, everything in one file!"
+echo "args: $@"
+""", ""]
+#    ^^
+# This last empty string will become "$0" in bash, so your actual arguments
+# are all included in "$@" and start at "$1" as expected.
+```
+
+**Usage:** `jj util exec <COMMAND> [ARGS]...`
+
+###### **Arguments:**
+
+* `<COMMAND>` — External command to execute
+* `<ARGS>` — Arguments to pass to the external command
+
+
+
 ## `jj util gc`
 
-Run backend-dependent garbage collection
+Run backend-dependent garbage collection.
+
+To garbage-collect old operations and the commits/objects referenced by then, run `jj op abandon ..<some old operation>` before `jj util gc`.
+
+Previous versions of a change that are reachable via the evolution log are not garbage-collected.
 
 **Usage:** `jj util gc [OPTIONS]`
 

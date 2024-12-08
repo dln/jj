@@ -14,25 +14,26 @@
 
 use std::io;
 
+use clap_complete::ArgValueCandidates;
 use jj_lib::commit::Commit;
+use jj_lib::config::ConfigNamePathBuf;
 use jj_lib::repo::Repo;
 use tracing::instrument;
 
 use super::ConfigLevelArgs;
-use crate::cli_util::get_new_config_file_path;
 use crate::cli_util::CommandHelper;
 use crate::cli_util::WorkspaceCommandHelper;
 use crate::command_error::user_error;
 use crate::command_error::CommandError;
+use crate::complete;
 use crate::config::parse_toml_value_or_bare_string;
 use crate::config::write_config_value_to_file;
-use crate::config::ConfigNamePathBuf;
 use crate::ui::Ui;
 
 /// Update config file to set the given option to a given value.
 #[derive(clap::Args, Clone, Debug)]
 pub struct ConfigSetArgs {
-    #[arg(required = true)]
+    #[arg(required = true, add = ArgValueCandidates::new(complete::leaf_config_keys))]
     name: ConfigNamePathBuf,
     #[arg(required = true)]
     value: String,
@@ -52,7 +53,7 @@ pub fn cmd_config_set(
     command: &CommandHelper,
     args: &ConfigSetArgs,
 ) -> Result<(), CommandError> {
-    let config_path = get_new_config_file_path(&args.level.expect_source_kind(), command)?;
+    let config_path = args.level.new_config_file_path(command.config_env())?;
     if config_path.is_dir() {
         return Err(user_error(format!(
             "Can't set config in path {path} (dirs not supported)",
@@ -71,7 +72,7 @@ pub fn cmd_config_set(
         check_wc_author(ui, command, &value, AuthorChange::Email)?;
     };
 
-    write_config_value_to_file(&args.name, value, &config_path)
+    write_config_value_to_file(&args.name, value, config_path)
 }
 
 /// Returns the commit of the working copy if it exists.

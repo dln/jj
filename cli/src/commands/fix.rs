@@ -18,6 +18,7 @@ use std::io::Write;
 use std::process::Stdio;
 use std::sync::mpsc::channel;
 
+use clap_complete::ArgValueCandidates;
 use futures::StreamExt;
 use itertools::Itertools;
 use jj_lib::backend::BackendError;
@@ -37,6 +38,7 @@ use jj_lib::repo_path::RepoPathBuf;
 use jj_lib::repo_path::RepoPathUiConverter;
 use jj_lib::revset::RevsetExpression;
 use jj_lib::revset::RevsetIteratorExt;
+use jj_lib::settings::UserSettings;
 use jj_lib::store::Store;
 use jj_lib::tree::Tree;
 use pollster::FutureExt;
@@ -49,6 +51,7 @@ use crate::cli_util::RevisionArg;
 use crate::command_error::config_error;
 use crate::command_error::print_parse_diagnostics;
 use crate::command_error::CommandError;
+use crate::complete;
 use crate::config::to_toml_value;
 use crate::config::CommandNameAndArgs;
 use crate::ui::Ui;
@@ -124,7 +127,7 @@ pub(crate) struct FixArgs {
     /// Fix files in the specified revision(s) and their descendants. If no
     /// revisions are specified, this defaults to the `revsets.fix` setting, or
     /// `reachable(@, mutable())` if it is not set.
-    #[arg(long, short)]
+    #[arg(long, short, add = ArgValueCandidates::new(complete::mutable_revisions))]
     source: Vec<RevisionArg>,
     /// Fix only these paths
     #[arg(value_hint = clap::ValueHint::AnyPath)]
@@ -142,9 +145,9 @@ pub(crate) fn cmd_fix(
     args: &FixArgs,
 ) -> Result<(), CommandError> {
     let mut workspace_command = command.workspace_helper(ui)?;
-    let tools_config = get_tools_config(ui, command.settings().config())?;
+    let tools_config = get_tools_config(ui, command.settings())?;
     let root_commits: Vec<CommitId> = if args.source.is_empty() {
-        let revs = command.settings().config().get_string("revsets.fix")?;
+        let revs = command.settings().get_string("revsets.fix")?;
         workspace_command.parse_revset(ui, &RevisionArg::from(revs))?
     } else {
         workspace_command.parse_union_revsets(ui, &args.source)?
@@ -175,7 +178,7 @@ pub(crate) fn cmd_fix(
     // doing this in long chains of commits with disjoint sets of modified files.
     let commits: Vec<_> = RevsetExpression::commits(root_commits.clone())
         .descendants()
-        .evaluate_programmatic(tx.base_repo().as_ref())?
+        .evaluate(tx.base_repo().as_ref())?
         .iter()
         .commits(tx.repo().store())
         .try_collect()?;
@@ -443,11 +446,11 @@ struct RawToolConfig {
 /// Fails if any of the commands or patterns are obviously unusable, but does
 /// not check for issues that might still occur later like missing executables.
 /// This is a place where we could fail earlier in some cases, though.
-fn get_tools_config(ui: &mut Ui, config: &config::Config) -> Result<ToolsConfig, CommandError> {
+fn get_tools_config(ui: &mut Ui, settings: &UserSettings) -> Result<ToolsConfig, CommandError> {
     let mut tools_config = ToolsConfig { tools: Vec::new() };
     // TODO: Remove this block of code and associated documentation after at least
     // one release where the feature is marked deprecated.
-    if let Ok(tool_command) = config.get::<CommandNameAndArgs>("fix.tool-command") {
+    if let Ok(tool_command) = settings.get::<CommandNameAndArgs>("fix.tool-command") {
         // This doesn't change the displayed indices of the `fix.tools` definitions, and
         // doesn't have a `name` that could conflict with them. That would matter more
         // if we already had better error handling that made use of the `name`.
@@ -467,10 +470,10 @@ fn get_tools_config(ui: &mut Ui, config: &config::Config) -> Result<ToolsConfig,
             command = {}
             patterns = ["all()"]
             "###,
-            to_toml_value(&config.get::<config::Value>("fix.tool-command").unwrap()).unwrap()
+            to_toml_value(&settings.get_value("fix.tool-command").unwrap()).unwrap()
         )?;
     }
-    if let Ok(tools_table) = config.get_table("fix.tools") {
+    if let Ok(tools_table) = settings.get_table("fix.tools") {
         // Convert the map into a sorted vector early so errors are deterministic.
         let mut tools: Vec<ToolConfig> = tools_table
             .into_iter()
@@ -505,7 +508,7 @@ fn get_tools_config(ui: &mut Ui, config: &config::Config) -> Result<ToolsConfig,
     if tools_config.tools.is_empty() {
         // TODO: This is not a useful message when one or both fields are present but
         // have the wrong type. After removing `fix.tool-command`, it will be simpler to
-        // propagate any errors from `config.get_array("fix.tools")`.
+        // propagate any errors from `settings.get_array("fix.tools")`.
         Err(config_error(
             "At least one entry of `fix.tools` or `fix.tool-command` is required.".to_string(),
         ))

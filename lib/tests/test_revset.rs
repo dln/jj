@@ -37,11 +37,9 @@ use jj_lib::op_store::WorkspaceId;
 use jj_lib::repo::Repo;
 use jj_lib::repo_path::RepoPath;
 use jj_lib::repo_path::RepoPathUiConverter;
-use jj_lib::revset::optimize;
 use jj_lib::revset::parse;
 use jj_lib::revset::DefaultSymbolResolver;
 use jj_lib::revset::FailingSymbolResolver;
-use jj_lib::revset::ResolvedExpression;
 use jj_lib::revset::Revset;
 use jj_lib::revset::RevsetAliasesMap;
 use jj_lib::revset::RevsetDiagnostics;
@@ -76,8 +74,11 @@ fn resolve_symbol_with_extensions(
     let expression = parse(&mut RevsetDiagnostics::new(), symbol, &context).unwrap();
     assert_matches!(*expression, RevsetExpression::CommitRef(_));
     let symbol_resolver = DefaultSymbolResolver::new(repo, extensions.symbol_resolvers());
-    match expression.resolve_user_expression(repo, &symbol_resolver)? {
-        ResolvedExpression::Commits(commits) => Ok(commits),
+    match expression
+        .resolve_user_expression(repo, &symbol_resolver)?
+        .as_ref()
+    {
+        RevsetExpression::Commits(commits) => Ok(commits.clone()),
         expression => panic!("symbol resolved to compound expression: {expression:?}"),
     }
 }
@@ -143,7 +144,7 @@ fn test_resolve_symbol_commit_id() {
             .unwrap();
         commits.push(commit);
     }
-    let repo = tx.commit("test");
+    let repo = tx.commit("test").unwrap();
 
     // Test the test setup
     assert_eq!(
@@ -214,7 +215,7 @@ fn test_resolve_symbol_commit_id() {
         None,
     );
     assert_matches!(
-        optimize(parse(&mut RevsetDiagnostics::new(), "present(04)", &context).unwrap())
+        parse(&mut RevsetDiagnostics::new(), "present(04)", &context).unwrap()
             .resolve_user_expression(repo.as_ref(), &symbol_resolver),
         Err(RevsetResolutionError::AmbiguousCommitIdPrefix(s)) if s == "04"
     );
@@ -297,7 +298,7 @@ fn test_resolve_symbol_change_id(readonly: bool) {
 
     let _readonly_repo;
     let repo: &dyn Repo = if readonly {
-        _readonly_repo = tx.commit("test");
+        _readonly_repo = tx.commit("test").unwrap();
         _readonly_repo.as_ref()
     } else {
         tx.repo_mut()
@@ -382,7 +383,7 @@ fn test_resolve_symbol_in_different_disambiguation_context() {
     for _ in 0..50 {
         write_random_commit(tx.repo_mut(), &settings);
     }
-    let repo1 = tx.commit("test");
+    let repo1 = tx.commit("test").unwrap();
 
     let mut tx = repo1.start_transaction(&settings);
     let commit2 = tx
@@ -391,7 +392,7 @@ fn test_resolve_symbol_in_different_disambiguation_context() {
         .write()
         .unwrap();
     tx.repo_mut().rebase_descendants(&settings).unwrap();
-    let repo2 = tx.commit("test");
+    let repo2 = tx.commit("test").unwrap();
 
     // Set up disambiguation index which only contains the commit2.id().
     let id_prefix_context = IdPrefixContext::new(Default::default())
@@ -928,7 +929,7 @@ fn try_resolve_commit_ids(
         &revset_extensions,
         None,
     );
-    let expression = optimize(parse(&mut RevsetDiagnostics::new(), revset_str, &context).unwrap());
+    let expression = parse(&mut RevsetDiagnostics::new(), revset_str, &context).unwrap();
     let symbol_resolver = DefaultSymbolResolver::new(repo, revset_extensions.symbol_resolvers());
     let expression = expression.resolve_user_expression(repo, &symbol_resolver)?;
     Ok(expression
@@ -963,7 +964,7 @@ fn resolve_commit_ids_in_workspace(
         &extensions,
         Some(workspace_ctx),
     );
-    let expression = optimize(parse(&mut RevsetDiagnostics::new(), revset_str, &context).unwrap());
+    let expression = parse(&mut RevsetDiagnostics::new(), revset_str, &context).unwrap();
     let symbol_resolver =
         DefaultSymbolResolver::new(repo, &([] as [&Box<dyn SymbolResolverExtension>; 0]));
     let expression = expression
@@ -2305,6 +2306,91 @@ fn test_evaluate_expression_remote_bookmarks() {
 }
 
 #[test]
+fn test_evaluate_expression_tags() {
+    let settings = testutils::user_settings();
+    let test_repo = TestRepo::init();
+    let repo = &test_repo.repo;
+
+    let mut tx = repo.start_transaction(&settings);
+    let mut_repo = tx.repo_mut();
+
+    let commit1 = write_random_commit(mut_repo, &settings);
+    let commit2 = write_random_commit(mut_repo, &settings);
+    let commit3 = write_random_commit(mut_repo, &settings);
+    let commit4 = write_random_commit(mut_repo, &settings);
+
+    // Can get tags when there are none
+    assert_eq!(resolve_commit_ids(mut_repo, "tags()"), vec![]);
+    // Can get a few tags
+    mut_repo.set_tag_target("tag1", RefTarget::normal(commit1.id().clone()));
+    mut_repo.set_tag_target("tag2", RefTarget::normal(commit2.id().clone()));
+    assert_eq!(
+        resolve_commit_ids(mut_repo, "tags()"),
+        vec![commit2.id().clone(), commit1.id().clone()]
+    );
+    // Can get tags with matching names
+    assert_eq!(
+        resolve_commit_ids(mut_repo, "tags(tag1)"),
+        vec![commit1.id().clone()]
+    );
+    assert_eq!(
+        resolve_commit_ids(mut_repo, "tags(tag)"),
+        vec![commit2.id().clone(), commit1.id().clone()]
+    );
+    assert_eq!(
+        resolve_commit_ids(mut_repo, "tags(exact:tag1)"),
+        vec![commit1.id().clone()]
+    );
+    assert_eq!(resolve_commit_ids(mut_repo, r#"tags(glob:"Tag?")"#), vec![]);
+    assert_eq!(
+        resolve_commit_ids(mut_repo, r#"tags(glob-i:"Tag?")"#),
+        vec![commit2.id().clone(), commit1.id().clone()]
+    );
+    assert_eq!(
+        resolve_commit_ids(mut_repo, "tags(regex:'ag')"),
+        vec![commit2.id().clone(), commit1.id().clone()]
+    );
+    assert_eq!(
+        resolve_commit_ids(mut_repo, "tags(regex:'^[Tt]ag1$')"),
+        vec![commit1.id().clone()]
+    );
+    // Can silently resolve to an empty set if there's no matches
+    assert_eq!(resolve_commit_ids(mut_repo, "tags(tag3)"), vec![]);
+    assert_eq!(resolve_commit_ids(mut_repo, "tags(exact:ag1)"), vec![]);
+    // Two tags pointing to the same commit does not result in a duplicate in
+    // the revset
+    mut_repo.set_tag_target("tag3", RefTarget::normal(commit2.id().clone()));
+    assert_eq!(
+        resolve_commit_ids(mut_repo, "tags()"),
+        vec![commit2.id().clone(), commit1.id().clone()]
+    );
+    // Can get tags when there are conflicted refs
+    mut_repo.set_tag_target(
+        "tag1",
+        RefTarget::from_legacy_form(
+            [commit1.id().clone()],
+            [commit2.id().clone(), commit3.id().clone()],
+        ),
+    );
+    mut_repo.set_tag_target(
+        "tag2",
+        RefTarget::from_legacy_form(
+            [commit2.id().clone()],
+            [commit3.id().clone(), commit4.id().clone()],
+        ),
+    );
+    mut_repo.set_tag_target("tag3", RefTarget::absent());
+    assert_eq!(
+        resolve_commit_ids(mut_repo, "tags()"),
+        vec![
+            commit4.id().clone(),
+            commit3.id().clone(),
+            commit2.id().clone()
+        ]
+    );
+}
+
+#[test]
 fn test_evaluate_expression_latest() {
     let settings = testutils::user_settings();
     let test_repo = TestRepo::init();
@@ -2384,6 +2470,187 @@ fn test_evaluate_expression_latest() {
             commit2_t2.id().clone(),
             commit1_t3.id().clone(),
         ],
+    );
+}
+
+#[test]
+fn test_evaluate_expression_fork_point() {
+    let settings = testutils::user_settings();
+    let test_repo = TestRepo::init();
+    let repo = &test_repo.repo;
+
+    // 5 6
+    // |/|
+    // 4 |
+    // | |
+    // 1 2 3
+    // | |/
+    // |/
+    // 0
+    let mut tx = repo.start_transaction(&settings);
+    let mut_repo = tx.repo_mut();
+    let mut graph_builder = CommitGraphBuilder::new(&settings, mut_repo);
+    let root_commit = repo.store().root_commit();
+    let commit1 = graph_builder.initial_commit();
+    let commit2 = graph_builder.initial_commit();
+    let commit3 = graph_builder.initial_commit();
+    let commit4 = graph_builder.commit_with_parents(&[&commit1]);
+    let commit5 = graph_builder.commit_with_parents(&[&commit4]);
+    let commit6 = graph_builder.commit_with_parents(&[&commit4, &commit2]);
+
+    assert_eq!(resolve_commit_ids(mut_repo, "fork_point(none())"), vec![]);
+    assert_eq!(
+        resolve_commit_ids(mut_repo, "fork_point(root())"),
+        vec![root_commit.id().clone()]
+    );
+    assert_eq!(
+        resolve_commit_ids(mut_repo, &format!("fork_point({})", commit1.id())),
+        vec![commit1.id().clone()]
+    );
+    assert_eq!(
+        resolve_commit_ids(mut_repo, &format!("fork_point({})", commit2.id())),
+        vec![commit2.id().clone()]
+    );
+    assert_eq!(
+        resolve_commit_ids(mut_repo, &format!("fork_point({})", commit3.id())),
+        vec![commit3.id().clone()]
+    );
+    assert_eq!(
+        resolve_commit_ids(mut_repo, &format!("fork_point({})", commit4.id())),
+        vec![commit4.id().clone()]
+    );
+    assert_eq!(
+        resolve_commit_ids(mut_repo, &format!("fork_point({})", commit5.id())),
+        vec![commit5.id().clone()]
+    );
+    assert_eq!(
+        resolve_commit_ids(mut_repo, &format!("fork_point({})", commit6.id())),
+        vec![commit6.id().clone()]
+    );
+    assert_eq!(
+        resolve_commit_ids(
+            mut_repo,
+            &format!("fork_point({} | {})", commit1.id(), commit2.id())
+        ),
+        vec![root_commit.id().clone()]
+    );
+    assert_eq!(
+        resolve_commit_ids(
+            mut_repo,
+            &format!("fork_point({} | {})", commit2.id(), commit3.id())
+        ),
+        vec![root_commit.id().clone()]
+    );
+    assert_eq!(
+        resolve_commit_ids(
+            mut_repo,
+            &format!(
+                "fork_point({} | {} | {})",
+                commit1.id(),
+                commit2.id(),
+                commit3.id()
+            )
+        ),
+        vec![root_commit.id().clone()]
+    );
+    assert_eq!(
+        resolve_commit_ids(
+            mut_repo,
+            &format!("fork_point({} | {})", commit1.id(), commit4.id())
+        ),
+        vec![commit1.id().clone()]
+    );
+    assert_eq!(
+        resolve_commit_ids(
+            mut_repo,
+            &format!("fork_point({} | {})", commit2.id(), commit5.id())
+        ),
+        vec![root_commit.id().clone()]
+    );
+    assert_eq!(
+        resolve_commit_ids(
+            mut_repo,
+            &format!("fork_point({} | {})", commit3.id(), commit6.id())
+        ),
+        vec![root_commit.id().clone()]
+    );
+    assert_eq!(
+        resolve_commit_ids(
+            mut_repo,
+            &format!("fork_point({} | {})", commit1.id(), commit5.id())
+        ),
+        vec![commit1.id().clone()]
+    );
+    assert_eq!(
+        resolve_commit_ids(
+            mut_repo,
+            &format!("fork_point({} | {})", commit4.id(), commit5.id())
+        ),
+        vec![commit4.id().clone()]
+    );
+    assert_eq!(
+        resolve_commit_ids(
+            mut_repo,
+            &format!("fork_point({} | {})", commit5.id(), commit6.id())
+        ),
+        vec![commit4.id().clone()]
+    );
+}
+
+#[test]
+fn test_evaluate_expression_fork_point_criss_cross() {
+    let settings = testutils::user_settings();
+    let test_repo = TestRepo::init();
+    let repo = &test_repo.repo;
+
+    // 3 4
+    // |X|
+    // 1 2
+    // |/
+    // 0
+    let mut tx = repo.start_transaction(&settings);
+    let mut_repo = tx.repo_mut();
+    let mut graph_builder = CommitGraphBuilder::new(&settings, mut_repo);
+    let commit1 = graph_builder.initial_commit();
+    let commit2 = graph_builder.initial_commit();
+    let commit3 = graph_builder.commit_with_parents(&[&commit1, &commit2]);
+    let commit4 = graph_builder.commit_with_parents(&[&commit1, &commit2]);
+
+    assert_eq!(
+        resolve_commit_ids(
+            mut_repo,
+            &format!("fork_point({} | {})", commit3.id(), commit4.id())
+        ),
+        vec![commit2.id().clone(), commit1.id().clone()]
+    );
+}
+
+#[test]
+fn test_evaluate_expression_fork_point_merge_with_ancestor() {
+    let settings = testutils::user_settings();
+    let test_repo = TestRepo::init();
+    let repo = &test_repo.repo;
+
+    // 4   5
+    // |\ /|
+    // 1 2 3
+    //  \|/
+    //   0
+    let mut tx = repo.start_transaction(&settings);
+    let mut_repo = tx.repo_mut();
+    let mut graph_builder = CommitGraphBuilder::new(&settings, mut_repo);
+    let commit1 = graph_builder.initial_commit();
+    let commit2 = graph_builder.initial_commit();
+    let commit3 = graph_builder.initial_commit();
+    let commit4 = graph_builder.commit_with_parents(&[&commit1, &commit2]);
+    let commit5 = graph_builder.commit_with_parents(&[&commit2, &commit3]);
+
+    assert_eq!(
+        resolve_commit_ids(
+            mut_repo,
+            &format!("fork_point({} | {})", commit4.id(), commit5.id())
+        ),
+        vec![commit2.id().clone()]
     );
 }
 
@@ -2837,7 +3104,7 @@ fn test_evaluate_expression_at_operation() {
         .unwrap();
     tx.repo_mut()
         .set_local_bookmark_target("commit1_ref", RefTarget::normal(commit1_op1.id().clone()));
-    let repo1 = tx.commit("test");
+    let repo1 = tx.commit("test").unwrap();
 
     let mut tx = repo1.start_transaction(&settings);
     let commit1_op2 = tx
@@ -2851,7 +3118,7 @@ fn test_evaluate_expression_at_operation() {
         .write()
         .unwrap();
     tx.repo_mut().rebase_descendants(&settings).unwrap();
-    let repo2 = tx.commit("test");
+    let repo2 = tx.commit("test").unwrap();
 
     let mut tx = repo2.start_transaction(&settings);
     let _commit4_op3 = create_random_commit(tx.repo_mut(), &settings)
@@ -2874,6 +3141,10 @@ fn test_evaluate_expression_at_operation() {
     );
     assert_eq!(
         resolve_commit_ids(repo2.as_ref(), "present(at_operation(@--, commit1_ref))"),
+        vec![]
+    );
+    assert_eq!(
+        resolve_commit_ids(repo2.as_ref(), "at_operation(@--, present(commit1_ref))"),
         vec![]
     );
 
@@ -3361,7 +3632,7 @@ fn test_evaluate_expression_file() {
         let expression = RevsetExpression::filter(RevsetFilterPredicate::File(
             FilesetExpression::prefix_path(file_path.to_owned()),
         ));
-        let revset = expression.evaluate_programmatic(mut_repo).unwrap();
+        let revset = expression.evaluate(mut_repo).unwrap();
         revset.iter().map(Result::unwrap).collect()
     };
 
@@ -3700,7 +3971,7 @@ fn test_reverse_graph_iterator() {
     let commit_d = graph_builder.commit_with_parents(&[&commit_c]);
     let commit_e = graph_builder.commit_with_parents(&[&commit_c]);
     let commit_f = graph_builder.commit_with_parents(&[&commit_d, &commit_e]);
-    let repo = tx.commit("test");
+    let repo = tx.commit("test").unwrap();
 
     let revset = revset_for_commits(
         repo.as_ref(),
@@ -3766,7 +4037,7 @@ fn test_revset_containing_fn() {
     let commit_b = write_random_commit(mut_repo, &settings);
     let commit_c = write_random_commit(mut_repo, &settings);
     let commit_d = write_random_commit(mut_repo, &settings);
-    let repo = tx.commit("test");
+    let repo = tx.commit("test").unwrap();
 
     let revset = revset_for_commits(repo.as_ref(), &[&commit_b, &commit_d]);
 

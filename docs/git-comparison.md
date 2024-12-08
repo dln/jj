@@ -324,8 +324,7 @@ parent.
     </tr>
     <tr>
       <td>Create a copy of a commit on top of another commit</td>
-      <td><code>jj duplicate &lt;source&gt;; jj rebase -r &lt;duplicate commit&gt; -d &lt;destination&gt;</code>
-          (there's no single command for it yet)</td>
+      <td><code>jj duplicate &lt;source&gt;; -d &lt;destination&gt;</code></td>
       <td><code>git co &lt;destination&gt;; git cherry-pick &lt;source&gt;</code></td>
     </tr>
     <tr>
@@ -376,6 +375,12 @@ parent.
       <td><code>jj backout -r &lt;revision&gt;</code>
       </td>
       <td><code>git revert &lt;revision&gt;</code></td>
+    </tr>
+    <tr>
+      <td>Show what revision and author last modified each line of a file</td>
+      <td><code>jj file annotate &lt;path&gt;</code>
+      </td>
+      <td><code>git blame &lt;file&gt;</code></td>
     </tr>
   </tbody>
 </table>

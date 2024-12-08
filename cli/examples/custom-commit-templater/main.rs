@@ -39,6 +39,7 @@ use jj_lib::revset::RevsetParseContext;
 use jj_lib::revset::RevsetParseError;
 use jj_lib::revset::RevsetResolutionError;
 use jj_lib::revset::SymbolResolverExtension;
+use jj_lib::revset::UserRevsetExpression;
 use once_cell::sync::OnceCell;
 
 struct HexCounter;
@@ -72,7 +73,7 @@ impl MostDigitsInId {
     fn count(&self, repo: &dyn Repo) -> i64 {
         *self.count.get_or_init(|| {
             RevsetExpression::all()
-                .evaluate_programmatic(repo)
+                .evaluate(repo)
                 .unwrap()
                 .iter()
                 .map(Result::unwrap)
@@ -100,7 +101,7 @@ impl PartialSymbolResolver for TheDigitestResolver {
 
         Ok(Some(
             RevsetExpression::all()
-                .evaluate_programmatic(repo)
+                .evaluate(repo)
                 .map_err(|err| RevsetResolutionError::Other(err.into()))?
                 .iter()
                 .map(Result::unwrap)
@@ -191,7 +192,7 @@ fn even_digits(
     _diagnostics: &mut RevsetDiagnostics,
     function: &FunctionCallNode,
     _context: &RevsetParseContext,
-) -> Result<Rc<RevsetExpression>, RevsetParseError> {
+) -> Result<Rc<UserRevsetExpression>, RevsetParseError> {
     function.expect_no_arguments()?;
     Ok(RevsetExpression::filter(RevsetFilterPredicate::Extension(
         Rc::new(EvenDigitsFilter),

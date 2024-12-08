@@ -12,7 +12,8 @@ use jj_lib::backend::FileId;
 use jj_lib::backend::MergedTreeId;
 use jj_lib::backend::TreeValue;
 use jj_lib::conflicts;
-use jj_lib::conflicts::materialize_merge_result;
+use jj_lib::conflicts::materialize_merge_result_to_bytes;
+use jj_lib::conflicts::ConflictMarkerStyle;
 use jj_lib::gitignore::GitIgnoreFile;
 use jj_lib::matchers::Matcher;
 use jj_lib::merge::Merge;
@@ -20,6 +21,7 @@ use jj_lib::merge::MergedTreeValue;
 use jj_lib::merged_tree::MergedTree;
 use jj_lib::merged_tree::MergedTreeBuilder;
 use jj_lib::repo_path::RepoPath;
+use jj_lib::working_copy::CheckoutOptions;
 use pollster::FutureExt;
 use thiserror::Error;
 
@@ -56,16 +58,26 @@ pub struct ExternalMergeTool {
     /// `$left`, `$right`, `$base`, and `$output` are replaced with
     /// paths to the corresponding files.
     pub merge_args: Vec<String>,
+    /// By default, if a merge tool exits with a non-zero exit code, then the
+    /// merge will be cancelled. Some merge tools allow leaving some conflicts
+    /// unresolved, in which case they will be left as conflict markers in the
+    /// output file. In that case, the merge tool may exit with a non-zero exit
+    /// code to indicate that not all conflicts were resolved. Adding an exit
+    /// code to this array will tell `jj` to interpret that exit code as
+    /// indicating that the `$output` file should contain conflict markers.
+    pub merge_conflict_exit_codes: Vec<i32>,
     /// If false (default), the `$output` file starts out empty and is accepted
     /// as a full conflict resolution as-is by `jj` after the merge tool is
     /// done with it. If true, the `$output` file starts out with the
-    /// contents of the conflict, with JJ's conflict markers. After the
-    /// merge tool is done, any remaining conflict markers in the
-    /// file parsed and taken to mean that the conflict was only partially
+    /// contents of the conflict, with the configured conflict markers. After
+    /// the merge tool is done, any remaining conflict markers in the
+    /// file are parsed and taken to mean that the conflict was only partially
     /// resolved.
-    // TODO: Instead of a boolean, this could denote the flavor of conflict markers to put in
-    // the file (`jj` or `diff3` for example).
     pub merge_tool_edits_conflict_markers: bool,
+    /// If provided, overrides the normal conflict marker style setting. This is
+    /// useful if a tool parses conflict markers, and so it requires a specific
+    /// format, or if a certain format is more readable than another.
+    pub conflict_marker_style: Option<ConflictMarkerStyle>,
 }
 
 #[derive(serde::Deserialize, Copy, Clone, Debug, Eq, PartialEq)]
@@ -89,7 +101,9 @@ impl Default for ExternalMergeTool {
             diff_args: ["$left", "$right"].map(ToOwned::to_owned).to_vec(),
             edit_args: ["$left", "$right"].map(ToOwned::to_owned).to_vec(),
             merge_args: vec![],
+            merge_conflict_exit_codes: vec![],
             merge_tool_edits_conflict_markers: false,
+            conflict_marker_style: None,
             diff_invocation_mode: DiffToolMode::Dir,
         }
     }
@@ -145,6 +159,11 @@ pub enum ExternalToolError {
     },
     #[error("Tool exited with {exit_status} (run with --debug to see the exact invocation)")]
     ToolAborted { exit_status: ExitStatus },
+    #[error(
+        "Tool exited with {exit_status}, but did not produce valid conflict markers (run with \
+         --debug to see the exact invocation)"
+    )]
+    InvalidConflictMarkers { exit_status: ExitStatus },
     #[error("I/O error")]
     Io(#[source] std::io::Error),
 }
@@ -156,14 +175,16 @@ pub fn run_mergetool_external(
     repo_path: &RepoPath,
     conflict: MergedTreeValue,
     tree: &MergedTree,
+    default_conflict_marker_style: ConflictMarkerStyle,
 ) -> Result<MergedTreeId, ConflictResolveError> {
-    let initial_output_content: Vec<u8> = if editor.merge_tool_edits_conflict_markers {
-        let mut materialized_conflict = vec![];
-        materialize_merge_result(&content, &mut materialized_conflict)
-            .expect("Writing to an in-memory buffer should never fail");
-        materialized_conflict
+    let conflict_marker_style = editor
+        .conflict_marker_style
+        .unwrap_or(default_conflict_marker_style);
+
+    let initial_output_content = if editor.merge_tool_edits_conflict_markers {
+        materialize_merge_result_to_bytes(&content, conflict_marker_style)
     } else {
-        vec![]
+        BString::default()
     };
     assert_eq!(content.num_sides(), 2);
     let files: HashMap<&str, &[u8]> = maplit::hashmap! {
@@ -211,7 +232,13 @@ pub fn run_mergetool_external(
             tool_binary: editor.program.clone(),
             source: e,
         })?;
-    if !exit_status.success() {
+
+    // Check whether the exit status implies that there should be conflict markers
+    let exit_status_implies_conflict = exit_status
+        .code()
+        .is_some_and(|code| editor.merge_conflict_exit_codes.contains(&code));
+
+    if !exit_status.success() && !exit_status_implies_conflict {
         return Err(ConflictResolveError::from(ExternalToolError::ToolAborted {
             exit_status,
         }));
@@ -223,12 +250,13 @@ pub fn run_mergetool_external(
         return Err(ConflictResolveError::EmptyOrUnchanged);
     }
 
-    let new_file_ids = if editor.merge_tool_edits_conflict_markers {
+    let new_file_ids = if editor.merge_tool_edits_conflict_markers || exit_status_implies_conflict {
         conflicts::update_from_content(
             &file_merge,
             tree.store(),
             repo_path,
             output_file_contents.as_slice(),
+            conflict_marker_style,
         )
         .block_on()?
     } else {
@@ -238,6 +266,17 @@ pub fn run_mergetool_external(
             .block_on()?;
         Merge::normal(new_file_id)
     };
+
+    // If the exit status indicated there should be conflict markers but there
+    // weren't any, it's likely that the tool generated invalid conflict markers, so
+    // we need to inform the user. If we didn't treat this as an error, the user
+    // might think the conflict was resolved successfully.
+    if exit_status_implies_conflict && new_file_ids.is_resolved() {
+        return Err(ConflictResolveError::ExternalTool(
+            ExternalToolError::InvalidConflictMarkers { exit_status },
+        ));
+    }
+
     let new_tree_value = match new_file_ids.into_resolved() {
         Ok(new_file_id) => Merge::normal(TreeValue::File {
             id: new_file_id.unwrap(),
@@ -258,7 +297,15 @@ pub fn edit_diff_external(
     matcher: &dyn Matcher,
     instructions: Option<&str>,
     base_ignores: Arc<GitIgnoreFile>,
+    default_conflict_marker_style: ConflictMarkerStyle,
 ) -> Result<MergedTreeId, DiffEditError> {
+    let conflict_marker_style = editor
+        .conflict_marker_style
+        .unwrap_or(default_conflict_marker_style);
+    let options = CheckoutOptions {
+        conflict_marker_style,
+    };
+
     let got_output_field = find_all_variables(&editor.edit_args).contains(&"output");
     let store = left_tree.store();
     let diffedit_wc = DiffEditWorkingCopies::check_out(
@@ -268,6 +315,7 @@ pub fn edit_diff_external(
         matcher,
         got_output_field.then_some(DiffSide::Right),
         instructions,
+        &options,
     )?;
 
     let patterns = diffedit_wc.working_copies.to_command_variables();
@@ -286,7 +334,7 @@ pub fn edit_diff_external(
         }));
     }
 
-    diffedit_wc.snapshot_results(base_ignores)
+    diffedit_wc.snapshot_results(base_ignores, options.conflict_marker_style)
 }
 
 /// Generates textual diff by the specified `tool` and writes into `writer`.
@@ -297,9 +345,16 @@ pub fn generate_diff(
     right_tree: &MergedTree,
     matcher: &dyn Matcher,
     tool: &ExternalMergeTool,
+    default_conflict_marker_style: ConflictMarkerStyle,
 ) -> Result<(), DiffGenerateError> {
+    let conflict_marker_style = tool
+        .conflict_marker_style
+        .unwrap_or(default_conflict_marker_style);
+    let options = CheckoutOptions {
+        conflict_marker_style,
+    };
     let store = left_tree.store();
-    let diff_wc = check_out_trees(store, left_tree, right_tree, matcher, None)?;
+    let diff_wc = check_out_trees(store, left_tree, right_tree, matcher, None, &options)?;
     set_readonly_recursively(diff_wc.left_working_copy_path())
         .map_err(ExternalToolError::SetUpDir)?;
     set_readonly_recursively(diff_wc.right_working_copy_path())

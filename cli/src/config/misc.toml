@@ -3,7 +3,7 @@
 [aliases]
 amend = ["squash"]
 b = ["bookmark"]
-co = ["checkout"]
+ci = ["commit"]
 unamend = ["unsquash"]
 
 [diff.color-words]
@@ -23,6 +23,7 @@ paginate = "auto"
 pager = { command = ["less", "-FRX"], env = { LESSCHARSET = "utf-8" } }
 log-word-wrap = false
 log-synthetic-elided-nodes = true
+conflict-marker-style = "diff"
 
 [ui.movement]
 edit = false
@@ -30,3 +31,4 @@ edit = false
 [snapshot]
 max-new-file-size = "1MiB"
 auto-track = "all()"
+auto-update-stale = false

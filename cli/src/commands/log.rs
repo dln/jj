@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use clap_complete::ArgValueCandidates;
 use jj_lib::backend::CommitId;
+use jj_lib::config::ConfigError;
 use jj_lib::graph::GraphEdgeType;
 use jj_lib::graph::ReverseGraphIterator;
 use jj_lib::graph::TopoGroupedGraphIterator;
@@ -31,6 +33,7 @@ use crate::cli_util::LogContentFormat;
 use crate::cli_util::RevisionArg;
 use crate::command_error::CommandError;
 use crate::commit_templater::CommitTemplateLanguage;
+use crate::complete;
 use crate::diff_util::DiffFormatArgs;
 use crate::graphlog::get_graphlog;
 use crate::graphlog::Edge;
@@ -41,17 +44,25 @@ use crate::ui::Ui;
 ///
 /// Renders a graphical view of the project's history, ordered with children
 /// before parents. By default, the output only includes mutable revisions,
-/// along with some additional revisions for context.
+/// along with some additional revisions for context. Use `jj log -r ::` to see
+/// all revisions. See `jj help -k revsets` (or
+/// https://martinvonz.github.io/jj/latest/revsets/) for information about the
+/// syntax.
 ///
 /// Spans of revisions that are not included in the graph per `--revisions` are
 /// rendered as a synthetic node labeled "(elided revisions)".
+///
+/// The working-copy commit is indicated by a `@` symbol in the graph. Immutable
+/// revisions (https://martinvonz.github.io/jj/latest/config/#set-of-immutable-commits)
+/// have a `◆` symbol. Other commits have a `○` symbol. To customize these
+/// symbols, see https://martinvonz.github.io/jj/latest/config/#node-style.
 #[derive(clap::Args, Clone, Debug)]
 pub(crate) struct LogArgs {
     /// Which revisions to show
     ///
     /// If no paths nor revisions are specified, this defaults to the
     /// `revsets.log` setting.
-    #[arg(long, short)]
+    #[arg(long, short, add = ArgValueCandidates::new(complete::all_revisions))]
     revisions: Vec<RevisionArg>,
     /// Show revisions modifying the given paths
     #[arg(value_hint = clap::ValueHint::AnyPath)]
@@ -77,7 +88,12 @@ pub(crate) struct LogArgs {
     no_graph: bool,
     /// Render each revision using the given template
     ///
-    /// For the syntax, see https://martinvonz.github.io/jj/latest/templates/
+    /// Run `jj log -T` to list the built-in templates.
+    ///
+    /// You can also specify arbitrary template expressions. For the syntax,
+    /// see https://martinvonz.github.io/jj/latest/templates/.
+    ///
+    /// If not specified, this defaults to the `templates.log` setting.
     #[arg(long, short = 'T')]
     template: Option<String>,
     /// Show patch
@@ -126,7 +142,6 @@ pub(crate) fn cmd_log(
 
     let use_elided_nodes = command
         .settings()
-        .config()
         .get_bool("ui.log-synthetic-elided-nodes")?;
     let with_content_format = LogContentFormat::new(ui, command.settings())?;
 
@@ -136,7 +151,7 @@ pub(crate) fn cmd_log(
         let language = workspace_command.commit_template_language();
         let template_string = match &args.template {
             Some(value) => value.to_string(),
-            None => command.settings().config().get_string("templates.log")?,
+            None => command.settings().get_string("templates.log")?,
         };
         template = workspace_command
             .parse_template(
@@ -172,11 +187,21 @@ pub(crate) fn cmd_log(
         if !args.no_graph {
             let mut raw_output = formatter.raw()?;
             let mut graph = get_graphlog(graph_style, raw_output.as_mut());
-            let forward_iter = TopoGroupedGraphIterator::new(revset.iter_graph());
-            let iter: Box<dyn Iterator<Item = _>> = if args.reversed {
-                Box::new(ReverseGraphIterator::new(forward_iter)?)
-            } else {
-                Box::new(forward_iter)
+            let iter: Box<dyn Iterator<Item = _>> = {
+                let mut forward_iter = TopoGroupedGraphIterator::new(revset.iter_graph());
+                // Emit the working-copy branch first, which is usually most
+                // interesting. This also helps stabilize output order.
+                if let Some(id) = workspace_command.get_wc_commit_id() {
+                    let has_commit = revset.containing_fn();
+                    if has_commit(id)? {
+                        forward_iter.prioritize_branch(id.clone());
+                    }
+                }
+                if args.reversed {
+                    Box::new(ReverseGraphIterator::new(forward_iter)?)
+                } else {
+                    Box::new(forward_iter)
+                }
             };
             for node in iter.take(limit) {
                 let (commit_id, edges) = node?;
@@ -306,11 +331,8 @@ pub(crate) fn cmd_log(
 pub fn get_node_template(
     style: GraphStyle,
     settings: &UserSettings,
-) -> Result<String, config::ConfigError> {
-    let symbol = settings
-        .config()
-        .get_string("templates.log_node")
-        .optional()?;
+) -> Result<String, ConfigError> {
+    let symbol = settings.get_string("templates.log_node").optional()?;
     let default = if style.is_ascii() {
         "builtin_log_node_ascii"
     } else {

@@ -37,6 +37,9 @@ use jj_lib::backend::Timestamp;
 use jj_lib::backend::TreeValue;
 use jj_lib::commit::Commit;
 use jj_lib::commit_builder::CommitBuilder;
+use jj_lib::config::ConfigLayer;
+use jj_lib::config::ConfigSource;
+use jj_lib::config::StackedConfig;
 use jj_lib::git_backend::GitBackend;
 use jj_lib::local_backend::LocalBackend;
 use jj_lib::merged_tree::MergedTree;
@@ -101,22 +104,25 @@ pub fn new_temp_dir() -> TempDir {
         .unwrap()
 }
 
-pub fn base_config() -> config::ConfigBuilder<config::builder::DefaultState> {
-    config::Config::builder().add_source(config::File::from_str(
-        r#"
-            user.name = "Test User"
-            user.email = "test.user@example.com"
-            operation.username = "test-username"
-            operation.hostname = "host.example.com"
-            debug.randomness-seed = "42"
-        "#,
-        config::FileFormat::Toml,
-    ))
+/// Returns new low-level config object that includes fake user configuration
+/// needed to run basic operations.
+pub fn base_user_config() -> StackedConfig {
+    let config_text = r#"
+        user.name = "Test User"
+        user.email = "test.user@example.com"
+        operation.username = "test-username"
+        operation.hostname = "host.example.com"
+        debug.randomness-seed = 42
+    "#;
+    let mut config = StackedConfig::empty();
+    config.add_layer(ConfigLayer::parse(ConfigSource::User, config_text).unwrap());
+    config
 }
 
+/// Returns new immutable settings object that includes fake user configuration
+/// needed to run basic operations.
 pub fn user_settings() -> UserSettings {
-    let config = base_config().build().unwrap();
-    UserSettings::from_config(config)
+    UserSettings::from_config(base_user_config())
 }
 
 #[derive(Debug)]
@@ -314,7 +320,7 @@ pub fn commit_transactions(settings: &UserSettings, txs: Vec<Transaction>) -> Ar
     let repo_loader = txs[0].base_repo().loader().clone();
     let mut op_ids = vec![];
     for tx in txs {
-        op_ids.push(tx.commit("test").op_id().clone());
+        op_ids.push(tx.commit("test").unwrap().op_id().clone());
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
     let repo = repo_loader.load_at_head(settings).unwrap();
@@ -384,7 +390,7 @@ pub fn create_single_tree(repo: &Arc<ReadonlyRepo>, path_contents: &[(&RepoPath,
         write_normal_file(&mut tree_builder, path, contents);
     }
     let id = tree_builder.write_tree().unwrap();
-    store.get_tree(RepoPath::root(), &id).unwrap()
+    store.get_tree(RepoPathBuf::root(), &id).unwrap()
 }
 
 pub fn create_tree(repo: &Arc<ReadonlyRepo>, path_contents: &[(&RepoPath, &str)]) -> MergedTree {

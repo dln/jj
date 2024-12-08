@@ -14,11 +14,13 @@
 
 #![allow(missing_docs)]
 
+use std::io;
 use std::io::Read;
 use std::io::Write;
 use std::iter::zip;
 
 use bstr::BString;
+use bstr::ByteSlice;
 use futures::stream::BoxStream;
 use futures::try_join;
 use futures::Stream;
@@ -49,16 +51,20 @@ use crate::merge::MergedTreeValue;
 use crate::repo_path::RepoPath;
 use crate::store::Store;
 
-const CONFLICT_START_LINE: &[u8] = b"<<<<<<<";
-const CONFLICT_END_LINE: &[u8] = b">>>>>>>";
-const CONFLICT_DIFF_LINE: &[u8] = b"%%%%%%%";
-const CONFLICT_MINUS_LINE: &[u8] = b"-------";
-const CONFLICT_PLUS_LINE: &[u8] = b"+++++++";
-const CONFLICT_START_LINE_CHAR: u8 = CONFLICT_START_LINE[0];
-const CONFLICT_END_LINE_CHAR: u8 = CONFLICT_END_LINE[0];
-const CONFLICT_DIFF_LINE_CHAR: u8 = CONFLICT_DIFF_LINE[0];
-const CONFLICT_MINUS_LINE_CHAR: u8 = CONFLICT_MINUS_LINE[0];
-const CONFLICT_PLUS_LINE_CHAR: u8 = CONFLICT_PLUS_LINE[0];
+const CONFLICT_START_LINE: &str = "<<<<<<<";
+const CONFLICT_END_LINE: &str = ">>>>>>>";
+const CONFLICT_DIFF_LINE: &str = "%%%%%%%";
+const CONFLICT_MINUS_LINE: &str = "-------";
+const CONFLICT_PLUS_LINE: &str = "+++++++";
+const CONFLICT_GIT_ANCESTOR_LINE: &str = "|||||||";
+const CONFLICT_GIT_SEPARATOR_LINE: &str = "=======";
+const CONFLICT_START_LINE_CHAR: u8 = CONFLICT_START_LINE.as_bytes()[0];
+const CONFLICT_END_LINE_CHAR: u8 = CONFLICT_END_LINE.as_bytes()[0];
+const CONFLICT_DIFF_LINE_CHAR: u8 = CONFLICT_DIFF_LINE.as_bytes()[0];
+const CONFLICT_MINUS_LINE_CHAR: u8 = CONFLICT_MINUS_LINE.as_bytes()[0];
+const CONFLICT_PLUS_LINE_CHAR: u8 = CONFLICT_PLUS_LINE.as_bytes()[0];
+const CONFLICT_GIT_ANCESTOR_LINE_CHAR: u8 = CONFLICT_GIT_ANCESTOR_LINE.as_bytes()[0];
+const CONFLICT_GIT_SEPARATOR_LINE_CHAR: u8 = CONFLICT_GIT_SEPARATOR_LINE.as_bytes()[0];
 
 /// A conflict marker is one of the separators, optionally followed by a space
 /// and some text.
@@ -66,13 +72,13 @@ const CONFLICT_PLUS_LINE_CHAR: u8 = CONFLICT_PLUS_LINE[0];
 // separators. This could be useful to make it possible to allow conflict
 // markers inside the text of the conflicts.
 static CONFLICT_MARKER_REGEX: once_cell::sync::Lazy<Regex> = once_cell::sync::Lazy::new(|| {
-    RegexBuilder::new(r"^(<{7}|>{7}|%{7}|\-{7}|\+{7})( .*)?$")
+    RegexBuilder::new(r"^(<{7}|>{7}|%{7}|\-{7}|\+{7}|\|{7}|={7})( .*)?$")
         .multi_line(true)
         .build()
         .unwrap()
 });
 
-fn write_diff_hunks(hunks: &[DiffHunk], file: &mut dyn Write) -> std::io::Result<()> {
+fn write_diff_hunks(hunks: &[DiffHunk], file: &mut dyn Write) -> io::Result<()> {
     for hunk in hunks {
         match hunk.kind {
             DiffHunkKind::Matching => {
@@ -231,104 +237,192 @@ async fn materialize_tree_value_no_access_denied(
     }
 }
 
-pub fn materialize_merge_result(
-    single_hunk: &Merge<BString>,
+/// Describes what style should be used when materializing conflicts.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ConflictMarkerStyle {
+    /// Style which shows a snapshot and a series of diffs to apply.
+    #[default]
+    Diff,
+    /// Style which shows a snapshot for each base and side.
+    Snapshot,
+    /// Style which replicates Git's "diff3" style to support external tools.
+    Git,
+}
+
+pub fn materialize_merge_result<T: AsRef<[u8]>>(
+    single_hunk: &Merge<T>,
+    conflict_marker_style: ConflictMarkerStyle,
     output: &mut dyn Write,
-) -> std::io::Result<()> {
+) -> io::Result<()> {
+    let merge_result = files::merge(single_hunk);
+    match &merge_result {
+        MergeResult::Resolved(content) => output.write_all(content),
+        MergeResult::Conflict(hunks) => {
+            materialize_conflict_hunks(hunks, conflict_marker_style, output)
+        }
+    }
+}
+
+pub fn materialize_merge_result_to_bytes<T: AsRef<[u8]>>(
+    single_hunk: &Merge<T>,
+    conflict_marker_style: ConflictMarkerStyle,
+) -> BString {
     let merge_result = files::merge(single_hunk);
     match merge_result {
-        MergeResult::Resolved(content) => {
-            output.write_all(&content)?;
-        }
+        MergeResult::Resolved(content) => content,
         MergeResult::Conflict(hunks) => {
-            let num_conflicts = hunks
-                .iter()
-                .filter(|hunk| hunk.as_resolved().is_none())
-                .count();
-            let mut conflict_index = 0;
-            for hunk in hunks {
-                if let Some(content) = hunk.as_resolved() {
-                    output.write_all(content)?;
-                } else {
-                    conflict_index += 1;
-                    output.write_all(CONFLICT_START_LINE)?;
-                    output.write_all(
-                        format!(" Conflict {conflict_index} of {num_conflicts}\n").as_bytes(),
-                    )?;
-                    let mut add_index = 0;
-                    for (base_index, left) in hunk.removes().enumerate() {
-                        // The vast majority of conflicts one actually tries to
-                        // resolve manually have 1 base.
-                        let base_str = if hunk.removes().len() == 1 {
-                            "base".to_string()
-                        } else {
-                            format!("base #{}", base_index + 1)
-                        };
+            let mut output = Vec::new();
+            materialize_conflict_hunks(&hunks, conflict_marker_style, &mut output)
+                .expect("writing to an in-memory buffer should never fail");
+            output.into()
+        }
+    }
+}
 
-                        let right1 = if let Some(right1) = hunk.get_add(add_index) {
-                            right1
-                        } else {
-                            // If we have no more positive terms, emit the remaining negative
-                            // terms as snapshots.
-                            output.write_all(CONFLICT_MINUS_LINE)?;
-                            output.write_all(format!(" Contents of {base_str}\n").as_bytes())?;
-                            output.write_all(left)?;
-                            continue;
-                        };
-                        let diff1 = Diff::by_line([&left, &right1]).hunks().collect_vec();
-                        // Check if the diff against the next positive term is better. Since
-                        // we want to preserve the order of the terms, we don't match against
-                        // any later positive terms.
-                        if let Some(right2) = hunk.get_add(add_index + 1) {
-                            let diff2 = Diff::by_line([&left, &right2]).hunks().collect_vec();
-                            if diff_size(&diff2) < diff_size(&diff1) {
-                                // If the next positive term is a better match, emit
-                                // the current positive term as a snapshot and the next
-                                // positive term as a diff.
-                                output.write_all(CONFLICT_PLUS_LINE)?;
-                                output.write_all(
-                                    format!(" Contents of side #{}\n", add_index + 1).as_bytes(),
-                                )?;
-                                output.write_all(right1)?;
-                                output.write_all(CONFLICT_DIFF_LINE)?;
-                                output.write_all(
-                                    format!(
-                                        " Changes from {base_str} to side #{}\n",
-                                        add_index + 2
-                                    )
-                                    .as_bytes(),
-                                )?;
-                                write_diff_hunks(&diff2, output)?;
-                                add_index += 2;
-                                continue;
-                            }
-                        }
+fn materialize_conflict_hunks(
+    hunks: &[Merge<BString>],
+    conflict_marker_style: ConflictMarkerStyle,
+    output: &mut dyn Write,
+) -> io::Result<()> {
+    let num_conflicts = hunks
+        .iter()
+        .filter(|hunk| hunk.as_resolved().is_none())
+        .count();
+    let mut conflict_index = 0;
+    for hunk in hunks {
+        if let Some(content) = hunk.as_resolved() {
+            output.write_all(content)?;
+        } else {
+            conflict_index += 1;
+            let conflict_info = format!("Conflict {conflict_index} of {num_conflicts}");
 
-                        output.write_all(CONFLICT_DIFF_LINE)?;
-                        output.write_all(
-                            format!(" Changes from {base_str} to side #{}\n", add_index + 1)
-                                .as_bytes(),
-                        )?;
-                        write_diff_hunks(&diff1, output)?;
-                        add_index += 1;
-                    }
-
-                    //  Emit the remaining positive terms as snapshots.
-                    for (add_index, slice) in hunk.adds().enumerate().skip(add_index) {
-                        output.write_all(CONFLICT_PLUS_LINE)?;
-                        output.write_all(
-                            format!(" Contents of side #{}\n", add_index + 1).as_bytes(),
-                        )?;
-                        output.write_all(slice)?;
-                    }
-                    output.write_all(CONFLICT_END_LINE)?;
-                    output.write_all(
-                        format!(" Conflict {conflict_index} of {num_conflicts} ends\n").as_bytes(),
+            match (conflict_marker_style, hunk.as_slice()) {
+                // 2-sided conflicts can use Git-style conflict markers
+                (ConflictMarkerStyle::Git, [left, base, right]) => {
+                    materialize_git_style_conflict(left, base, right, &conflict_info, output)?;
+                }
+                _ => {
+                    materialize_jj_style_conflict(
+                        hunk,
+                        &conflict_info,
+                        conflict_marker_style,
+                        output,
                     )?;
                 }
             }
         }
     }
+    Ok(())
+}
+
+fn materialize_git_style_conflict(
+    left: &[u8],
+    base: &[u8],
+    right: &[u8],
+    conflict_info: &str,
+    output: &mut dyn Write,
+) -> io::Result<()> {
+    writeln!(output, "{CONFLICT_START_LINE} Side #1 ({conflict_info})")?;
+    output.write_all(left)?;
+    writeln!(output, "{CONFLICT_GIT_ANCESTOR_LINE} Base")?;
+    output.write_all(base)?;
+    // VS Code doesn't seem to support any trailing text on the separator line
+    writeln!(output, "{CONFLICT_GIT_SEPARATOR_LINE}")?;
+    output.write_all(right)?;
+    writeln!(output, "{CONFLICT_END_LINE} Side #2 ({conflict_info} ends)")?;
+
+    Ok(())
+}
+
+fn materialize_jj_style_conflict(
+    hunk: &Merge<BString>,
+    conflict_info: &str,
+    conflict_marker_style: ConflictMarkerStyle,
+    output: &mut dyn Write,
+) -> io::Result<()> {
+    // Write a positive snapshot (side) of a conflict
+    fn write_side(add_index: usize, data: &[u8], output: &mut dyn Write) -> io::Result<()> {
+        writeln!(
+            output,
+            "{CONFLICT_PLUS_LINE} Contents of side #{}",
+            add_index + 1
+        )?;
+        output.write_all(data)
+    }
+
+    // Write a negative snapshot (base) of a conflict
+    fn write_base(base_str: &str, data: &[u8], output: &mut dyn Write) -> io::Result<()> {
+        writeln!(output, "{CONFLICT_MINUS_LINE} Contents of {base_str}")?;
+        output.write_all(data)
+    }
+
+    // Write a diff from a negative term to a positive term
+    fn write_diff(
+        base_str: &str,
+        add_index: usize,
+        diff: &[DiffHunk],
+        output: &mut dyn Write,
+    ) -> io::Result<()> {
+        writeln!(
+            output,
+            "{CONFLICT_DIFF_LINE} Changes from {base_str} to side #{}",
+            add_index + 1
+        )?;
+        write_diff_hunks(diff, output)
+    }
+
+    writeln!(output, "{CONFLICT_START_LINE} {conflict_info}")?;
+    let mut add_index = 0;
+    for (base_index, left) in hunk.removes().enumerate() {
+        // The vast majority of conflicts one actually tries to resolve manually have 1
+        // base.
+        let base_str = if hunk.removes().len() == 1 {
+            "base".to_string()
+        } else {
+            format!("base #{}", base_index + 1)
+        };
+
+        let Some(right1) = hunk.get_add(add_index) else {
+            // If we have no more positive terms, emit the remaining negative terms as
+            // snapshots.
+            write_base(&base_str, left, output)?;
+            continue;
+        };
+
+        // For any style other than "diff", always emit sides and bases separately
+        if conflict_marker_style != ConflictMarkerStyle::Diff {
+            write_side(add_index, right1, output)?;
+            write_base(&base_str, left, output)?;
+            add_index += 1;
+            continue;
+        }
+
+        let diff1 = Diff::by_line([&left, &right1]).hunks().collect_vec();
+        // Check if the diff against the next positive term is better. Since we want to
+        // preserve the order of the terms, we don't match against any later positive
+        // terms.
+        if let Some(right2) = hunk.get_add(add_index + 1) {
+            let diff2 = Diff::by_line([&left, &right2]).hunks().collect_vec();
+            if diff_size(&diff2) < diff_size(&diff1) {
+                // If the next positive term is a better match, emit the current positive term
+                // as a snapshot and the next positive term as a diff.
+                write_side(add_index, right1, output)?;
+                write_diff(&base_str, add_index + 1, &diff2, output)?;
+                add_index += 2;
+                continue;
+            }
+        }
+
+        write_diff(&base_str, add_index, &diff1, output)?;
+        add_index += 1;
+    }
+
+    // Emit the remaining positive terms as snapshots.
+    for (add_index, slice) in hunk.adds().enumerate().skip(add_index) {
+        write_side(add_index, slice, output)?;
+    }
+    writeln!(output, "{CONFLICT_END_LINE} {conflict_info} ends")?;
     Ok(())
 }
 
@@ -387,7 +481,7 @@ pub fn parse_conflict(input: &[u8], num_sides: usize) -> Option<Vec<Merge<BStrin
     let mut conflict_start = None;
     let mut conflict_start_len = 0;
     for line in input.split_inclusive(|b| *b == b'\n') {
-        if CONFLICT_MARKER_REGEX.is_match_at(line, 0) {
+        if is_conflict_marker_line(line) {
             if line[0] == CONFLICT_START_LINE_CHAR {
                 conflict_start = Some(pos);
                 conflict_start_len = line.len();
@@ -418,7 +512,33 @@ pub fn parse_conflict(input: &[u8], num_sides: usize) -> Option<Vec<Merge<BStrin
     }
 }
 
+/// This method handles parsing both JJ-style and Git-style conflict markers,
+/// meaning that switching conflict marker styles won't prevent existing files
+/// with other conflict marker styles from being parsed successfully. The
+/// conflict marker style to use for parsing is determined based on the first
+/// line of the hunk.
 fn parse_conflict_hunk(input: &[u8]) -> Merge<BString> {
+    // If the hunk starts with a conflict marker, find its first character
+    let initial_conflict_marker_char = input
+        .lines_with_terminator()
+        .next()
+        .filter(|line| is_conflict_marker_line(line))
+        .map(|line| line[0]);
+
+    match initial_conflict_marker_char {
+        // JJ-style conflicts must start with one of these 3 conflict marker lines
+        Some(CONFLICT_DIFF_LINE_CHAR | CONFLICT_MINUS_LINE_CHAR | CONFLICT_PLUS_LINE_CHAR) => {
+            parse_jj_style_conflict_hunk(input)
+        }
+        // Git-style conflicts either must not start with a conflict marker line, or must start with
+        // the "|||||||" conflict marker line (if the first side was empty)
+        None | Some(CONFLICT_GIT_ANCESTOR_LINE_CHAR) => parse_git_style_conflict_hunk(input),
+        // No other conflict markers are allowed at the start of a hunk
+        Some(_) => Merge::resolved(BString::new(vec![])),
+    }
+}
+
+fn parse_jj_style_conflict_hunk(input: &[u8]) -> Merge<BString> {
     enum State {
         Diff,
         Minus,
@@ -428,8 +548,8 @@ fn parse_conflict_hunk(input: &[u8]) -> Merge<BString> {
     let mut state = State::Unknown;
     let mut removes = vec![];
     let mut adds = vec![];
-    for line in input.split_inclusive(|b| *b == b'\n') {
-        if CONFLICT_MARKER_REGEX.is_match_at(line, 0) {
+    for line in input.lines_with_terminator() {
+        if is_conflict_marker_line(line) {
             match line[0] {
                 CONFLICT_DIFF_LINE_CHAR => {
                     state = State::Diff;
@@ -449,7 +569,7 @@ fn parse_conflict_hunk(input: &[u8]) -> Merge<BString> {
                 }
                 _ => {}
             }
-        };
+        }
         match state {
             State::Diff => {
                 if let Some(rest) = line.strip_prefix(b"-") {
@@ -459,6 +579,12 @@ fn parse_conflict_hunk(input: &[u8]) -> Merge<BString> {
                 } else if let Some(rest) = line.strip_prefix(b" ") {
                     removes.last_mut().unwrap().extend_from_slice(rest);
                     adds.last_mut().unwrap().extend_from_slice(rest);
+                } else if line == b"\n" || line == b"\r\n" {
+                    // Some editors strip trailing whitespace, so " \n" might become "\n". It would
+                    // be unfortunate if this prevented the conflict from being parsed, so we add
+                    // the empty line to the "remove" and "add" as if there was a space in front
+                    removes.last_mut().unwrap().extend_from_slice(line);
+                    adds.last_mut().unwrap().extend_from_slice(line);
                 } else {
                     // Doesn't look like a valid conflict
                     return Merge::resolved(BString::new(vec![]));
@@ -485,6 +611,63 @@ fn parse_conflict_hunk(input: &[u8]) -> Merge<BString> {
     }
 }
 
+fn parse_git_style_conflict_hunk(input: &[u8]) -> Merge<BString> {
+    #[derive(PartialEq, Eq)]
+    enum State {
+        Left,
+        Base,
+        Right,
+    }
+    let mut state = State::Left;
+    let mut left = BString::new(vec![]);
+    let mut base = BString::new(vec![]);
+    let mut right = BString::new(vec![]);
+    for line in input.lines_with_terminator() {
+        if is_conflict_marker_line(line) {
+            match line[0] {
+                CONFLICT_GIT_ANCESTOR_LINE_CHAR => {
+                    if state == State::Left {
+                        state = State::Base;
+                        continue;
+                    } else {
+                        // Base must come after left
+                        return Merge::resolved(BString::new(vec![]));
+                    }
+                }
+                CONFLICT_GIT_SEPARATOR_LINE_CHAR => {
+                    if state == State::Base {
+                        state = State::Right;
+                        continue;
+                    } else {
+                        // Right must come after base
+                        return Merge::resolved(BString::new(vec![]));
+                    }
+                }
+                _ => {}
+            }
+        }
+        match state {
+            State::Left => left.extend_from_slice(line),
+            State::Base => base.extend_from_slice(line),
+            State::Right => right.extend_from_slice(line),
+        }
+    }
+
+    if state == State::Right {
+        Merge::from_vec(vec![left, base, right])
+    } else {
+        // Doesn't look like a valid conflict
+        Merge::resolved(BString::new(vec![]))
+    }
+}
+
+/// Check whether a line is a conflict marker. Removes trailing whitespace
+/// before checking against regex to ensure it parses CRLF endings correctly.
+fn is_conflict_marker_line(line: &[u8]) -> bool {
+    let line = line.trim_end_with(|ch| ch.is_ascii_whitespace());
+    CONFLICT_MARKER_REGEX.is_match_at(line, 0)
+}
+
 /// Parses conflict markers in `content` and returns an updated version of
 /// `file_ids` with the new contents. If no (valid) conflict markers remain, a
 /// single resolves `FileId` will be returned.
@@ -493,6 +676,7 @@ pub async fn update_from_content(
     store: &Store,
     path: &RepoPath,
     content: &[u8],
+    conflict_marker_style: ConflictMarkerStyle,
 ) -> BackendResult<Merge<Option<FileId>>> {
     let simplified_file_ids = file_ids.clone().simplify();
     let simplified_file_ids = &simplified_file_ids;
@@ -504,7 +688,7 @@ pub async fn update_from_content(
     // copy.
     let mut old_content = Vec::with_capacity(content.len());
     let merge_hunk = extract_as_single_hunk(simplified_file_ids, store, path).await?;
-    materialize_merge_result(&merge_hunk, &mut old_content).unwrap();
+    materialize_merge_result(&merge_hunk, conflict_marker_style, &mut old_content).unwrap();
     if content == old_content {
         return Ok(file_ids.clone());
     }

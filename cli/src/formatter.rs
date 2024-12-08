@@ -29,6 +29,8 @@ use crossterm::style::SetAttribute;
 use crossterm::style::SetBackgroundColor;
 use crossterm::style::SetForegroundColor;
 use itertools::Itertools;
+use jj_lib::config::ConfigError;
+use jj_lib::config::StackedConfig;
 
 // Lets the caller label strings and translates the labels to colors
 pub trait Formatter: Write {
@@ -158,7 +160,7 @@ impl FormatterFactory {
         FormatterFactory { kind }
     }
 
-    pub fn color(config: &config::Config, debug: bool) -> Result<Self, config::ConfigError> {
+    pub fn color(config: &StackedConfig, debug: bool) -> Result<Self, ConfigError> {
         let rules = Arc::new(rules_from_config(config)?);
         let kind = FormatterFactoryKind::Color { rules, debug };
         Ok(FormatterFactory { kind })
@@ -295,11 +297,7 @@ impl<W: Write> ColorFormatter<W> {
         }
     }
 
-    pub fn for_config(
-        output: W,
-        config: &config::Config,
-        debug: bool,
-    ) -> Result<Self, config::ConfigError> {
+    pub fn for_config(output: W, config: &StackedConfig, debug: bool) -> Result<Self, ConfigError> {
         let rules = rules_from_config(config)?;
         Ok(Self::new(output, Arc::new(rules), debug))
     }
@@ -403,7 +401,7 @@ impl<W: Write> ColorFormatter<W> {
     }
 }
 
-fn rules_from_config(config: &config::Config) -> Result<Rules, config::ConfigError> {
+fn rules_from_config(config: &StackedConfig) -> Result<Rules, ConfigError> {
     let mut result = vec![];
     let table = config.get_table("colors")?;
     for (key, value) in table {
@@ -451,7 +449,7 @@ fn rules_from_config(config: &config::Config) -> Result<Rules, config::ConfigErr
     Ok(result)
 }
 
-fn color_for_name_or_hex(name_or_hex: &str) -> Result<Color, config::ConfigError> {
+fn color_for_name_or_hex(name_or_hex: &str) -> Result<Color, ConfigError> {
     match name_or_hex {
         "default" => Ok(Color::Reset),
         "black" => Ok(Color::Black),
@@ -471,7 +469,7 @@ fn color_for_name_or_hex(name_or_hex: &str) -> Result<Color, config::ConfigError
         "bright cyan" => Ok(Color::Cyan),
         "bright white" => Ok(Color::White),
         _ => color_for_hex(name_or_hex)
-            .ok_or_else(|| config::ConfigError::Message(format!("invalid color: {name_or_hex}"))),
+            .ok_or_else(|| ConfigError::Message(format!("invalid color: {name_or_hex}"))),
     }
 }
 
@@ -703,13 +701,17 @@ fn write_sanitized(output: &mut impl Write, buf: &[u8]) -> Result<(), Error> {
 mod tests {
     use std::str;
 
+    use indoc::indoc;
+    use jj_lib::config::ConfigLayer;
+    use jj_lib::config::ConfigSource;
+    use jj_lib::config::StackedConfig;
+
     use super::*;
 
-    fn config_from_string(text: &str) -> config::Config {
-        config::Config::builder()
-            .add_source(config::File::from_str(text, config::FileFormat::Toml))
-            .build()
-            .unwrap()
+    fn config_from_string(text: &str) -> StackedConfig {
+        let mut config = StackedConfig::empty();
+        config.add_layer(ConfigLayer::parse(ConfigSource::User, text).unwrap());
+        config
     }
 
     #[test]
@@ -744,93 +746,82 @@ mod tests {
     #[test]
     fn test_color_formatter_color_codes() {
         // Test the color code for each color.
-        let colors = [
-            "black",
-            "red",
-            "green",
-            "yellow",
-            "blue",
-            "magenta",
-            "cyan",
-            "white",
-            "bright black",
-            "bright red",
-            "bright green",
-            "bright yellow",
-            "bright blue",
-            "bright magenta",
-            "bright cyan",
-            "bright white",
-        ];
-        let mut config_builder = config::Config::builder();
-        for color in colors {
-            // Use the color name as the label.
-            config_builder = config_builder
-                .set_override(format!("colors.{}", color.replace(' ', "-")), color)
-                .unwrap();
-        }
+        // Use the color name as the label.
+        let config = config_from_string(indoc! {"
+            [colors]
+            black = 'black'
+            red = 'red'
+            green = 'green'
+            yellow = 'yellow'
+            blue = 'blue'
+            magenta = 'magenta'
+            cyan = 'cyan'
+            white = 'white'
+            bright-black = 'bright black'
+            bright-red = 'bright red'
+            bright-green = 'bright green'
+            bright-yellow = 'bright yellow'
+            bright-blue = 'bright blue'
+            bright-magenta = 'bright magenta'
+            bright-cyan = 'bright cyan'
+            bright-white = 'bright white'
+        "});
+        // TODO: migrate off config::Config and switch to IndexMap
+        let colors: HashMap<String, String> = config.get("colors").unwrap();
         let mut output: Vec<u8> = vec![];
-        let mut formatter =
-            ColorFormatter::for_config(&mut output, &config_builder.build().unwrap(), false)
-                .unwrap();
-        for color in colors {
-            formatter.push_label(&color.replace(' ', "-")).unwrap();
+        let mut formatter = ColorFormatter::for_config(&mut output, &config, false).unwrap();
+        for (label, color) in colors.iter().sorted() {
+            formatter.push_label(label).unwrap();
             write!(formatter, " {color} ").unwrap();
             formatter.pop_label().unwrap();
             writeln!(formatter).unwrap();
         }
         drop(formatter);
-        insta::assert_snapshot!(String::from_utf8(output).unwrap(), @r###"
+        insta::assert_snapshot!(String::from_utf8(output).unwrap(), @r"
         [38;5;0m black [39m
-        [38;5;1m red [39m
-        [38;5;2m green [39m
-        [38;5;3m yellow [39m
         [38;5;4m blue [39m
-        [38;5;5m magenta [39m
-        [38;5;6m cyan [39m
-        [38;5;7m white [39m
         [38;5;8m bright black [39m
-        [38;5;9m bright red [39m
-        [38;5;10m bright green [39m
-        [38;5;11m bright yellow [39m
         [38;5;12m bright blue [39m
-        [38;5;13m bright magenta [39m
         [38;5;14m bright cyan [39m
+        [38;5;10m bright green [39m
+        [38;5;13m bright magenta [39m
+        [38;5;9m bright red [39m
         [38;5;15m bright white [39m
-        "###);
+        [38;5;11m bright yellow [39m
+        [38;5;6m cyan [39m
+        [38;5;2m green [39m
+        [38;5;5m magenta [39m
+        [38;5;1m red [39m
+        [38;5;7m white [39m
+        [38;5;3m yellow [39m
+        ");
     }
 
     #[test]
     fn test_color_formatter_hex_colors() {
         // Test the color code for each color.
-        let labels_and_colors = [
-            ["black", "#000000"],
-            ["white", "#ffffff"],
-            ["pastel-blue", "#AFE0D9"],
-        ];
-        let mut config_builder = config::Config::builder();
-        for [label, color] in labels_and_colors {
-            // Use the color name as the label.
-            config_builder = config_builder
-                .set_override(format!("colors.{label}"), color)
-                .unwrap();
-        }
+        let config = config_from_string(indoc! {"
+            [colors]
+            black = '#000000'
+            white = '#ffffff'
+            pastel-blue = '#AFE0D9'
+        "});
+        // TODO: migrate off config::Config and switch to IndexMap
+        let colors: HashMap<String, String> = config.get("colors").unwrap();
         let mut output: Vec<u8> = vec![];
-        let mut formatter =
-            ColorFormatter::for_config(&mut output, &config_builder.build().unwrap(), false)
-                .unwrap();
-        for [label, _] in labels_and_colors {
+        let mut formatter = ColorFormatter::for_config(&mut output, &config, false).unwrap();
+        for label in colors.keys().sorted() {
             formatter.push_label(&label.replace(' ', "-")).unwrap();
             write!(formatter, " {label} ").unwrap();
             formatter.pop_label().unwrap();
             writeln!(formatter).unwrap();
         }
         drop(formatter);
-        insta::assert_snapshot!(String::from_utf8(output).unwrap(), @r###"
+        insta::assert_snapshot!(String::from_utf8(output).unwrap(), @r"
         [38;2;0;0;0m black [39m
-        [38;2;255;255;255m white [39m
         [38;2;175;224;217m pastel-blue [39m
-        "###);
+        [38;2;255;255;255m white [39m
+        ");
     }
 
     #[test]

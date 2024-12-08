@@ -62,6 +62,7 @@ use crate::object_id::PrefixResolution;
 use crate::op_heads_store;
 use crate::op_heads_store::OpHeadResolutionError;
 use crate::op_heads_store::OpHeadsStore;
+use crate::op_heads_store::OpHeadsStoreError;
 use crate::op_store;
 use crate::op_store::OpStore;
 use crate::op_store::OpStoreError;
@@ -81,9 +82,10 @@ use crate::revset;
 use crate::revset::RevsetExpression;
 use crate::revset::RevsetIteratorExt;
 use crate::rewrite::merge_commit_trees;
+use crate::rewrite::rebase_commit_with_options;
 use crate::rewrite::CommitRewriter;
-use crate::rewrite::DescendantRebaser;
 use crate::rewrite::RebaseOptions;
+use crate::rewrite::RebasedCommit;
 use crate::settings::RepoSettings;
 use crate::settings::UserSettings;
 use crate::signing::SignInitError;
@@ -148,6 +150,8 @@ pub enum RepoInitError {
     #[error(transparent)]
     Backend(#[from] BackendInitError),
     #[error(transparent)]
+    OpHeadsStore(#[from] OpHeadsStoreError),
+    #[error(transparent)]
     Path(#[from] PathError),
 }
 
@@ -207,7 +211,7 @@ impl ReadonlyRepo {
         let op_heads_store = op_heads_store_initializer(user_settings, &op_heads_path);
         let op_heads_type_path = op_heads_path.join("type");
         fs::write(&op_heads_type_path, op_heads_store.name()).context(&op_heads_type_path)?;
-        op_heads_store.update_op_heads(&[], op_store.root_operation_id());
+        op_heads_store.update_op_heads(&[], op_store.root_operation_id())?;
         let op_heads_store: Arc<dyn OpHeadsStore> = Arc::from(op_heads_store);
 
         let index_path = repo_path.join("index");
@@ -614,6 +618,8 @@ pub enum RepoLoaderError {
     IndexRead(#[from] IndexReadError),
     #[error(transparent)]
     OpHeadResolution(#[from] OpHeadResolutionError),
+    #[error(transparent)]
+    OpHeadsStoreError(#[from] OpHeadsStoreError),
     #[error(transparent)]
     OpStore(#[from] OpStoreError),
 }
@@ -1167,7 +1173,7 @@ impl MutableRepo {
             .parents()
             .minus(&old_commits_expression);
         let heads_to_add = heads_to_add_expression
-            .evaluate_programmatic(self)
+            .evaluate(self)
             .unwrap()
             .iter()
             .map(Result::unwrap); // TODO: Return error to caller
@@ -1193,7 +1199,7 @@ impl MutableRepo {
                     self.parent_mapping.keys().cloned().collect(),
                 ));
         let to_visit_revset = to_visit_expression
-            .evaluate_programmatic(self)
+            .evaluate(self)
             .map_err(|err| err.expect_backend_error())?;
         let to_visit: Vec<_> = to_visit_revset
             .iter()
@@ -1270,68 +1276,46 @@ impl MutableRepo {
         Ok(())
     }
 
-    /// After the rebaser returned by this function is dropped,
-    /// self.parent_mapping needs to be cleared.
-    fn rebase_descendants_return_rebaser<'settings, 'repo>(
-        &'repo mut self,
-        settings: &'settings UserSettings,
-        options: RebaseOptions,
-    ) -> BackendResult<Option<DescendantRebaser<'settings, 'repo>>> {
-        if !self.has_rewrites() {
-            // Optimization
-            return Ok(None);
-        }
-
-        let to_visit =
-            self.find_descendants_to_rebase(self.parent_mapping.keys().cloned().collect())?;
-        let mut rebaser = DescendantRebaser::new(settings, self, to_visit);
-        *rebaser.mut_options() = options;
-        rebaser.rebase_all()?;
-        Ok(Some(rebaser))
-    }
-
-    // TODO(ilyagr): Either document that this also moves bookmarks (rename the
-    // function and the related functions?) or change things so that this only
-    // rebases descendants.
-    pub fn rebase_descendants_with_options(
-        &mut self,
-        settings: &UserSettings,
-        options: RebaseOptions,
-    ) -> BackendResult<usize> {
-        let result = self
-            .rebase_descendants_return_rebaser(settings, options)?
-            .map_or(0, |rebaser| rebaser.into_map().len());
-        self.parent_mapping.clear();
-        Ok(result)
-    }
-
-    /// This is similar to `rebase_descendants_return_map`, but the return value
-    /// needs more explaining.
+    /// Rebase descendants of the rewritten commits.
     ///
-    /// If the `options.empty` is the default, this function will only
-    /// rebase commits, and the return value is what you'd expect it to be.
+    /// The descendants of the commits registered in `self.parent_mappings` will
+    /// be recursively rebased onto the new version of their parents.
     ///
-    /// Otherwise, this function may rebase some commits and abandon others. The
-    /// behavior is such that only commits with a single parent will ever be
-    /// abandoned. In the returned map, an abandoned commit will look as a
-    /// key-value pair where the key is the abandoned commit and the value is
-    /// **its parent**. One can tell this case apart since the change ids of the
-    /// key and the value will not match. The parent will inherit the
-    /// descendants and the bookmarks of the abandoned commit.
-    // TODO: Rewrite this using `transform_descendants()`
+    /// If `options.empty` is the default (`EmptyBehaviour::Keep`), all
+    /// rebased descendant commits will be preserved even if they were
+    /// emptied following the rebase operation. A map of newly rebased
+    /// commit ID to original commit ID will be returned.
+    ///
+    /// Otherwise, this function may rebase some commits and abandon others,
+    /// based on the given `EmptyBehaviour`. The behavior is such that only
+    /// commits with a single parent will ever be abandoned. In the returned
+    /// map, an abandoned commit will look as a key-value pair where the key
+    /// is the abandoned commit and the value is **its parent**. One can
+    /// tell this case apart since the change ids of the key and the value
+    /// will not match. The parent will inherit the descendants and the
+    /// bookmarks of the abandoned commit.
     pub fn rebase_descendants_with_options_return_map(
         &mut self,
         settings: &UserSettings,
         options: RebaseOptions,
     ) -> BackendResult<HashMap<CommitId, CommitId>> {
-        let result = Ok(self
-            // We do not set RebaseOptions here, since this function does not currently return
-            // enough information to describe the results of a rebase if some commits got
-            // abandoned
-            .rebase_descendants_return_rebaser(settings, options)?
-            .map_or(HashMap::new(), |rebaser| rebaser.into_map()));
+        let mut rebased: HashMap<CommitId, CommitId> = HashMap::new();
+        let roots = self.parent_mapping.keys().cloned().collect_vec();
+        self.transform_descendants(settings, roots, |rewriter| {
+            if rewriter.parents_changed() {
+                let old_commit_id = rewriter.old_commit().id().clone();
+                let rebased_commit: RebasedCommit =
+                    rebase_commit_with_options(settings, rewriter, &options)?;
+                let new_commit_id = match rebased_commit {
+                    RebasedCommit::Rewritten(new_commit) => new_commit.id().clone(),
+                    RebasedCommit::Abandoned { parent_id } => parent_id,
+                };
+                rebased.insert(old_commit_id, new_commit_id);
+            }
+            Ok(())
+        })?;
         self.parent_mapping.clear();
-        result
+        Ok(rebased)
     }
 
     /// Rebase descendants of the rewritten commits.
@@ -1339,6 +1323,11 @@ impl MutableRepo {
     /// The descendants of the commits registered in `self.parent_mappings` will
     /// be recursively rebased onto the new version of their parents.
     /// Returns the number of rebased descendants.
+    ///
+    /// All rebased descendant commits will be preserved even if they were
+    /// emptied following the rebase operation. To customize the rebase
+    /// behavior, use
+    /// [`MutableRepo::rebase_descendants_with_options_return_map`].
     pub fn rebase_descendants(&mut self, settings: &UserSettings) -> BackendResult<usize> {
         let roots = self.parent_mapping.keys().cloned().collect_vec();
         let mut num_rebased = 0;
@@ -1373,13 +1362,6 @@ impl MutableRepo {
         })?;
         self.parent_mapping.clear();
         Ok(num_reparented)
-    }
-
-    pub fn rebase_descendants_return_map(
-        &mut self,
-        settings: &UserSettings,
-    ) -> BackendResult<HashMap<CommitId, CommitId>> {
-        self.rebase_descendants_with_options_return_map(settings, Default::default())
     }
 
     pub fn set_wc_commit(

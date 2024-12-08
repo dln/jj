@@ -18,7 +18,10 @@ a comparison with Git, including how workflows are different, see the
 * **Configuration: Partial.** The only configuration from Git (e.g. in
   `~/.gitconfig`) that's respected is the following. Feel free to file a bug if
   you miss any particular configuration options.
-  * The configuration of remotes (`[remote "<name>"]`).
+  * The configuration of remotes (`[remote "<name>"]`). Only the names and URLs
+    are respected (refspecs are not respected, and
+    [only the last pushurl](https://github.com/martinvonz/jj/issues/4889) is
+    respected).
   * `core.excludesFile`
 * **Authentication: Partial.** Only `ssh-agent`, a password-less key (
   only `~/.ssh/id_rsa`, `~/.ssh/id_ed25519` or `~/.ssh/id_ed25519_sk`), or
@@ -171,15 +174,16 @@ technically possible (though not officially supported) to convert it into a
 co-located repo like so:
 
 ```bash
+# Ignore the .jj directory in Git
+echo '/*' > .jj/.gitignore
 # Move the Git repo
 mv .jj/repo/store/git .git
 # Tell jj where to find it
 echo -n '../../../.git' > .jj/repo/store/git_target
-# Ignore the .jj directory in Git
-echo '/*' > .jj/.gitignore
 # Make the Git repository non-bare and set HEAD
 git config --unset core.bare
-jj new @-
+# Convince jj to update .git/HEAD to point to the working-copy commit's parent
+jj new && jj undo
 ```
 
 We may officially support this in the future. If you try this, we would

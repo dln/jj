@@ -17,7 +17,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use clap::ArgGroup;
-use indexmap::IndexSet;
+use clap_complete::ArgValueCandidates;
 use itertools::Itertools;
 use jj_lib::backend::CommitId;
 use jj_lib::commit::Commit;
@@ -25,6 +25,7 @@ use jj_lib::commit::CommitIteratorExt;
 use jj_lib::object_id::ObjectId;
 use jj_lib::repo::ReadonlyRepo;
 use jj_lib::repo::Repo;
+use jj_lib::revset::ResolvedRevsetExpression;
 use jj_lib::revset::RevsetExpression;
 use jj_lib::revset::RevsetIteratorExt;
 use jj_lib::rewrite::move_commits;
@@ -42,6 +43,7 @@ use crate::cli_util::WorkspaceCommandHelper;
 use crate::command_error::cli_error;
 use crate::command_error::user_error;
 use crate::command_error::CommandError;
+use crate::complete;
 use crate::ui::Ui;
 
 /// Move revisions to different parent(s)
@@ -140,12 +142,7 @@ pub(crate) struct RebaseArgs {
     /// -d=dst`.
     ///
     /// If none of `-b`, `-s`, or `-r` is provided, then the default is `-b @`.
-    #[arg(
-        long,
-        short,
-        conflicts_with = "insert_after",
-        conflicts_with = "insert_before"
-    )]
+    #[arg(long, short, add = ArgValueCandidates::new(complete::mutable_revisions))]
     branch: Vec<RevisionArg>,
 
     /// Rebase specified revision(s) together with their trees of descendants
@@ -156,7 +153,7 @@ pub(crate) struct RebaseArgs {
     /// of others.
     ///
     /// If none of `-b`, `-s`, or `-r` is provided, then the default is `-b @`.
-    #[arg(long, short)]
+    #[arg(long, short, add = ArgValueCandidates::new(complete::mutable_revisions))]
     source: Vec<RevisionArg>,
     /// Rebase the given revisions, rebasing descendants onto this revision's
     /// parent(s)
@@ -165,7 +162,7 @@ pub(crate) struct RebaseArgs {
     /// descendant of `A`.
     ///
     /// If none of `-b`, `-s`, or `-r` is provided, then the default is `-b @`.
-    #[arg(long, short)]
+    #[arg(long, short, add = ArgValueCandidates::new(complete::mutable_revisions))]
     revisions: Vec<RevisionArg>,
 
     #[command(flatten)]
@@ -179,7 +176,7 @@ pub(crate) struct RebaseArgs {
     /// abandoned. It will not be abandoned if it was already empty before the
     /// rebase. Will never skip merge commits with multiple non-empty
     /// parents.
-    #[arg(long, conflicts_with = "revisions")]
+    #[arg(long)]
     skip_emptied: bool,
 }
 
@@ -188,28 +185,26 @@ pub(crate) struct RebaseArgs {
 pub struct RebaseDestinationArgs {
     /// The revision(s) to rebase onto (can be repeated to create a merge
     /// commit)
-    #[arg(long, short)]
+    #[arg(long, short, add = ArgValueCandidates::new(complete::all_revisions))]
     destination: Option<Vec<RevisionArg>>,
     /// The revision(s) to insert after (can be repeated to create a merge
     /// commit)
-    ///
-    /// Only works with `-r` and `-s`.
     #[arg(
         long,
         short = 'A',
         visible_alias = "after",
-        conflicts_with = "destination"
+        conflicts_with = "destination",
+        add = ArgValueCandidates::new(complete::all_revisions),
     )]
     insert_after: Option<Vec<RevisionArg>>,
     /// The revision(s) to insert before (can be repeated to create a merge
     /// commit)
-    ///
-    /// Only works with `-r` and `-s`.
     #[arg(
         long,
         short = 'B',
         visible_alias = "before",
-        conflicts_with = "destination"
+        conflicts_with = "destination",
+        add = ArgValueCandidates::new(complete::mutable_revisions),
     )]
     insert_before: Option<Vec<RevisionArg>>,
 }
@@ -235,21 +230,6 @@ pub(crate) fn cmd_rebase(
     };
     let mut workspace_command = command.workspace_helper(ui)?;
     if !args.revisions.is_empty() {
-        assert_eq!(
-            // In principle, `-r --skip-empty` could mean to abandon the `-r`
-            // commit if it becomes empty. This seems internally consistent with
-            // the behavior of other commands, but is not very useful.
-            //
-            // It would become even more confusing once `-r --before` is
-            // implemented. If `rebase -r` behaves like `abandon`, the
-            // descendants of the `-r` commits should not be abandoned if
-            // emptied. But it would also make sense for the descendants of the
-            // `--before` commit to be abandoned if emptied. A commit can easily
-            // be in both categories.
-            rebase_options.empty,
-            EmptyBehaviour::Keep,
-            "clap should forbid `-r --skip-empty`"
-        );
         rebase_revisions(
             ui,
             command.settings(),
@@ -268,26 +248,12 @@ pub(crate) fn cmd_rebase(
             &rebase_options,
         )?;
     } else {
-        let destination = args
-            .destination
-            .destination
-            .as_ref()
-            .expect("clap should enforce -d when used with -b");
-        let new_parents = workspace_command
-            .resolve_some_revsets_default_single(ui, destination)?
-            .into_iter()
-            .collect_vec();
-        let branch_commits = if args.branch.is_empty() {
-            IndexSet::from([workspace_command.resolve_single_rev(ui, &RevisionArg::AT)?])
-        } else {
-            workspace_command.resolve_some_revsets_default_single(ui, &args.branch)?
-        };
         rebase_branch(
             ui,
             command.settings(),
             &mut workspace_command,
-            new_parents,
-            &branch_commits,
+            &args.branch,
+            &args.destination,
             rebase_options,
         )?;
     }
@@ -368,35 +334,46 @@ fn rebase_branch(
     ui: &mut Ui,
     settings: &UserSettings,
     workspace_command: &mut WorkspaceCommandHelper,
-    new_parents: Vec<Commit>,
-    branch_commits: &IndexSet<Commit>,
+    branch: &[RevisionArg],
+    rebase_destination: &RebaseDestinationArgs,
     rebase_options: RebaseOptions,
 ) -> Result<(), CommandError> {
-    let parent_ids = new_parents.iter().ids().cloned().collect_vec();
-    let branch_commit_ids = branch_commits
-        .iter()
-        .map(|commit| commit.id().clone())
-        .collect_vec();
-    let roots_expression = RevsetExpression::commits(parent_ids.clone())
+    let branch_commits: Vec<_> = if branch.is_empty() {
+        vec![workspace_command.resolve_single_rev(ui, &RevisionArg::AT)?]
+    } else {
+        workspace_command
+            .resolve_some_revsets_default_single(ui, branch)?
+            .iter()
+            .cloned()
+            .collect_vec()
+    };
+
+    let (new_parents, new_children) =
+        compute_rebase_destination(ui, workspace_command, rebase_destination)?;
+    let new_parent_ids = new_parents.iter().ids().cloned().collect_vec();
+    let branch_commit_ids = branch_commits.iter().ids().cloned().collect_vec();
+    let roots_expression = RevsetExpression::commits(new_parent_ids.clone())
         .range(&RevsetExpression::commits(branch_commit_ids))
         .roots();
     let root_commits: Vec<_> = roots_expression
-        .evaluate_programmatic(workspace_command.repo().as_ref())
+        .evaluate(workspace_command.repo().as_ref())
         .unwrap()
         .iter()
         .commits(workspace_command.repo().store())
         .try_collect()?;
     workspace_command.check_rewritable(root_commits.iter().ids())?;
-    for commit in &root_commits {
-        check_rebase_destinations(workspace_command.repo(), &new_parents, commit)?;
+    if rebase_destination.destination.is_some() && new_children.is_empty() {
+        for commit in &root_commits {
+            check_rebase_destinations(workspace_command.repo(), &new_parents, commit)?;
+        }
     }
 
     rebase_descendants_transaction(
         ui,
         settings,
         workspace_command,
-        &parent_ids,
-        &[],
+        &new_parent_ids,
+        &new_children,
         root_commits,
         &rebase_options,
     )
@@ -428,12 +405,7 @@ fn rebase_descendants_transaction(
         )
     };
 
-    let MoveCommitsStats {
-        num_rebased_targets,
-        num_rebased_descendants,
-        num_skipped_rebases,
-        num_abandoned,
-    } = move_commits(
+    let stats = move_commits(
         settings,
         tx.repo_mut(),
         new_parent_ids,
@@ -441,29 +413,7 @@ fn rebase_descendants_transaction(
         &MoveCommitsTarget::Roots(target_roots),
         rebase_options,
     )?;
-
-    if num_skipped_rebases > 0 {
-        writeln!(
-            ui.status(),
-            "Skipped rebase of {num_skipped_rebases} commits that were already in place"
-        )?;
-    }
-    if num_rebased_targets > 0 {
-        writeln!(ui.status(), "Rebased {num_rebased_targets} commits")?;
-    }
-    if num_rebased_descendants > 0 {
-        writeln!(
-            ui.status(),
-            "Rebased {num_rebased_descendants} descendant commits"
-        )?;
-    }
-    if num_abandoned > 0 {
-        writeln!(
-            ui.status(),
-            "Abandoned {num_abandoned} newly emptied commits"
-        )?;
-    }
-
+    print_move_commits_stats(ui, &stats)?;
     tx.finish(ui, tx_description)
 }
 
@@ -498,7 +448,7 @@ fn compute_rebase_destination(
             let new_children: Vec<_> =
                 RevsetExpression::commits(after_commits.iter().ids().cloned().collect_vec())
                     .children()
-                    .evaluate_programmatic(workspace_command.repo().as_ref())?
+                    .evaluate(workspace_command.repo().as_ref())?
                     .iter()
                     .commits(workspace_command.repo().store())
                     .try_collect()?;
@@ -560,12 +510,7 @@ fn rebase_revisions_transaction(
         )
     };
 
-    let MoveCommitsStats {
-        num_rebased_targets,
-        num_rebased_descendants,
-        num_skipped_rebases,
-        num_abandoned,
-    } = move_commits(
+    let stats = move_commits(
         settings,
         tx.repo_mut(),
         new_parent_ids,
@@ -573,29 +518,7 @@ fn rebase_revisions_transaction(
         &MoveCommitsTarget::Commits(target_commits),
         rebase_options,
     )?;
-    // TODO(ilyagr): Consider making it possible for descendants of the target set
-    // to become emptied, like --skip-empty. This would require writing careful
-    // tests.
-    assert_eq!(num_abandoned, 0);
-
-    if let Some(mut fmt) = ui.status_formatter() {
-        if num_skipped_rebases > 0 {
-            writeln!(
-                fmt,
-                "Skipped rebase of {num_skipped_rebases} commits that were already in place"
-            )?;
-        }
-        if num_rebased_targets > 0 {
-            writeln!(
-                fmt,
-                "Rebased {num_rebased_targets} commits onto destination"
-            )?;
-        }
-        if num_rebased_descendants > 0 {
-            writeln!(fmt, "Rebased {num_rebased_descendants} descendant commits")?;
-        }
-    }
-
+    print_move_commits_stats(ui, &stats)?;
     tx.finish(ui, tx_description)
 }
 
@@ -603,12 +526,12 @@ fn rebase_revisions_transaction(
 /// parents of rebased commits.
 fn ensure_no_commit_loop(
     repo: &ReadonlyRepo,
-    children_expression: &Rc<RevsetExpression>,
-    parents_expression: &Rc<RevsetExpression>,
+    children_expression: &Rc<ResolvedRevsetExpression>,
+    parents_expression: &Rc<ResolvedRevsetExpression>,
 ) -> Result<(), CommandError> {
     if let Some(commit_id) = children_expression
         .dag_range_to(parents_expression)
-        .evaluate_programmatic(repo)?
+        .evaluate(repo)?
         .iter()
         .next()
     {
@@ -635,6 +558,41 @@ fn check_rebase_destinations(
                 short_commit_hash(parent.id())
             )));
         }
+    }
+    Ok(())
+}
+
+/// Print details about the provided [`MoveCommitsStats`].
+fn print_move_commits_stats(ui: &Ui, stats: &MoveCommitsStats) -> std::io::Result<()> {
+    let Some(mut formatter) = ui.status_formatter() else {
+        return Ok(());
+    };
+    let &MoveCommitsStats {
+        num_rebased_targets,
+        num_rebased_descendants,
+        num_skipped_rebases,
+        num_abandoned,
+    } = stats;
+    if num_skipped_rebases > 0 {
+        writeln!(
+            formatter,
+            "Skipped rebase of {num_skipped_rebases} commits that were already in place"
+        )?;
+    }
+    if num_rebased_targets > 0 {
+        writeln!(
+            formatter,
+            "Rebased {num_rebased_targets} commits onto destination"
+        )?;
+    }
+    if num_rebased_descendants > 0 {
+        writeln!(
+            formatter,
+            "Rebased {num_rebased_descendants} descendant commits"
+        )?;
+    }
+    if num_abandoned > 0 {
+        writeln!(formatter, "Abandoned {num_abandoned} newly emptied commits")?;
     }
     Ok(())
 }

@@ -14,12 +14,15 @@
 
 use std::io::Write as _;
 
+use clap_complete::ArgValueCandidates;
+use jj_lib::config::ConfigError;
+use jj_lib::config::ConfigNamePathBuf;
 use tracing::instrument;
 
 use crate::cli_util::CommandHelper;
 use crate::command_error::config_error;
 use crate::command_error::CommandError;
-use crate::config::ConfigNamePathBuf;
+use crate::complete;
 use crate::ui::Ui;
 
 /// Get the value of a given config option.
@@ -34,7 +37,7 @@ use crate::ui::Ui;
 #[derive(clap::Args, Clone, Debug)]
 #[command(verbatim_doc_comment)]
 pub struct ConfigGetArgs {
-    #[arg(required = true)]
+    #[arg(required = true, add = ArgValueCandidates::new(complete::leaf_config_keys))]
     name: ConfigNamePathBuf,
 }
 
@@ -44,12 +47,12 @@ pub fn cmd_config_get(
     command: &CommandHelper,
     args: &ConfigGetArgs,
 ) -> Result<(), CommandError> {
-    let value = args
-        .name
-        .lookup_value(command.settings().config())
+    let value = command
+        .settings()
+        .get_value(&args.name)
         .and_then(|value| value.into_string())
         .map_err(|err| match err {
-            config::ConfigError::Type {
+            ConfigError::Type {
                 origin,
                 unexpected,
                 expected,

@@ -228,8 +228,11 @@ revsets (expressions) as arguments.
   All targets of untracked remote bookmarks. Supports the same optional arguments
   as `remote_bookmarks()`.
 
-* `tags()`: All tag targets. If a tag is in a conflicted state, all its
-  possible targets are included.
+* `tags([pattern])`: All tag targets. If `pattern` is specified,
+  this selects the tags whose name match the given [string
+  pattern](#string-patterns). For example, `tags(v1)` would match the
+  tags `v123` and `rev1` but not the tag `v2`. If a tag is
+  in a conflicted state, all its possible targets are included.
 
 * `git_refs()`:  All Git ref targets as of the last import. If a Git ref
   is in a conflicted state, all its possible targets are included.
@@ -252,6 +255,12 @@ revsets (expressions) as arguments.
 
 * `latest(x[, count])`: Latest `count` commits in `x`, based on committer
   timestamp. The default `count` is 1.
+
+* `fork_point(x)`: The fork point of all commits in `x`. The fork point is the
+  common ancestor(s) of all commits in `x` which do not have any descendants
+  that are also common ancestors of all commits in `x`. It is equivalent to
+  the revset `heads(::x_1 & ::x_2 & ... & ::x_N)`, where `x_{1..N}` are commits
+  in `x`. If `x` resolves to a single commit, `fork_point(x)` resolves to `x`.
 
 * `merges()`: Merge commits.
 
@@ -361,6 +370,18 @@ given [string pattern](#string-patterns).
     * `roots(E|B)` ⇒ `{B}`
     * `roots(E|A)` ⇒ `{A}`
     * `roots(A)` ⇒ `{A}`
+
+    **function** `fork_point()`
+
+    * `fork_point(E|D)` ⇒ `{A}`
+    * `fork_point(E|C)` ⇒ `{A}`
+    * `fork_point(E|B)` ⇒ `{B}`
+    * `fork_point(E|A)` ⇒ `{A}`
+    * `fork_point(D|C)` ⇒ `{C}`
+    * `fork_point(D|B)` ⇒ `{A}`
+    * `fork_point(B|C)` ⇒ `{A}`
+    * `fork_point(A)` ⇒ `{A}`
+    * `fork_point(none())` ⇒ `{}`
 
 ## String patterns
 

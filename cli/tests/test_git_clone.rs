@@ -546,7 +546,14 @@ fn test_git_clone_trunk_deleted() {
     Added 1 files, modified 0 files, removed 0 files
     "#);
 
-    test_env.jj_cmd_ok(&clone_path, &["bookmark", "forget", "main"]);
+    let (stdout, stderr) = test_env.jj_cmd_ok(&clone_path, &["bookmark", "forget", "main"]);
+    insta::assert_snapshot!(stdout, @"");
+    insta::assert_snapshot!(stderr, @r#"
+    Forgot 1 bookmarks.
+    Warning: Failed to resolve `revset-aliases.trunk()`: Revision "main@origin" doesn't exist
+    Hint: Use `jj config edit --repo` to adjust the `trunk()` alias.
+    "#);
+
     let (stdout, stderr) = test_env.jj_cmd_ok(&clone_path, &["log"]);
     insta::assert_snapshot!(stdout, @r#"
     @  sqpuoqvx test.user@example.com 2001-02-03 08:05:07 cad212e1
@@ -578,6 +585,29 @@ fn test_git_clone_with_depth() {
     insta::assert_snapshot!(stderr, @r#"
     Fetching into new repo in "$TEST_ENV/clone"
     Error: shallow fetch is not supported by the local transport; class=Net (12)
+    "#);
+}
+
+#[test]
+fn test_git_clone_invalid_immutable_heads() {
+    let test_env = TestEnvironment::default();
+    let git_repo_path = test_env.env_root().join("source");
+    let git_repo = git2::Repository::init(git_repo_path).unwrap();
+    set_up_non_empty_git_repo(&git_repo);
+
+    test_env.add_config("revset-aliases.'immutable_heads()' = 'unknown'");
+    // Suppress lengthy warnings in commit summary template
+    test_env.add_config("revsets.short-prefixes = ''");
+
+    // The error shouldn't be counted as an immutable working-copy commit. It
+    // should be reported.
+    let stderr = test_env.jj_cmd_failure(test_env.env_root(), &["git", "clone", "source", "clone"]);
+    insta::assert_snapshot!(stderr, @r#"
+    Fetching into new repo in "$TEST_ENV/clone"
+    bookmark: main@origin [new] untracked
+    Config error: Invalid `revset-aliases.immutable_heads()`
+    Caused by: Revision "unknown" doesn't exist
+    For help, see https://martinvonz.github.io/jj/latest/config/.
     "#);
 }
 

@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use itertools::Itertools as _;
 use jj_lib::backend::BackendError;
+use jj_lib::config::ConfigError;
 use jj_lib::dsl_util::Diagnostics;
 use jj_lib::fileset::FilePatternParseError;
 use jj_lib::fileset::FilesetParseError;
@@ -32,6 +33,7 @@ use jj_lib::git::GitImportError;
 use jj_lib::git::GitRemoteManagementError;
 use jj_lib::gitignore::GitIgnoreError;
 use jj_lib::op_heads_store::OpHeadResolutionError;
+use jj_lib::op_heads_store::OpHeadsStoreError;
 use jj_lib::op_store::OpStoreError;
 use jj_lib::op_walk::OpsetEvaluationError;
 use jj_lib::op_walk::OpsetResolutionError;
@@ -45,9 +47,9 @@ use jj_lib::revset::RevsetEvaluationError;
 use jj_lib::revset::RevsetParseError;
 use jj_lib::revset::RevsetParseErrorKind;
 use jj_lib::revset::RevsetResolutionError;
-use jj_lib::signing::SignInitError;
 use jj_lib::str_util::StringPatternParseError;
 use jj_lib::view::RenameWorkspaceError;
+use jj_lib::working_copy::RecoverWorkspaceError;
 use jj_lib::working_copy::ResetError;
 use jj_lib::working_copy::SnapshotError;
 use jj_lib::working_copy::WorkingCopyStateError;
@@ -55,6 +57,7 @@ use jj_lib::workspace::WorkspaceInitError;
 use thiserror::Error;
 
 use crate::cli_util::short_operation_hash;
+use crate::config::ConfigEnvError;
 use crate::description_util::ParseBulkEditMessageError;
 use crate::diff_util::DiffRenderError;
 use crate::formatter::FormatRecorder;
@@ -236,14 +239,14 @@ impl From<jj_lib::file_util::PathError> for CommandError {
     }
 }
 
-impl From<config::ConfigError> for CommandError {
-    fn from(err: config::ConfigError) -> Self {
+impl From<ConfigError> for CommandError {
+    fn from(err: ConfigError) -> Self {
         config_error(err)
     }
 }
 
-impl From<crate::config::ConfigError> for CommandError {
-    fn from(err: crate::config::ConfigError) -> Self {
+impl From<ConfigEnvError> for CommandError {
+    fn from(err: ConfigEnvError) -> Self {
         config_error(err)
     }
 }
@@ -281,6 +284,12 @@ impl From<BackendError> for CommandError {
     }
 }
 
+impl From<OpHeadsStoreError> for CommandError {
+    fn from(err: OpHeadsStoreError) -> Self {
+        internal_error_with_message("Unexpected error from operation heads store", err)
+    }
+}
+
 impl From<WorkspaceInitError> for CommandError {
     fn from(err: WorkspaceInitError) -> Self {
         match err {
@@ -296,14 +305,16 @@ impl From<WorkspaceInitError> for CommandError {
             WorkspaceInitError::Path(err) => {
                 internal_error_with_message("Failed to access the repository", err)
             }
+            WorkspaceInitError::OpHeadsStore(err) => {
+                user_error_with_message("Failed to record initial operation", err)
+            }
             WorkspaceInitError::Backend(err) => {
                 user_error_with_message("Failed to access the repository", err)
             }
             WorkspaceInitError::WorkingCopyState(err) => {
                 internal_error_with_message("Failed to access the repository", err)
             }
-            WorkspaceInitError::SignInit(err @ SignInitError::UnknownBackend(_)) => user_error(err),
-            WorkspaceInitError::SignInit(err) => internal_error(err),
+            WorkspaceInitError::SignInit(err) => user_error(err),
         }
     }
 }
@@ -328,6 +339,7 @@ impl From<OpsetEvaluationError> for CommandError {
                 cmd_err
             }
             OpsetEvaluationError::OpHeadResolution(err) => err.into(),
+            OpsetEvaluationError::OpHeadsStore(err) => err.into(),
             OpsetEvaluationError::OpStore(err) => err.into(),
         }
     }
@@ -362,7 +374,7 @@ impl From<SnapshotError> for CommandError {
                     err_str,
                 ))
                 .hinted(format!(
-                    "This is to prevent large files from being added on accident. You can fix \
+                    "This is to prevent large files from being added by accident. You can fix \
                      this error by:
   - Adding the file to `.gitignore`
   - Run `jj config set --repo snapshot.max-new-file-size {}`
@@ -494,6 +506,18 @@ impl From<FilesetParseError> for CommandError {
             user_error_with_message(format!("Failed to parse fileset: {}", err.kind()), err);
         cmd_err.extend_hints(hint);
         cmd_err
+    }
+}
+
+impl From<RecoverWorkspaceError> for CommandError {
+    fn from(err: RecoverWorkspaceError) -> Self {
+        match err {
+            RecoverWorkspaceError::Backend(err) => err.into(),
+            RecoverWorkspaceError::OpHeadsStore(err) => err.into(),
+            RecoverWorkspaceError::Reset(err) => err.into(),
+            RecoverWorkspaceError::RewriteRootCommit(err) => err.into(),
+            err @ RecoverWorkspaceError::WorkspaceMissingWorkingCopy(_) => user_error(err),
+        }
     }
 }
 

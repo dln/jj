@@ -1,6 +1,8 @@
 use jj_lib::backend::MillisSinceEpoch;
 use jj_lib::backend::Signature;
 use jj_lib::backend::Timestamp;
+use jj_lib::config::ConfigLayer;
+use jj_lib::config::ConfigSource;
 use jj_lib::repo::Repo;
 use jj_lib::settings::UserSettings;
 use jj_lib::signing::SigStatus;
@@ -15,18 +17,19 @@ use testutils::TestRepoBackend;
 use testutils::TestWorkspace;
 
 fn user_settings(sign_all: bool) -> UserSettings {
-    let config = testutils::base_config()
-        .add_source(config::File::from_str(
+    let mut config = testutils::base_user_config();
+    config.add_layer(
+        ConfigLayer::parse(
+            ConfigSource::User,
             &format!(
                 r#"
                 signing.key = "impeccable"
                 signing.sign-all = {sign_all}
                 "#
             ),
-            config::FileFormat::Toml,
-        ))
-        .build()
-        .unwrap();
+        )
+        .unwrap(),
+    );
     UserSettings::from_config(config)
 }
 
@@ -71,7 +74,7 @@ fn manual(backend: TestRepoBackend) {
         .set_author(someone_else())
         .write()
         .unwrap();
-    tx.commit("test");
+    tx.commit("test").unwrap();
 
     let commit1 = repo.store().get_commit(commit1.id()).unwrap();
     assert_eq!(commit1.verification().unwrap(), good_verification());
@@ -96,7 +99,7 @@ fn keep_on_rewrite(backend: TestRepoBackend) {
         .set_sign_behavior(SignBehavior::Own)
         .write()
         .unwrap();
-    tx.commit("test");
+    tx.commit("test").unwrap();
 
     let mut tx = repo.start_transaction(&settings);
     let mut_repo = tx.repo_mut();
@@ -122,7 +125,7 @@ fn manual_drop_on_rewrite(backend: TestRepoBackend) {
         .set_sign_behavior(SignBehavior::Own)
         .write()
         .unwrap();
-    tx.commit("test");
+    tx.commit("test").unwrap();
 
     let mut tx = repo.start_transaction(&settings);
     let mut_repo = tx.repo_mut();
@@ -153,7 +156,7 @@ fn forced(backend: TestRepoBackend) {
         .set_author(someone_else())
         .write()
         .unwrap();
-    tx.commit("test");
+    tx.commit("test").unwrap();
 
     let commit = repo.store().get_commit(commit.id()).unwrap();
     assert_eq!(commit.verification().unwrap(), good_verification());
@@ -172,7 +175,7 @@ fn configured(backend: TestRepoBackend) {
     let repo = repo.clone();
     let mut tx = repo.start_transaction(&settings);
     let commit = write_random_commit(tx.repo_mut(), &settings);
-    tx.commit("test");
+    tx.commit("test").unwrap();
 
     let commit = repo.store().get_commit(commit.id()).unwrap();
     assert_eq!(commit.verification().unwrap(), good_verification());

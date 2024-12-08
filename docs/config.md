@@ -58,10 +58,10 @@ colors."commit_id prefix".bold = true
 "commit_id prefix" = { bold = true }
 ```
 
-Jujutsu favors the dotted style in these instructions, if only because it's
-easier to write down in an unconfusing way. If you are confident with TOML
+The docs below refer to keys in text using dotted notation, but example
+blocks will use heading notation to be unambiguous. If you are confident with TOML
 then use whichever suits you in your config. If you mix dotted keys and headings,
-**put the dotted keys before the first heading**.
+**you must put the dotted keys before the first heading**.
 
 That's probably enough TOML to keep you out of trouble but the [syntax guide] is
 very short if you ever need to check.
@@ -70,8 +70,9 @@ very short if you ever need to check.
 ## User settings
 
 ```toml
-user.name = "YOUR NAME"
-user.email = "YOUR_EMAIL@example.com"
+[user]
+name = "YOUR NAME"
+email = "YOUR_EMAIL@example.com"
 ```
 
 Don't forget to change these to your own details!
@@ -87,7 +88,8 @@ active labels alongside the regular colorized output.
 This setting overrides the `NO_COLOR` environment variable (if set).
 
 ```toml
-ui.color = "never" # Turn off color
+[ui]
+color = "never" # Turn off color
 ```
 
 ### Custom colors and styles
@@ -95,7 +97,8 @@ ui.color = "never" # Turn off color
 You can customize the colors used for various elements of the UI. For example:
 
 ```toml
-colors.commit_id = "green"
+[colors]
+commit_id = "green"
 ```
 
 The following colors are available:
@@ -117,7 +120,8 @@ All of them but "default" come in a bright version too, e.g. "bright red". The
 You can also use a 6-digit hex code for more control over the exact color used:
 
 ```toml
-colors.change_id = "#ff1525"
+[colors]
+change_id = "#ff1525"
 ```
 
 If you use a string value for a color, as in the examples above, it will be used
@@ -125,7 +129,8 @@ for the foreground color. You can also set the background color, or make the
 text bold or underlined. For that, you need to use a table:
 
 ```toml
-colors.commit_id = { fg = "green", bg = "#ff1525", bold = true, underline = true }
+[colors]
+commit_id = { fg = "green", bg = "#ff1525", bold = true, underline = true }
 ```
 
 The key names are called "labels". The above used `commit_id` as label. You can
@@ -135,8 +140,9 @@ make the commit ID of the working-copy commit also be underlined, you can do
 this:
 
 ```toml
-colors.commit_id = "green"
-colors."working_copy commit_id" = { underline = true }
+[colors]
+commit_id = "green"
+"working_copy commit_id" = { underline = true }
 ```
 
 Parts of the style that are not overridden - such as the foreground color in the
@@ -153,7 +159,8 @@ When `jj` is run with no explicit subcommand, the value of the
 subcommand name, subcommand alias, or user-defined alias (defaults to `"log"`).
 
 ```toml
-ui.default-command = ["log", "--reversed"]
+[ui]
+default-command = ["log", "--reversed"]
 ```
 
 ### Default description
@@ -178,7 +185,8 @@ The value of the `ui.default-description` setting can also be used in order to
 fill in things like BUG=, TESTED= etc.
 
 ```toml
-ui.default-description = "\n\nTESTED=TODO"
+[ui]
+default-description = "\n\nTESTED=TODO"
 ```
 
 ### Diff colors and styles
@@ -196,8 +204,9 @@ can override the default style with the following keys:
 ### Diff format
 
 ```toml
+[ui]
 # Possible values: "color-words" (default), "git", "summary"
-ui.diff.format = "git"
+diff.format = "git"
 ```
 
 #### Color-words diff options
@@ -276,6 +285,24 @@ diff.tool = "vimdiff"
 diff-invocation-mode = "file-by-file"
 ```
 
+### Conflict marker style
+
+You can configure which style of conflict markers to use when materializing
+conflicts:
+
+```toml
+[ui]
+# Shows a single snapshot and one or more diffs to apply to it
+conflict-marker-style = "diff"
+# Shows a snapshot for each side and base of the conflict
+conflict-marker-style = "snapshot"
+# Uses Git's "diff3" conflict markers to support tools that depend on it
+conflict-marker-style = "git"
+```
+
+For more details about these conflict marker styles, see the [conflicts
+page](conflicts.md#conflict-markers).
+
 ### Set of immutable commits
 
 You can configure the set of immutable commits via
@@ -285,7 +312,8 @@ You can configure the set of immutable commits via
 also consider the `release@origin` bookmark immutable:
 
 ```toml
-revset-aliases."immutable_heads()" = "builtin_immutable_heads() | release@origin"
+[revset-aliases]
+"immutable_heads()" = "builtin_immutable_heads() | release@origin"
 ```
 
 To prevent rewriting commits authored by other users:
@@ -293,7 +321,8 @@ To prevent rewriting commits authored by other users:
 ```toml
 # The `trunk().. &` bit is an optimization to scan for non-`mine()` commits
 # only among commits that are not in `trunk()`.
-revset-aliases."immutable_heads()" = "builtin_immutable_heads() | (trunk().. & ~mine())"
+[revset-aliases]
+"immutable_heads()" = "builtin_immutable_heads() | (trunk().. & ~mine())"
 ```
 
 Ancestors of the configured set are also immutable. The root commit is always
@@ -306,8 +335,9 @@ immutable even if the set is empty.
 You can configure the revisions `jj log` would show when neither `-r` nor any paths are specified.
 
 ```toml
+[revsets]
 # Show commits that are not in `main@origin`
-revsets.log = "main@origin.."
+log = "main@origin.."
 ```
 
 The default value for `revsets.log` is
@@ -342,8 +372,9 @@ log = "builtin_log_compact_full_description"
 ### Graph style
 
 ```toml
+[ui]
 # Possible values: "curved" (default), "square", "ascii", "ascii-large"
-ui.graph.style = "square"
+graph.style = "square"
 ```
 
 #### Node style
@@ -374,7 +405,8 @@ If enabled, `log`/`evolog`/`op log` content will be wrapped based on
 the terminal width.
 
 ```toml
-ui.log-word-wrap = true
+[ui]
+log-word-wrap = true
 ```
 
 ### Display of commit and change ids
@@ -405,8 +437,9 @@ To customize these separately, use the `format_short_commit_id()` and
 To get shorter prefixes for certain revisions, set `revsets.short-prefixes`:
 
 ```toml
+[revsets]
 # Prioritize the current bookmark
-revsets.short-prefixes = "(main..@)::"
+short-prefixes = "(main..@)::"
 ```
 
 ### Relative timestamps
@@ -456,8 +489,9 @@ Another way you can override this check is by setting
 the revset arguments of such commands to expand to any number of revisions.
 
 ```toml
+[ui]
 # Assume `all:` prefix before revsets whenever it would make a difference
-ui.always-allow-large-revsets = true
+always-allow-large-revsets = true
 ```
 
 ## Pager
@@ -489,10 +523,11 @@ future.
 Additionally, paging behavior can be toggled via `ui.paginate` like so:
 
 ```toml
+[ui]
 # Enable pagination for commands that support it (default)
-ui.paginate = "auto"
+paginate = "auto"
 # Disable all pagination, equivalent to using --no-pager
-ui.paginate = "never"
+paginate = "never"
 ```
 
 ### Processing contents to be paged
@@ -503,7 +538,8 @@ through a pager you must do it using a subshell as, unlike `git` or `hg`, the
 command will be executed directly. For example:
 
 ```toml
-ui.pager = ["sh", "-c", "diff-so-fancy | less -RFX"]
+[ui]
+pager = ["sh", "-c", "diff-so-fancy | less -RFX"]
 ```
 
 Some formatters (like [`delta`](https://github.com/dandavison/delta)) require
@@ -523,9 +559,45 @@ format = "git"
 You can define aliases for commands, including their arguments. For example:
 
 ```toml
+[aliases]
 # `jj l` shows commits on the working-copy commit's (anonymous) bookmark
 # compared to the `main` bookmark
-aliases.l = ["log", "-r", "(main..@):: | (main..@)-"]
+l = ["log", "-r", "(main..@):: | (main..@)-"]
+```
+
+This alias syntax can only run a single jj command. However, you may want to
+execute multiple jj commands with a single alias, or run arbitrary scripts that
+complement your version control workflow. This can be done, but be aware of the
+danger:
+
+!!! warning
+
+    The following technique just provides a convenient syntax for running
+    arbitrary code on your system. Using it irresponsibly may cause damage
+    ranging from breaking the behavior of `jj undo` to wiping your file system.
+    Exercise the same amount of caution while writing these aliases as you would
+    when typing commands into the terminal!
+
+    This feature may be removed or replaced by an embedded scripting language in
+    the future.
+
+The command `jj util exec` will simply run any command you pass to it as an
+argument. Additional arguments are passed through. Here are some examples:
+
+```toml
+[aliases]
+my-script = ["util", "exec", "--", "my-jj-script"]
+#                            ^^^^
+# This makes sure that flags are passed to your script instead of parsed by jj.
+my-inline-script = ["util", "exec", "--", "bash", "-c", """
+#!/usr/bin/env bash
+set -euo pipefail
+echo "Look Ma, everything in one file!"
+echo "args: $@"
+""", ""]
+#    ^^
+# This last empty string will become "$0" in bash, so your actual arguments
+# are all included in "$@" and start at "$1" as expected.
 ```
 
 ## Editor
@@ -540,26 +612,29 @@ Pico is the default editor (Notepad on Windows) in the absence of any other
 setting, but you could set it explicitly too.
 
 ```toml
-ui.editor = "pico"
+[ui]
+editor = "pico"
 ```
 
 To use NeoVim instead:
 
 ```toml
-ui.editor = "nvim"
+[ui]
+editor = "nvim"
 ```
 
 For GUI editors you possibly need to use a `-w` or `--wait`. Some examples:
 
 ```toml
-ui.editor = "code -w"       # VS Code
-ui.editor = "code.cmd -w"   # VS Code on Windows
-ui.editor = "bbedit -w"     # BBEdit
-ui.editor = "subl -n -w"    # Sublime Text
-ui.editor = "mate -w"       # TextMate
-ui.editor = ["C:/Program Files/Notepad++/notepad++.exe",
+[ui]
+editor = "code -w"       # VS Code
+editor = "code.cmd -w"   # VS Code on Windows
+editor = "bbedit -w"     # BBEdit
+editor = "subl -n -w"    # Sublime Text
+editor = "mate -w"       # TextMate
+editor = ["C:/Program Files/Notepad++/notepad++.exe",
     "-multiInst", "-notabbar", "-nosession", "-noPlugin"] # Notepad++
-ui.editor = "idea --temp-project --wait"   #IntelliJ
+editor = "idea --temp-project --wait"   #IntelliJ
 ```
 
 Obviously, you would only set one line, don't copy them all in!
@@ -591,9 +666,10 @@ If `ui.diff-editor` is a string, e.g. `"meld"`, the arguments will be read from
 the following config keys.
 
 ```toml
-# merge-tools.meld.program = "meld"      # Defaults to the name of the tool if not specified
-merge-tools.meld.program = "/path/to/meld" # May be necessary if `meld` is not in the PATH
-merge-tools.meld.edit-args = ["--newtab", "$left", "$right"]
+[merge-tools.meld]
+# program = "meld"      # Defaults to the name of the tool if not specified
+program = "/path/to/meld" # May be necessary if `meld` is not in the PATH
+edit-args = ["--newtab", "$left", "$right"]
 ```
 
 `jj` makes the following substitutions:
@@ -608,12 +684,13 @@ Finally, `ui.diff-editor` can be a list that specifies a command and its argumen
 Some examples:
 
 ```toml
+[ui]
 # Use merge-tools.meld.edit-args
-ui.diff-editor = "meld"  # Or `kdiff3`, or `diffedit3`, ...
+diff-editor = "meld"  # Or `kdiff3`, or `diffedit3`, ...
 # Specify edit-args inline
-ui.diff-editor = ["/path/to/binary", "--be-helpful", "$left", "$right"]
+diff-editor = ["/path/to/binary", "--be-helpful", "$left", "$right"]
 # Equivalent to ["binary", "$left", "$right"] arguments by default
-ui.diff-editor = "binary"
+diff-editor = "binary"
 ```
 
 
@@ -712,10 +789,11 @@ The `ui.merge-editor` key specifies the tool used for three-way merge tools
 by `jj resolve`. For example:
 
 ```toml
+[ui]
 # Use merge-tools.meld.merge-args
-ui.merge-editor = "meld"  # Or "vscode" or "vscodium" or "kdiff3" or "vimdiff"
+merge-editor = "meld"  # Or "vscode" or "vscodium" or "kdiff3" or "vimdiff"
 # Specify merge-args inline
-ui.merge-editor = ["meld", "$left", "$base", "$right", "-o", "$output"]
+merge-editor = ["meld", "$left", "$base", "$right", "-o", "$output"]
 ```
 
 The "vscode", "vscodium", "meld", "kdiff3", and "vimdiff" tools can be used out of the box,
@@ -734,16 +812,19 @@ the out-of-the-box configuration of the three default tools. (There is no need
 to copy it to your config file verbatim, but you are welcome to customize it.)
 
 ```toml
-# merge-tools.kdiff3.program  = "kdiff3"     # Defaults to the name of the tool if not specified
-merge-tools.kdiff3.merge-args = ["$base", "$left", "$right", "-o", "$output", "--auto"]
-merge-tools.meld.merge-args = ["$left", "$base", "$right", "-o", "$output", "--auto-merge"]
+[merge-tools.kdiff3]
+# program  = "kdiff3"     # Defaults to the name of the tool if not specified
+merge-args = ["$base", "$left", "$right", "-o", "$output", "--auto"]
+[merge-tools.meld]
+merge-args = ["$left", "$base", "$right", "-o", "$output", "--auto-merge"]
 
-merge-tools.vimdiff.merge-args = ["-f", "-d", "$output", "-M",
+[merge-tools.vimdiff]
+merge-args = ["-f", "-d", "$output", "-M",
     "$left", "$base", "$right",
     "-c", "wincmd J", "-c", "set modifiable",
     "-c", "set write"]
-merge-tools.vimdiff.program = "vim"
-merge-tools.vimdiff.merge-tool-edits-conflict-markers = true    # See below for an explanation
+program = "vim"
+merge-tool-edits-conflict-markers = true    # See below for an explanation
 ```
 
 `jj` makes the following substitutions:
@@ -760,9 +841,20 @@ merge-tools.vimdiff.merge-tool-edits-conflict-markers = true    # See below for 
 ### Editing conflict markers with a tool or a text editor
 
 By default, the merge tool starts with an empty output file. If the tool puts
-anything into the output file, and exits with the 0 exit code,
-`jj` assumes that the conflict is fully resolved. This is appropriate for most
-graphical merge tools.
+anything into the output file and exits with the 0 exit code,
+`jj` assumes that the conflict is fully resolved, while if the tool exits with
+a non-zero exit code, `jj` assumes that the merge should be cancelled.
+This is appropriate for most graphical merge tools.
+
+For merge tools which try to automatically resolve conflicts without user input,
+this behavior may not be desired. For instance, some automatic merge tools use
+an exit code of 1 to indicate that some conflicts were unable to be resolved and
+that the output file should contain conflict markers. In that case, you could
+set the config option `merge-tools.TOOL.merge-conflict-exit-codes = [1]` to tell
+`jj` to expect conflict markers in the output file if the exit code is 1. If a
+merge tool produces output using Git's "diff3" conflict style, `jj` should be
+able to parse it correctly, so many Git merge drivers should be usable with `jj`
+as well.
 
 Some tools (e.g. `vimdiff`) can present a multi-way diff but don't resolve
 conflict themselves. When using such tools, `jj`
@@ -775,6 +867,9 @@ With this option set, if the output file still contains conflict markers after
 the conflict is done, `jj` assumes that the conflict was only partially resolved
 and parses the conflict markers to get the new state of the conflict. The
 conflict is considered fully resolved when there are no conflict markers left.
+The conflict marker style can also be customized per tool using the
+`merge-tools.TOOL.conflict-marker-style` option, which takes the same values as
+[`ui.conflict-marker-style`](#conflict-marker-style).
 
 ## Code formatting and other file content transformations
 
@@ -860,14 +955,16 @@ By default the gpg backend will look for a `gpg` binary on your path. If you wan
 to change the program used or specify a path to `gpg` explicitly you can set:
 
 ```toml
-signing.backends.gpg.program = "gpg2"
+[signing]
+backends.gpg.program = "gpg2"
 ```
 
 Also by default the gpg backend will ignore key expiry when verifying commit signatures.
 To consider expired keys as invalid you can set:
 
 ```toml
-signing.backends.gpg.allow-expired-keys = false
+[signing]
+backends.gpg.allow-expired-keys = false
 ```
 
 ### SSH Signing
@@ -885,7 +982,8 @@ By default the ssh backend will look for a `ssh-keygen` binary on your path. If 
 to change the program used or specify a path to `ssh-keygen` explicitly you can set:
 
 ```toml
-signing.backends.ssh.program = "/path/to/ssh-keygen"
+[signing]
+backends.ssh.program = "/path/to/ssh-keygen"
 ```
 
 When verifying commit signatures the ssh backend needs to be provided with an allowed-signers
@@ -896,7 +994,8 @@ You can find the format for this file in the
 as follows:
 
 ```toml
-signing.backends.ssh.allowed-signers = "/path/to/allowed-signers"
+[signing]
+backends.ssh.allowed-signers = "/path/to/allowed-signers"
 ```
 
 ## Git settings
@@ -942,7 +1041,8 @@ may be undesirable in some repositories, e.g.:
 You can enable this behavior by setting `git.auto-local-bookmark` like so,
 
 ```toml
-git.auto-local-bookmark = true
+[git]
+auto-local-bookmark = true
 ```
 
 This setting is applied only to new remote bookmarks. Existing remote bookmarks
@@ -965,7 +1065,8 @@ usual when commits are abandoned). You can disable this behavior and instead
 leave the Git-unreachable commits in your repo by setting:
 
 ```toml
-git.abandon-unreachable-commits = false
+[git]
+abandon-unreachable-commits = false
 ```
 
 [reachable]: https://git-scm.com/docs/gitglossary/#Documentation/gitglossary.txt-aiddefreachableareachable
@@ -976,7 +1077,10 @@ git.abandon-unreachable-commits = false
 default. You can pick a different prefix by setting `git.push-bookmark-prefix`. For
 example:
 
-    git.push-bookmark-prefix = "martinvonz/push-"
+```toml
+[git]
+push-bookmark-prefix = "martinvonz/push-"
+```
 
 ### Set of private commits
 
@@ -985,8 +1089,9 @@ a revset. The value is a revset of commits that Jujutsu will refuse to push. If
 unset, all commits are eligible to be pushed.
 
 ```toml
+[git]
 # Prevent pushing work in progress or anything explicitly labeled "private"
-git.private-commits = "description(glob:'wip:*') | description(glob:'private:*')"
+private-commits = "description(glob:'wip:*') | description(glob:'private:*')"
 ```
 
 If a commit is in `git.private-commits` but is already on the remote, then it is
@@ -1041,9 +1146,10 @@ changed by setting `snapshot.max-new-file-size` to a different value. For
 example:
 
 ```toml
-snapshot.max-new-file-size = "10MiB"
+[snapshot]
+max-new-file-size = "10MiB"
 # the following is equivalent
-snapshot.max-new-file-size = 10485760
+max-new-file-size = 10485760
 ```
 
 The value can be specified using a human readable string with typical suffixes;

@@ -22,6 +22,7 @@ use std::sync::RwLock;
 use thiserror::Error;
 
 use crate::backend::CommitId;
+use crate::config::ConfigError;
 use crate::gpg_signing::GpgBackend;
 use crate::settings::UserSettings;
 use crate::ssh_signing::SshBackend;
@@ -119,9 +120,9 @@ pub enum SignInitError {
     /// If the backend name specified in the config is not known.
     #[error("Unknown signing backend configured: {0}")]
     UnknownBackend(String),
-    /// A generic error from the backend impl.
-    #[error("Failed to initialize signing")]
-    Backend(#[source] Box<dyn std::error::Error + Send + Sync>),
+    /// Failed to load backend configuration.
+    #[error("Failed to configure signing backend")]
+    BackendConfig(#[source] ConfigError),
 }
 
 /// A enum that describes if a created/rewritten commit should be signed or not.
@@ -161,10 +162,10 @@ impl Signer {
     /// Creates a signer based on user settings. Uses all known backends, and
     /// chooses one of them to be used for signing depending on the config.
     pub fn from_settings(settings: &UserSettings) -> Result<Self, SignInitError> {
-        let mut backends = vec![
-            Box::new(GpgBackend::from_config(settings.config())) as Box<dyn SigningBackend>,
-            Box::new(SshBackend::from_config(settings.config())) as Box<dyn SigningBackend>,
-            // Box::new(X509Backend::from_settings(settings)?) as Box<dyn SigningBackend>,
+        let mut backends: Vec<Box<dyn SigningBackend>> = vec![
+            Box::new(GpgBackend::from_settings(settings).map_err(SignInitError::BackendConfig)?),
+            Box::new(SshBackend::from_settings(settings).map_err(SignInitError::BackendConfig)?),
+            // Box::new(X509Backend::from_settings(settings).map_err(..)?),
         ];
 
         let main_backend = settings

@@ -14,6 +14,7 @@
 
 use std::collections::HashSet;
 
+use clap_complete::ArgValueCandidates;
 use itertools::Itertools;
 use jj_lib::git;
 use jj_lib::revset::RevsetExpression;
@@ -24,6 +25,7 @@ use crate::cli_util::RevisionArg;
 use crate::command_error::CommandError;
 use crate::commit_templater::CommitTemplateLanguage;
 use crate::commit_templater::RefName;
+use crate::complete;
 use crate::ui::Ui;
 
 /// List bookmarks and their targets
@@ -57,6 +59,7 @@ pub struct BookmarkListArgs {
         value_name = "REMOTE",
         conflicts_with_all = ["all_remotes"],
         value_parser = StringPattern::parse,
+        add = ArgValueCandidates::new(complete::git_remotes),
     )]
     remotes: Option<Vec<StringPattern>>,
 
@@ -74,7 +77,7 @@ pub struct BookmarkListArgs {
     /// By default, the specified name matches exactly. Use `glob:` prefix to
     /// select bookmarks by wildcard pattern. For details, see
     /// https://martinvonz.github.io/jj/latest/revsets/#string-patterns.
-    #[arg(value_parser = StringPattern::parse)]
+    #[arg(value_parser = StringPattern::parse, add = ArgValueCandidates::new(complete::bookmarks))]
     names: Option<Vec<StringPattern>>,
 
     /// Show bookmarks whose local targets are in the given revisions
@@ -137,7 +140,7 @@ pub fn cmd_bookmark_list(
         let language = workspace_command.commit_template_language();
         let text = match &args.template {
             Some(value) => value.to_owned(),
-            None => command.settings().config().get("templates.bookmark_list")?,
+            None => command.settings().get("templates.bookmark_list")?,
         };
         workspace_command
             .parse_template(ui, &language, &text, CommitTemplateLanguage::wrap_ref_name)?

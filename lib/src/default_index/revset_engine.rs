@@ -42,8 +42,9 @@ use crate::backend::ChangeId;
 use crate::backend::CommitId;
 use crate::backend::MillisSinceEpoch;
 use crate::commit::Commit;
-use crate::conflicts::materialize_merge_result;
+use crate::conflicts::materialize_merge_result_to_bytes;
 use crate::conflicts::materialize_tree_value;
+use crate::conflicts::ConflictMarkerStyle;
 use crate::conflicts::MaterializedTreeValue;
 use crate::default_index::AsCompositeIndex;
 use crate::default_index::CompositeIndex;
@@ -270,7 +271,7 @@ impl PositionsAccumulatorInner<'_> {
         desired_position: IndexPosition,
     ) -> Result<(), RevsetEvaluationError> {
         let last_position = self.consumed_positions.last();
-        if last_position.map_or(false, |&pos| pos <= desired_position) {
+        if last_position.is_some_and(|&pos| pos <= desired_position) {
             return Ok(());
         }
         while let Some(position) = self.walk.next(index).transpose()? {
@@ -953,6 +954,22 @@ impl EvaluationContext<'_> {
                 });
                 Ok(Box::new(EagerRevset { positions }))
             }
+            ResolvedExpression::ForkPoint(expression) => {
+                let expression_set = self.evaluate(expression)?;
+                let mut expression_positions_iter = expression_set.positions().attach(index);
+                let Some(position) = expression_positions_iter.next() else {
+                    return Ok(Box::new(EagerRevset::empty()));
+                };
+                let mut positions = vec![position?];
+                for position in expression_positions_iter {
+                    positions = index
+                        .common_ancestors_pos(&positions, [position?].as_slice())
+                        .into_iter()
+                        .collect_vec();
+                }
+                positions.reverse();
+                Ok(Box::new(EagerRevset { positions }))
+            }
             ResolvedExpression::Latest { candidates, count } => {
                 let candidate_set = self.evaluate(candidates)?;
                 Ok(Box::new(self.take_latest_revset(&*candidate_set, *count)?))
@@ -1308,7 +1325,7 @@ fn match_lines<'a: 'b, 'b>(
     text.split_inclusive(|b| *b == b'\n').filter(|line| {
         let line = line.strip_suffix(b"\n").unwrap_or(line);
         // TODO: add .matches_bytes() or .to_bytes_matcher()
-        str::from_utf8(line).map_or(false, |line| pattern.matches(line))
+        str::from_utf8(line).is_ok_and(|line| pattern.matches(line))
     })
 }
 
@@ -1330,10 +1347,7 @@ fn to_file_content(path: &RepoPath, value: MaterializedTreeValue) -> BackendResu
         MaterializedTreeValue::Symlink { id: _, target } => Ok(target.into_bytes()),
         MaterializedTreeValue::GitSubmodule(_) => Ok(vec![]),
         MaterializedTreeValue::FileConflict { contents, .. } => {
-            let mut content = vec![];
-            materialize_merge_result(&contents, &mut content)
-                .expect("Failed to materialize conflict to in-memory buffer");
-            Ok(content)
+            Ok(materialize_merge_result_to_bytes(&contents, ConflictMarkerStyle::default()).into())
         }
         MaterializedTreeValue::OtherConflict { .. } => Ok(vec![]),
         MaterializedTreeValue::Tree(id) => {

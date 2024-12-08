@@ -14,6 +14,7 @@
 
 use std::io::Write;
 
+use clap_complete::ArgValueCompleter;
 use itertools::Itertools;
 use jj_lib::merge::Merge;
 use jj_lib::merged_tree::MergedTreeBuilder;
@@ -24,6 +25,7 @@ use tracing::instrument;
 use crate::cli_util::CommandHelper;
 use crate::command_error::user_error_with_hint;
 use crate::command_error::CommandError;
+use crate::complete;
 use crate::ui::Ui;
 
 /// Stop tracking specified paths in the working copy
@@ -33,7 +35,11 @@ pub(crate) struct FileUntrackArgs {
     ///
     /// The paths could be ignored via a .gitignore or .git/info/exclude (in
     /// colocated repos).
-    #[arg(required = true, value_hint = clap::ValueHint::AnyPath)]
+    #[arg(
+        required = true,
+        value_hint = clap::ValueHint::AnyPath,
+        add = ArgValueCompleter::new(complete::all_revision_files),
+    )]
     paths: Vec<String>,
 }
 
@@ -44,6 +50,7 @@ pub(crate) fn cmd_file_untrack(
     args: &FileUntrackArgs,
 ) -> Result<(), CommandError> {
     let mut workspace_command = command.workspace_helper(ui)?;
+    let conflict_marker_style = workspace_command.env().conflict_marker_style();
     let store = workspace_command.repo().store().clone();
     let matcher = workspace_command
         .parse_file_patterns(ui, &args.paths)?
@@ -75,6 +82,7 @@ pub(crate) fn cmd_file_untrack(
         progress: None,
         start_tracking_matcher: &auto_tracking_matcher,
         max_new_file_size: command.settings().max_new_file_size()?,
+        conflict_marker_style,
     })?;
     if wc_tree_id != *new_commit.tree_id() {
         let wc_tree = store.get_root_tree(&wc_tree_id)?;
@@ -107,7 +115,7 @@ Make sure they're ignored, then try again.",
     if num_rebased > 0 {
         writeln!(ui.status(), "Rebased {num_rebased} descendant commits")?;
     }
-    let repo = tx.commit("untrack paths");
+    let repo = tx.commit("untrack paths")?;
     locked_ws.finish(repo.op_id().clone())?;
     Ok(())
 }

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use clap_complete::ArgValueCandidates;
 use itertools::Itertools;
 use jj_lib::repo::Repo;
 use jj_lib::settings::ConfigResultExt as _;
@@ -21,6 +22,7 @@ use jj_lib::str_util::StringPattern;
 use crate::cli_util::CommandHelper;
 use crate::command_error::CommandError;
 use crate::commands::git::get_single_remote;
+use crate::complete;
 use crate::git_util::get_git_repo;
 use crate::git_util::git_fetch;
 use crate::ui::Ui;
@@ -34,12 +36,26 @@ pub struct GitFetchArgs {
     /// Fetch only some of the branches
     ///
     /// By default, the specified name matches exactly. Use `glob:` prefix to
-    /// expand `*` as a glob. The other wildcard characters aren't supported.
-    #[arg(long, short, alias="bookmark", default_value = "glob:*", value_parser = StringPattern::parse)]
+    /// expand `*` as a glob, e.g. `--branch 'glob:push-*'`. Other wildcard
+    /// characters such as `?` are *not* supported.
+    #[arg(
+        long, short,
+        alias = "bookmark",
+        default_value = "glob:*",
+        value_parser = StringPattern::parse,
+        add = ArgValueCandidates::new(complete::bookmarks),
+    )]
     branch: Vec<StringPattern>,
     /// The remote to fetch from (only named remotes are supported, can be
     /// repeated)
-    #[arg(long = "remote", value_name = "REMOTE")]
+    ///
+    /// This defaults to the `git.fetch` setting. If that is not configured, and
+    /// if there are multiple remotes, the remote named "origin" will be used.
+    #[arg(
+        long = "remote",
+        value_name = "REMOTE",
+        add = ArgValueCandidates::new(complete::git_remotes),
+    )]
     remotes: Vec<String>,
     /// Fetch from all remotes
     #[arg(long, conflicts_with = "remotes")]
@@ -78,9 +94,9 @@ fn get_default_fetch_remotes(
     git_repo: &git2::Repository,
 ) -> Result<Vec<String>, CommandError> {
     const KEY: &str = "git.fetch";
-    if let Ok(remotes) = settings.config().get(KEY) {
+    if let Ok(remotes) = settings.get(KEY) {
         Ok(remotes)
-    } else if let Some(remote) = settings.config().get_string(KEY).optional()? {
+    } else if let Some(remote) = settings.get_string(KEY).optional()? {
         Ok(vec![remote])
     } else if let Some(remote) = get_single_remote(git_repo)? {
         // if nothing was explicitly configured, try to guess

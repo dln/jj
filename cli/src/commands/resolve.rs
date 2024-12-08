@@ -14,6 +14,8 @@
 
 use std::io::Write;
 
+use clap_complete::ArgValueCandidates;
+use clap_complete::ArgValueCompleter;
 use itertools::Itertools;
 use jj_lib::object_id::ObjectId;
 use tracing::instrument;
@@ -23,6 +25,7 @@ use crate::cli_util::CommandHelper;
 use crate::cli_util::RevisionArg;
 use crate::command_error::cli_error;
 use crate::command_error::CommandError;
+use crate::complete;
 use crate::ui::Ui;
 
 /// Resolve a conflicted file with an external merge tool
@@ -42,7 +45,11 @@ use crate::ui::Ui;
 //     simplify the present one.
 #[derive(clap::Args, Clone, Debug)]
 pub(crate) struct ResolveArgs {
-    #[arg(long, short, default_value = "@")]
+    #[arg(
+        long, short,
+        default_value = "@",
+        add = ArgValueCandidates::new(complete::mutable_revisions),
+    )]
     revision: RevisionArg,
     /// Instead of resolving one conflict, list all the conflicts
     // TODO: Also have a `--summary` option. `--list` currently acts like
@@ -56,7 +63,10 @@ pub(crate) struct ResolveArgs {
     /// will attempt to resolve the first conflict we can find. You can use
     /// the `--list` argument to find paths to use here.
     // TODO: Find the conflict we can resolve even if it's not the first one.
-    #[arg(value_hint = clap::ValueHint::AnyPath)]
+    #[arg(
+        value_hint = clap::ValueHint::AnyPath,
+        add = ArgValueCompleter::new(complete::revision_conflicted_files),
+    )]
     paths: Vec<String>,
 }
 
@@ -85,7 +95,7 @@ pub(crate) fn cmd_resolve(
     }
     if args.list {
         return print_conflicted_paths(
-            &conflicts,
+            conflicts,
             ui.stdout_formatter().as_mut(),
             &workspace_command,
         );
@@ -123,7 +133,7 @@ pub(crate) fn cmd_resolve(
                     formatter,
                     "After this operation, some files at this revision still have conflicts:"
                 )?;
-                print_conflicted_paths(&new_conflicts, formatter.as_mut(), &workspace_command)?;
+                print_conflicted_paths(new_conflicts, formatter.as_mut(), &workspace_command)?;
             }
         }
     }
