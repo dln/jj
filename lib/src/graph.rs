@@ -19,8 +19,6 @@ use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::hash::Hash;
 
-use crate::revset::RevsetEvaluationError;
-
 /// Node and edges pair of type `N`.
 pub type GraphNode<N> = (N, Vec<GraphEdge<N>>);
 
@@ -74,45 +72,29 @@ fn reachable_targets<N>(edges: &[GraphEdge<N>]) -> impl DoubleEndedIterator<Item
         .map(|edge| &edge.target)
 }
 
-pub struct ReverseGraphIterator<N> {
-    items: Vec<GraphNode<N>>,
-}
-
-impl<N> ReverseGraphIterator<N>
-where
-    N: Hash + Eq + Clone,
-{
-    pub fn new(
-        input: impl Iterator<Item = Result<GraphNode<N>, RevsetEvaluationError>>,
-    ) -> Result<Self, RevsetEvaluationError> {
-        let mut entries = vec![];
-        let mut reverse_edges: HashMap<N, Vec<GraphEdge<N>>> = HashMap::new();
-        for item in input {
-            let (node, edges) = item?;
-            for GraphEdge { target, edge_type } in edges {
-                reverse_edges.entry(target).or_default().push(GraphEdge {
-                    target: node.clone(),
-                    edge_type,
-                });
-            }
-            entries.push(node);
+/// Creates new graph in which nodes and edges are reversed.
+pub fn reverse_graph<N: Clone + Eq + Hash, E>(
+    input: impl Iterator<Item = Result<GraphNode<N>, E>>,
+) -> Result<Vec<GraphNode<N>>, E> {
+    let mut entries = vec![];
+    let mut reverse_edges: HashMap<N, Vec<GraphEdge<N>>> = HashMap::new();
+    for item in input {
+        let (node, edges) = item?;
+        for GraphEdge { target, edge_type } in edges {
+            reverse_edges.entry(target).or_default().push(GraphEdge {
+                target: node.clone(),
+                edge_type,
+            });
         }
-
-        let mut items = vec![];
-        for node in entries.into_iter() {
-            let edges = reverse_edges.get(&node).cloned().unwrap_or_default();
-            items.push((node, edges));
-        }
-        Ok(Self { items })
+        entries.push(node);
     }
-}
 
-impl<N> Iterator for ReverseGraphIterator<N> {
-    type Item = Result<GraphNode<N>, RevsetEvaluationError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.items.pop().map(Ok)
+    let mut items = vec![];
+    for node in entries.into_iter().rev() {
+        let edges = reverse_edges.get(&node).cloned().unwrap_or_default();
+        items.push((node, edges));
     }
+    Ok(items)
 }
 
 /// Graph iterator adapter to group topological branches.

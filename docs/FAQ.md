@@ -5,7 +5,7 @@
 If you're familiar with Git, you might expect the current bookmark to move forward
 when you commit. However, Jujutsu does not have a concept of a "current bookmark".
 
-To move bookmarks, use `jj bookmark set`.
+To move bookmarks, use `jj bookmark move`.
 
 ### I made a commit and `jj git push --all` says "Nothing changed" instead of pushing it. What do I do?
 
@@ -52,7 +52,7 @@ Martin used watch in a [tmux](https://github.com/tmux/tmux/wiki) pane during his
 
 Alternatively, you can use [jj-fzf](https://github.com/tim-janik/jj-fzf), where the central piece is the `jj log` view and common operations can be carried out via key bindings while the log view updates.
 
-The wiki lists additional TUIs and GUIs beyond the terminal: [GUI-and-TUI](https://github.com/martinvonz/jj/wiki/GUI-and-TUI)
+The wiki lists additional TUIs and GUIs beyond the terminal: [GUI-and-TUI](https://github.com/jj-vcs/jj/wiki/GUI-and-TUI)
 
 ### Should I co-locate my repository?
 
@@ -78,7 +78,7 @@ important ones are:
   and ignore the confusing information such tools present for conflicted commits
   (unless you are curious about [the details of how `jj` stores
   conflicts](technical/conflicts.md)). See
-  [\#3979](https://github.com/martinvonz/jj/issues/3979) for plans to improve
+  [\#3979](https://github.com/jj-vcs/jj/issues/3979) for plans to improve
   this situation.
 
 - Jujutsu commands may be a little slower in very large repositories due to
@@ -317,7 +317,7 @@ of them before abandoning it.
 A [conflicted bookmark][bookmarks_conflicts] is a bookmark that refers to multiple
 different commits because jj couldn't fully resolve its desired position.
 Resolving conflicted bookmarks is usually done by setting the bookmark to the
-correct commit using `jj bookmark set <commit ID>`.
+correct commit using `jj bookmark move <name> --to <commit ID>`.
 
 Usually, the different commits associated with the conflicted bookmark should all
 appear in the log, but if they don't you can use `jj bookmark list`to show all the
@@ -372,4 +372,4 @@ detect custom backends and more).
 
 [templates]: templates.md
 
-[this issue]: https://github.com/martinvonz/jj/issues/1531
+[this issue]: https://github.com/jj-vcs/jj/issues/1531

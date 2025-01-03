@@ -52,13 +52,21 @@ use crate::ui::Ui;
 #[derive(clap::Args, Clone, Debug)]
 pub(crate) struct DuplicateArgs {
     /// The revision(s) to duplicate (default: @)
-    #[arg(value_name = "REVISIONS", add = ArgValueCandidates::new(complete::all_revisions))]
+    #[arg(
+        value_name = "REVSETS",
+        add = ArgValueCandidates::new(complete::all_revisions)
+    )]
     revisions_pos: Vec<RevisionArg>,
-    #[arg(short = 'r', hide = true)]
+    #[arg(short = 'r', hide = true, value_name = "REVSETS")]
     revisions_opt: Vec<RevisionArg>,
     /// The revision(s) to duplicate onto (can be repeated to create a merge
     /// commit)
-    #[arg(long, short, add = ArgValueCandidates::new(complete::all_revisions))]
+    #[arg(
+        long,
+        short,
+        value_name = "REVSETS",
+        add = ArgValueCandidates::new(complete::all_revisions)
+    )]
     destination: Vec<RevisionArg>,
     /// The revision(s) to insert after (can be repeated to create a merge
     /// commit)
@@ -67,6 +75,7 @@ pub(crate) struct DuplicateArgs {
         short = 'A',
         visible_alias = "after",
         conflicts_with = "destination",
+        value_name = "REVSETS",
         add = ArgValueCandidates::new(complete::all_revisions),
     )]
     insert_after: Vec<RevisionArg>,
@@ -77,6 +86,7 @@ pub(crate) struct DuplicateArgs {
         short = 'B',
         visible_alias = "before",
         conflicts_with = "destination",
+        value_name = "REVSETS",
         add = ArgValueCandidates::new(complete::mutable_revisions)
     )]
     insert_before: Vec<RevisionArg>,
@@ -219,10 +229,9 @@ pub(crate) fn cmd_duplicate(
         && args.insert_after.is_empty()
         && args.insert_before.is_empty()
     {
-        duplicate_commits_onto_parents(command.settings(), tx.repo_mut(), &to_duplicate)?
+        duplicate_commits_onto_parents(tx.repo_mut(), &to_duplicate)?
     } else {
         duplicate_commits(
-            command.settings(),
             tx.repo_mut(),
             &to_duplicate,
             &parent_commit_ids,

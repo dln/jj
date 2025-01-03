@@ -15,12 +15,11 @@
 use std::io::Write as _;
 
 use clap_complete::ArgValueCandidates;
-use jj_lib::config::ConfigError;
 use jj_lib::config::ConfigNamePathBuf;
+use jj_lib::config::ConfigValue;
 use tracing::instrument;
 
 use crate::cli_util::CommandHelper;
-use crate::command_error::config_error;
 use crate::command_error::CommandError;
 use crate::complete;
 use crate::ui::Ui;
@@ -47,34 +46,24 @@ pub fn cmd_config_get(
     command: &CommandHelper,
     args: &ConfigGetArgs,
 ) -> Result<(), CommandError> {
-    let value = command
+    let stringified = command
         .settings()
-        .get_value(&args.name)
-        .and_then(|value| value.into_string())
-        .map_err(|err| match err {
-            ConfigError::Type {
-                origin,
-                unexpected,
-                expected,
-                key,
-            } => {
-                let expected = format!("a value convertible to {expected}");
-                // Copied from `impl fmt::Display for ConfigError`. We can't use
-                // the `Display` impl directly because `expected` is required to
-                // be a `'static str`.
-                let mut buf = String::new();
-                use std::fmt::Write;
-                write!(buf, "invalid type: {unexpected}, expected {expected}").unwrap();
-                if let Some(key) = key {
-                    write!(buf, " for key `{key}`").unwrap();
-                }
-                if let Some(origin) = origin {
-                    write!(buf, " in {origin}").unwrap();
-                }
-                config_error(buf)
+        .get_value_with(&args.name, |value| match value {
+            // Remove extra formatting from a string value
+            ConfigValue::String(v) => Ok(v.into_value()),
+            // Print other values in TOML syntax (but whitespace trimmed)
+            ConfigValue::Integer(_)
+            | ConfigValue::Float(_)
+            | ConfigValue::Boolean(_)
+            | ConfigValue::Datetime(_) => Ok(value.decorated("", "").to_string()),
+            // TODO: maybe okay to just print array or table in TOML syntax?
+            ConfigValue::Array(_) => {
+                Err("Expected a value convertible to a string, but is an array")
             }
-            err => err.into(),
+            ConfigValue::InlineTable(_) => {
+                Err("Expected a value convertible to a string, but is a table")
+            }
         })?;
-    writeln!(ui.stdout(), "{value}")?;
+    writeln!(ui.stdout(), "{stringified}")?;
     Ok(())
 }

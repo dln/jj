@@ -15,26 +15,119 @@
 //! Configuration store helpers.
 
 use std::borrow::Borrow;
+use std::convert::Infallible;
 use std::fmt;
+use std::fs;
+use std::io;
 use std::ops::Range;
 use std::path::Path;
 use std::path::PathBuf;
 use std::slice;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use itertools::Itertools as _;
+use once_cell::sync::Lazy;
+use serde::de::IntoDeserializer as _;
 use serde::Deserialize;
+use thiserror::Error;
+use toml_edit::DocumentMut;
+use toml_edit::ImDocument;
 
+pub use crate::config_resolver::resolve;
+pub use crate::config_resolver::ConfigResolutionContext;
 use crate::file_util::IoResultExt as _;
+use crate::file_util::PathError;
 
+/// Config value or table node.
+pub type ConfigItem = toml_edit::Item;
 /// Table of config key and value pairs.
-pub type ConfigTable = config::Map<String, config::Value>;
+pub type ConfigTable = toml_edit::Table;
 /// Generic config value.
-pub type ConfigValue = config::Value;
+pub type ConfigValue = toml_edit::Value;
 
-/// Error that can occur when accessing configuration.
-// TODO: will be replaced with our custom error type
-pub type ConfigError = config::ConfigError;
+/// Error that can occur when parsing or loading config variables.
+#[derive(Debug, Error)]
+pub enum ConfigLoadError {
+    /// Config file or directory cannot be read.
+    #[error("Failed to read configuration file")]
+    Read(#[source] PathError),
+    /// TOML file or text cannot be parsed.
+    #[error("Configuration cannot be parsed as TOML document")]
+    Parse {
+        /// Source error.
+        #[source]
+        error: toml_edit::TomlError,
+        /// Source file path.
+        source_path: Option<PathBuf>,
+    },
+}
+
+/// Error that can occur when saving config variables to file.
+#[derive(Debug, Error)]
+#[error("Failed to write configuration file")]
+pub struct ConfigFileSaveError(#[source] pub PathError);
+
+/// Error that can occur when looking up config variable.
+#[derive(Debug, Error)]
+pub enum ConfigGetError {
+    /// Config value is not set.
+    #[error("Value not found for {name}")]
+    NotFound {
+        /// Dotted config name path.
+        name: String,
+    },
+    /// Config value cannot be converted to the expected type.
+    #[error("Invalid type or value for {name}")]
+    Type {
+        /// Dotted config name path.
+        name: String,
+        /// Source error.
+        #[source]
+        error: Box<dyn std::error::Error + Send + Sync>,
+        /// Source file path where the value is defined.
+        source_path: Option<PathBuf>,
+    },
+}
+
+/// Error that can occur when updating config variable.
+#[derive(Debug, Error)]
+pub enum ConfigUpdateError {
+    /// Non-table value exists at parent path, which shouldn't be removed.
+    #[error("Would overwrite non-table value with parent table {name}")]
+    WouldOverwriteValue {
+        /// Dotted config name path.
+        name: String,
+    },
+    /// Table exists at the path, which shouldn't be overwritten by a value.
+    #[error("Would overwrite entire table {name}")]
+    WouldOverwriteTable {
+        /// Dotted config name path.
+        name: String,
+    },
+    /// Table exists at the path, which shouldn't be deleted.
+    #[error("Would delete entire table {name}")]
+    WouldDeleteTable {
+        /// Dotted config name path.
+        name: String,
+    },
+}
+
+/// Extension methods for `Result<T, ConfigGetError>`.
+pub trait ConfigGetResultExt<T> {
+    /// Converts `NotFound` error to `Ok(None)`, leaving other errors.
+    fn optional(self) -> Result<Option<T>, ConfigGetError>;
+}
+
+impl<T> ConfigGetResultExt<T> for Result<T, ConfigGetError> {
+    fn optional(self) -> Result<Option<T>, ConfigGetError> {
+        match self {
+            Ok(value) => Ok(Some(value)),
+            Err(ConfigGetError::NotFound { .. }) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+}
 
 /// Dotted config name path.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -51,6 +144,11 @@ impl ConfigNamePathBuf {
     /// Returns true if the path is empty (i.e. pointing to the root table.)
     pub fn is_root(&self) -> bool {
         self.0.is_empty()
+    }
+
+    /// Returns true if the `base` is a prefix of this path.
+    pub fn starts_with(&self, base: impl AsRef<[toml_edit::Key]>) -> bool {
+        self.0.starts_with(base.as_ref())
     }
 
     /// Returns iterator of path components (or keys.)
@@ -188,12 +286,17 @@ pub struct ConfigLayer {
     /// Source file path of this layer if any.
     pub path: Option<PathBuf>,
     /// Configuration variables.
-    pub data: config::Config,
+    pub data: DocumentMut,
 }
 
 impl ConfigLayer {
+    /// Creates new layer with empty data.
+    pub fn empty(source: ConfigSource) -> Self {
+        Self::with_data(source, DocumentMut::new())
+    }
+
     /// Creates new layer with the configuration variables `data`.
-    pub fn with_data(source: ConfigSource, data: config::Config) -> Self {
+    pub fn with_data(source: ConfigSource, data: DocumentMut) -> Self {
         ConfigLayer {
             source,
             path: None,
@@ -202,32 +305,31 @@ impl ConfigLayer {
     }
 
     /// Parses TOML document `text` into new layer.
-    pub fn parse(source: ConfigSource, text: &str) -> Result<Self, ConfigError> {
-        let data = config::Config::builder()
-            .add_source(config::File::from_str(text, config::FileFormat::Toml))
-            .build()?;
-        Ok(Self::with_data(source, data))
+    pub fn parse(source: ConfigSource, text: &str) -> Result<Self, ConfigLoadError> {
+        let data = ImDocument::parse(text).map_err(|error| ConfigLoadError::Parse {
+            error,
+            source_path: None,
+        })?;
+        Ok(Self::with_data(source, data.into_mut()))
     }
 
-    fn load_from_file(source: ConfigSource, path: PathBuf) -> Result<Self, ConfigError> {
-        // TODO: will be replaced with toml_edit::DocumentMut or ImDocument
-        let data = config::Config::builder()
-            .add_source(
-                config::File::from(path.clone())
-                    // TODO: The path should exist, but the config crate refuses
-                    // to read a special file (e.g. /dev/null) as TOML.
-                    .required(false)
-                    .format(config::FileFormat::Toml),
-            )
-            .build()?;
+    /// Loads TOML file from the specified `path`.
+    pub fn load_from_file(source: ConfigSource, path: PathBuf) -> Result<Self, ConfigLoadError> {
+        let text = fs::read_to_string(&path)
+            .context(&path)
+            .map_err(ConfigLoadError::Read)?;
+        let data = ImDocument::parse(text).map_err(|error| ConfigLoadError::Parse {
+            error,
+            source_path: Some(path.clone()),
+        })?;
         Ok(ConfigLayer {
             source,
             path: Some(path),
-            data,
+            data: data.into_mut(),
         })
     }
 
-    fn load_from_dir(source: ConfigSource, path: &Path) -> Result<Vec<Self>, ConfigError> {
+    fn load_from_dir(source: ConfigSource, path: &Path) -> Result<Vec<Self>, ConfigLoadError> {
         // TODO: Walk the directory recursively?
         let mut file_paths: Vec<_> = path
             .read_dir()
@@ -239,7 +341,7 @@ impl ConfigLayer {
                     .try_collect()
             })
             .context(path)
-            .map_err(|err| ConfigError::Foreign(err.into()))?;
+            .map_err(ConfigLoadError::Read)?;
         file_paths.sort_unstable();
         file_paths
             .into_iter()
@@ -247,27 +349,117 @@ impl ConfigLayer {
             .try_collect()
     }
 
+    /// Returns true if the table has no configuration variables.
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
     // Add .get_value(name) if needed. look_up_*() are low-level API.
+
+    /// Looks up sub non-inline table by the `name` path. Returns `Some(table)`
+    /// if a table was found at the path. Returns `Err(item)` if middle or leaf
+    /// node wasn't a table.
+    pub fn look_up_table(
+        &self,
+        name: impl ToConfigNamePath,
+    ) -> Result<Option<&ConfigTable>, &ConfigItem> {
+        match self.look_up_item(name) {
+            Ok(Some(item)) => match item.as_table() {
+                Some(table) => Ok(Some(table)),
+                None => Err(item),
+            },
+            Ok(None) => Ok(None),
+            Err(item) => Err(item),
+        }
+    }
 
     /// Looks up item by the `name` path. Returns `Some(item)` if an item
     /// found at the path. Returns `Err(item)` if middle node wasn't a table.
     pub fn look_up_item(
         &self,
         name: impl ToConfigNamePath,
-    ) -> Result<Option<&ConfigValue>, &ConfigValue> {
-        look_up_item(&self.data.cache, name.into_name_path().borrow())
+    ) -> Result<Option<&ConfigItem>, &ConfigItem> {
+        look_up_item(self.data.as_item(), name.into_name_path().borrow())
+    }
+
+    /// Sets `new_value` to the `name` path. Returns old value if any.
+    ///
+    /// This function errors out if attempted to overwrite a non-table middle
+    /// node or a leaf table (in the same way as file/directory operation.)
+    pub fn set_value(
+        &mut self,
+        name: impl ToConfigNamePath,
+        new_value: impl Into<ConfigValue>,
+    ) -> Result<Option<ConfigValue>, ConfigUpdateError> {
+        let name = name.into_name_path();
+        let name = name.borrow();
+        let (parent_table, leaf_key) = ensure_parent_table(self.data.as_table_mut(), name)
+            .map_err(|keys| ConfigUpdateError::WouldOverwriteValue {
+                name: keys.join("."),
+            })?;
+        match parent_table.entry_format(leaf_key) {
+            toml_edit::Entry::Occupied(mut entry) => {
+                if !entry.get().is_value() {
+                    return Err(ConfigUpdateError::WouldOverwriteTable {
+                        name: name.to_string(),
+                    });
+                }
+                let old_item = entry.insert(toml_edit::value(new_value));
+                Ok(Some(old_item.into_value().unwrap()))
+            }
+            toml_edit::Entry::Vacant(entry) => {
+                entry.insert(toml_edit::value(new_value));
+                // Reset whitespace formatting (i.e. insert space before '=')
+                let mut new_key = parent_table.key_mut(leaf_key).unwrap();
+                new_key.leaf_decor_mut().clear();
+                Ok(None)
+            }
+        }
+    }
+
+    /// Deletes value specified by the `name` path. Returns old value if any.
+    ///
+    /// Returns `Ok(None)` if middle node wasn't a table or a value wasn't
+    /// found. Returns `Err` if attempted to delete a table.
+    pub fn delete_value(
+        &mut self,
+        name: impl ToConfigNamePath,
+    ) -> Result<Option<ConfigValue>, ConfigUpdateError> {
+        let would_delete_table = |name| ConfigUpdateError::WouldDeleteTable { name };
+        let name = name.into_name_path();
+        let name = name.borrow();
+        let mut keys = name.components();
+        let leaf_key = keys
+            .next_back()
+            .ok_or_else(|| would_delete_table(name.to_string()))?;
+        let root_table = self.data.as_table_mut();
+        let Some(parent_table) =
+            keys.try_fold(root_table, |table, key| table.get_mut(key)?.as_table_mut())
+        else {
+            return Ok(None);
+        };
+        match parent_table.entry(leaf_key) {
+            toml_edit::Entry::Occupied(entry) => {
+                if !entry.get().is_value() {
+                    return Err(would_delete_table(name.to_string()));
+                }
+                let old_item = entry.remove();
+                Ok(Some(old_item.into_value().unwrap()))
+            }
+            toml_edit::Entry::Vacant(_) => Ok(None),
+        }
     }
 }
 
 /// Looks up item from the `root_item`. Returns `Some(item)` if an item found at
-/// the path. Returns `Err(item)` if middle node wasn't a table.
+/// the path. Returns `Err(item)` if middle node wasn't a non-inline table.
 fn look_up_item<'a>(
-    root_item: &'a ConfigValue,
+    root_item: &'a ConfigItem,
     name: &ConfigNamePathBuf,
-) -> Result<Option<&'a ConfigValue>, &'a ConfigValue> {
+) -> Result<Option<&'a ConfigItem>, &'a ConfigItem> {
     let mut cur_item = root_item;
-    for key in name.components().map(toml_edit::Key::get) {
-        let config::ValueKind::Table(table) = &cur_item.kind else {
+    for key in name.components() {
+        let Some(table) = cur_item.as_table() else {
             return Err(cur_item);
         };
         cur_item = match table.get(key) {
@@ -278,11 +470,138 @@ fn look_up_item<'a>(
     Ok(Some(cur_item))
 }
 
+/// Inserts tables down to the parent of the `name` path. Returns `Err(keys)` if
+/// middle node exists at the prefix name `keys` and wasn't a table.
+fn ensure_parent_table<'a, 'b>(
+    root_table: &'a mut ConfigTable,
+    name: &'b ConfigNamePathBuf,
+) -> Result<(&'a mut ConfigTable, &'b toml_edit::Key), &'b [toml_edit::Key]> {
+    let mut keys = name.components();
+    let leaf_key = keys.next_back().ok_or(&name.0[..])?;
+    let parent_table = keys.enumerate().try_fold(root_table, |table, (i, key)| {
+        let sub_item = table.entry_format(key).or_insert_with(new_implicit_table);
+        sub_item.as_table_mut().ok_or(&name.0[..=i])
+    })?;
+    Ok((parent_table, leaf_key))
+}
+
+fn new_implicit_table() -> ConfigItem {
+    let mut table = ConfigTable::new();
+    table.set_implicit(true);
+    ConfigItem::Table(table)
+}
+
+/// Wrapper for file-based [`ConfigLayer`], providing convenient methods for
+/// modification.
+#[derive(Debug)]
+pub struct ConfigFile {
+    layer: Arc<ConfigLayer>,
+}
+
+impl ConfigFile {
+    /// Loads TOML file from the specified `path` if exists. Returns an empty
+    /// object if the file doesn't exist.
+    pub fn load_or_empty(
+        source: ConfigSource,
+        path: impl Into<PathBuf>,
+    ) -> Result<Self, ConfigLoadError> {
+        let layer = match ConfigLayer::load_from_file(source, path.into()) {
+            Ok(layer) => Arc::new(layer),
+            Err(ConfigLoadError::Read(PathError { path, error }))
+                if error.kind() == io::ErrorKind::NotFound =>
+            {
+                Arc::new(ConfigLayer {
+                    source,
+                    path: Some(path),
+                    data: DocumentMut::new(),
+                })
+            }
+            Err(err) => return Err(err),
+        };
+        Ok(ConfigFile { layer })
+    }
+
+    /// Wraps file-based [`ConfigLayer`] for modification. Returns `Err(layer)`
+    /// if the source `path` is unknown.
+    pub fn from_layer(layer: Arc<ConfigLayer>) -> Result<Self, Arc<ConfigLayer>> {
+        if layer.path.is_some() {
+            Ok(ConfigFile { layer })
+        } else {
+            Err(layer)
+        }
+    }
+
+    /// Writes serialized data to the source file.
+    pub fn save(&self) -> Result<(), ConfigFileSaveError> {
+        fs::write(self.path(), self.layer.data.to_string())
+            .context(self.path())
+            .map_err(ConfigFileSaveError)
+    }
+
+    /// Source file path.
+    pub fn path(&self) -> &Path {
+        self.layer.path.as_ref().expect("path must be known")
+    }
+
+    /// Returns the underlying config layer.
+    pub fn layer(&self) -> &Arc<ConfigLayer> {
+        &self.layer
+    }
+
+    /// See [`ConfigLayer::set_value()`].
+    pub fn set_value(
+        &mut self,
+        name: impl ToConfigNamePath,
+        new_value: impl Into<ConfigValue>,
+    ) -> Result<Option<ConfigValue>, ConfigUpdateError> {
+        Arc::make_mut(&mut self.layer).set_value(name, new_value)
+    }
+
+    /// See [`ConfigLayer::delete_value()`].
+    pub fn delete_value(
+        &mut self,
+        name: impl ToConfigNamePath,
+    ) -> Result<Option<ConfigValue>, ConfigUpdateError> {
+        Arc::make_mut(&mut self.layer).delete_value(name)
+    }
+}
+
 /// Stack of configuration layers which can be merged as needed.
+///
+/// A [`StackedConfig`] is something like a read-only `overlayfs`. Tables and
+/// values are directories and files respectively, and tables are merged across
+/// layers. Tables and values can be addressed by [dotted name
+/// paths](ToConfigNamePath).
+///
+/// There's no tombstone notation to remove items from the lower layers.
+///
+/// # Inline and non-inline tables
+///
+/// An inline table is considered a value (or a file in file-system analogy.)
+/// It would probably make sense because the syntax looks like an assignment
+/// `key = { .. }`, and "no newlines are allowed between the curly braces." It's
+/// unlikely that user defined a large inline table like `ui = { .. }`.
+///
+/// - Inline tables will never be merged across layers, and the uppermost table
+///   is always taken.
+/// - Inner values of an inline table cannot be addressed by a dotted name path.
+///   (e.g. `foo.bar` is not a valid path to `foo = { bar = x }`.)
+/// - A lower inline table is shadowed by an upper non-inline table, just like a
+///   file is shadowed by a directory of the same name. (e.g. `foo = { bar = x
+///   }` is not merged, but shadowed by `foo.baz = y`.)
+/// - A non-inline table can be converted to an inline table (or a value) on
+///   `.get()`, but not the other way around. This specifically allows parsing
+///   of a structured value from a merged table.
+///
+/// # Array of tables
+///
+/// If we employ the "array of tables" notation, array items will be gathered
+/// from all layers, as if the array were a directory, and each item had a
+/// unique file name. This merging strategy is not implemented yet.
 #[derive(Clone, Debug)]
 pub struct StackedConfig {
     /// Layers sorted by `source` (the lowest precedence one first.)
-    layers: Vec<ConfigLayer>,
+    layers: Vec<Arc<ConfigLayer>>,
 }
 
 impl StackedConfig {
@@ -291,13 +610,21 @@ impl StackedConfig {
         StackedConfig { layers: vec![] }
     }
 
+    /// Creates a stack of configuration layers containing the default variables
+    /// referred to by `jj-lib`.
+    pub fn with_defaults() -> Self {
+        StackedConfig {
+            layers: DEFAULT_CONFIG_LAYERS.to_vec(),
+        }
+    }
+
     /// Loads config file from the specified `path`, inserts it at the position
     /// specified by `source`. The file should exist.
     pub fn load_file(
         &mut self,
         source: ConfigSource,
         path: impl Into<PathBuf>,
-    ) -> Result<(), ConfigError> {
+    ) -> Result<(), ConfigLoadError> {
         let layer = ConfigLayer::load_from_file(source, path.into())?;
         self.add_layer(layer);
         Ok(())
@@ -309,17 +636,30 @@ impl StackedConfig {
         &mut self,
         source: ConfigSource,
         path: impl AsRef<Path>,
-    ) -> Result<(), ConfigError> {
+    ) -> Result<(), ConfigLoadError> {
         let layers = ConfigLayer::load_from_dir(source, path.as_ref())?;
-        let index = self.insert_point(source);
-        self.layers.splice(index..index, layers);
+        self.extend_layers(layers);
         Ok(())
     }
 
     /// Inserts new layer at the position specified by `layer.source`.
-    pub fn add_layer(&mut self, layer: ConfigLayer) {
+    pub fn add_layer(&mut self, layer: impl Into<Arc<ConfigLayer>>) {
+        let layer = layer.into();
         let index = self.insert_point(layer.source);
         self.layers.insert(index, layer);
+    }
+
+    /// Inserts multiple layers at the positions specified by `layer.source`.
+    pub fn extend_layers<I>(&mut self, layers: I)
+    where
+        I: IntoIterator,
+        I::Item: Into<Arc<ConfigLayer>>,
+    {
+        let layers = layers.into_iter().map(Into::into);
+        for (source, chunk) in &layers.chunk_by(|layer| layer.source) {
+            let index = self.insert_point(source);
+            self.layers.splice(index..index, chunk);
+        }
     }
 
     /// Removes layers of the specified `source`.
@@ -354,8 +694,13 @@ impl StackedConfig {
     }
 
     /// Layers sorted by precedence.
-    pub fn layers(&self) -> &[ConfigLayer] {
+    pub fn layers(&self) -> &[Arc<ConfigLayer>] {
         &self.layers
+    }
+
+    /// Layers of the specified `source`.
+    pub fn layers_for(&self, source: ConfigSource) -> &[Arc<ConfigLayer>] {
+        &self.layers[self.layer_range(source)]
     }
 
     /// Looks up value of the specified type `T` from all layers, merges sub
@@ -363,46 +708,88 @@ impl StackedConfig {
     pub fn get<'de, T: Deserialize<'de>>(
         &self,
         name: impl ToConfigNamePath,
-    ) -> Result<T, ConfigError> {
-        self.get_item_with(name, T::deserialize)
+    ) -> Result<T, ConfigGetError> {
+        self.get_value_with(name, |value| T::deserialize(value.into_deserializer()))
     }
 
     /// Looks up value from all layers, merges sub fields as needed.
-    pub fn get_value(&self, name: impl ToConfigNamePath) -> Result<ConfigValue, ConfigError> {
-        self.get_item_with(name, Ok)
+    pub fn get_value(&self, name: impl ToConfigNamePath) -> Result<ConfigValue, ConfigGetError> {
+        self.get_value_with::<_, Infallible>(name, Ok)
     }
 
-    /// Looks up sub table from all layers, merges fields as needed.
-    // TODO: redesign this to attach better error indication?
-    pub fn get_table(&self, name: impl ToConfigNamePath) -> Result<ConfigTable, ConfigError> {
-        self.get(name)
-    }
-
-    fn get_item_with<T>(
+    /// Looks up value from all layers, merges sub fields as needed, then
+    /// converts the value by using the given function.
+    pub fn get_value_with<T, E: Into<Box<dyn std::error::Error + Send + Sync>>>(
         &self,
         name: impl ToConfigNamePath,
-        convert: impl FnOnce(ConfigValue) -> Result<T, ConfigError>,
-    ) -> Result<T, ConfigError> {
+        convert: impl FnOnce(ConfigValue) -> Result<T, E>,
+    ) -> Result<T, ConfigGetError> {
+        self.get_item_with(name, |item| {
+            // Item variants other than Item::None can be converted to a Value,
+            // and Item::None is not a valid TOML type. See also the following
+            // thread: https://github.com/toml-rs/toml/issues/299
+            let value = item
+                .into_value()
+                .expect("Item::None should not exist in loaded tables");
+            convert(value)
+        })
+    }
+
+    /// Looks up sub non-inline table from all layers, merges fields as needed.
+    ///
+    /// Use `table_keys(prefix)` and `get([prefix, key])` instead if table
+    /// values have to be converted to non-generic value type.
+    pub fn get_table(&self, name: impl ToConfigNamePath) -> Result<ConfigTable, ConfigGetError> {
+        // Not using .into_table() because inline table shouldn't be converted.
+        self.get_item_with(name, |item| match item {
+            ConfigItem::Table(table) => Ok(table),
+            _ => Err(format!("Expected a table, but is {}", item.type_name())),
+        })
+    }
+
+    fn get_item_with<T, E: Into<Box<dyn std::error::Error + Send + Sync>>>(
+        &self,
+        name: impl ToConfigNamePath,
+        convert: impl FnOnce(ConfigItem) -> Result<T, E>,
+    ) -> Result<T, ConfigGetError> {
         let name = name.into_name_path();
         let name = name.borrow();
-        let (item, _layer_index) = get_merged_item(&self.layers, name)
-            .ok_or_else(|| ConfigError::NotFound(name.to_string()))?;
-        // TODO: Add source type/path to the error message. If the value is
-        // a table, the error might come from lower layers. We cannot report
-        // precise source information in that case. However, toml_edit captures
-        // dotted keys in the error object. If the keys field were public, we
-        // can look up the source information. This is probably simpler than
-        // reimplementing Deserializer.
-        convert(item).map_err(|err| err.extend_with_key(&name.to_string()))
+        let (item, layer_index) =
+            get_merged_item(&self.layers, name).ok_or_else(|| ConfigGetError::NotFound {
+                name: name.to_string(),
+            })?;
+        // If the value is a table, the error might come from lower layers. We
+        // cannot report precise source information in that case. However,
+        // toml_edit captures dotted keys in the error object. If the keys field
+        // were public, we can look up the source information. This is probably
+        // simpler than reimplementing Deserializer.
+        convert(item).map_err(|err| ConfigGetError::Type {
+            name: name.to_string(),
+            error: err.into(),
+            source_path: self.layers[layer_index].path.clone(),
+        })
+    }
+
+    /// Returns iterator over sub non-inline table keys in order of layer
+    /// precedence. Duplicated keys are omitted.
+    pub fn table_keys(&self, name: impl ToConfigNamePath) -> impl Iterator<Item = &str> {
+        let name = name.into_name_path();
+        let name = name.borrow();
+        let to_merge = get_tables_to_merge(&self.layers, name);
+        to_merge
+            .into_iter()
+            .rev()
+            .flat_map(|table| table.iter().map(|(k, _)| k))
+            .unique()
     }
 }
 
 /// Looks up item from `layers`, merges sub fields as needed. Returns a merged
 /// item and the uppermost layer index where the item was found.
 fn get_merged_item(
-    layers: &[ConfigLayer],
+    layers: &[Arc<ConfigLayer>],
     name: &ConfigNamePathBuf,
-) -> Option<(ConfigValue, usize)> {
+) -> Option<(ConfigItem, usize)> {
     let mut to_merge = Vec::new();
     for (index, layer) in layers.iter().enumerate().rev() {
         let item = match layer.look_up_item(name) {
@@ -410,7 +797,7 @@ fn get_merged_item(
             Ok(None) => continue, // parent is a table, but no value found
             Err(_) => break,      // parent is not a table, shadows lower layers
         };
-        if matches!(item.kind, config::ValueKind::Table(_)) {
+        if item.is_table() {
             to_merge.push((item, index));
         } else if to_merge.is_empty() {
             return Some((item.clone(), index)); // no need to allocate vec
@@ -431,25 +818,48 @@ fn get_merged_item(
     Some((merged, top_index))
 }
 
+/// Looks up non-inline tables to be merged from `layers`, returns in reverse
+/// order.
+fn get_tables_to_merge<'a>(
+    layers: &'a [Arc<ConfigLayer>],
+    name: &ConfigNamePathBuf,
+) -> Vec<&'a ConfigTable> {
+    let mut to_merge = Vec::new();
+    for layer in layers.iter().rev() {
+        match layer.look_up_table(name) {
+            Ok(Some(table)) => to_merge.push(table),
+            Ok(None) => {}   // parent is a table, but no value found
+            Err(_) => break, // parent/leaf is not a table, shadows lower layers
+        }
+    }
+    to_merge
+}
+
 /// Merges `upper_item` fields into `lower_item` recursively.
-fn merge_items(lower_item: &mut ConfigValue, upper_item: &ConfigValue) {
-    // TODO: If we switch to toml_edit, inline table will probably be treated as
-    // a value, not a table to be merged. For example, { fg = "red" } won't
-    // inherit other color parameters from the lower table.
-    let (config::ValueKind::Table(lower_table), config::ValueKind::Table(upper_table)) =
-        (&mut lower_item.kind, &upper_item.kind)
+fn merge_items(lower_item: &mut ConfigItem, upper_item: &ConfigItem) {
+    // Inline table is a value, not a table to be merged.
+    let (Some(lower_table), Some(upper_table)) = (lower_item.as_table_mut(), upper_item.as_table())
     else {
         // Not a table, the upper item wins.
         *lower_item = upper_item.clone();
         return;
     };
     for (key, upper) in upper_table {
-        lower_table
-            .entry(key.clone())
-            .and_modify(|lower| merge_items(lower, upper))
-            .or_insert_with(|| upper.clone());
+        match lower_table.entry(key) {
+            toml_edit::Entry::Occupied(entry) => {
+                merge_items(entry.into_mut(), upper);
+            }
+            toml_edit::Entry::Vacant(entry) => {
+                entry.insert(upper.clone());
+            }
+        };
     }
 }
+
+static DEFAULT_CONFIG_LAYERS: Lazy<[Arc<ConfigLayer>; 1]> = Lazy::new(|| {
+    let parse = |text: &str| Arc::new(ConfigLayer::parse(ConfigSource::Default, text).unwrap());
+    [parse(include_str!("config/misc.toml"))]
+});
 
 #[cfg(test)]
 mod tests {
@@ -460,8 +870,130 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_config_layer_set_value() {
+        let mut layer = ConfigLayer::empty(ConfigSource::User);
+        // Cannot overwrite the root table
+        assert_matches!(
+            layer.set_value(ConfigNamePathBuf::root(), 0),
+            Err(ConfigUpdateError::WouldOverwriteValue { name }) if name.is_empty()
+        );
+
+        // Insert some values
+        layer.set_value("foo", 1).unwrap();
+        layer.set_value("bar.baz.blah", "2").unwrap();
+        layer
+            .set_value("bar.qux", ConfigValue::from_iter([("inline", "table")]))
+            .unwrap();
+        insta::assert_snapshot!(layer.data, @r#"
+        foo = 1
+
+        [bar]
+        qux = { inline = "table" }
+
+        [bar.baz]
+        blah = "2"
+        "#);
+
+        // Can overwrite value
+        layer
+            .set_value("foo", ConfigValue::from_iter(["new", "foo"]))
+            .unwrap();
+        // Can overwrite inline table
+        layer.set_value("bar.qux", "new bar.qux").unwrap();
+        // Cannot overwrite table
+        assert_matches!(
+            layer.set_value("bar", 0),
+            Err(ConfigUpdateError::WouldOverwriteTable { name }) if name == "bar"
+        );
+        // Cannot overwrite value by table
+        assert_matches!(
+            layer.set_value("bar.baz.blah.blah", 0),
+            Err(ConfigUpdateError::WouldOverwriteValue { name }) if name == "bar.baz.blah"
+        );
+        insta::assert_snapshot!(layer.data, @r#"
+        foo = ["new", "foo"]
+
+        [bar]
+        qux = "new bar.qux"
+
+        [bar.baz]
+        blah = "2"
+        "#);
+    }
+
+    #[test]
+    fn test_config_layer_set_value_formatting() {
+        let mut layer = ConfigLayer::empty(ConfigSource::User);
+        // Quoting style should be preserved on insertion
+        layer
+            .set_value(
+                "'foo' . bar . 'baz'",
+                ConfigValue::from_str("'value'").unwrap(),
+            )
+            .unwrap();
+        insta::assert_snapshot!(layer.data, @r"
+        ['foo' . bar]
+        'baz' = 'value'
+        ");
+
+        // Style of existing keys isn't updated
+        layer.set_value("foo.bar.baz", "new value").unwrap();
+        layer.set_value("foo.'bar'.blah", 0).unwrap();
+        insta::assert_snapshot!(layer.data, @r#"
+        ['foo' . bar]
+        'baz' = "new value"
+        blah = 0
+        "#);
+    }
+
+    #[test]
+    fn test_config_layer_delete_value() {
+        let mut layer = ConfigLayer::empty(ConfigSource::User);
+        // Cannot delete the root table
+        assert_matches!(
+            layer.delete_value(ConfigNamePathBuf::root()),
+            Err(ConfigUpdateError::WouldDeleteTable { name }) if name.is_empty()
+        );
+
+        // Insert some values
+        layer.set_value("foo", 1).unwrap();
+        layer.set_value("bar.baz.blah", "2").unwrap();
+        layer
+            .set_value("bar.qux", ConfigValue::from_iter([("inline", "table")]))
+            .unwrap();
+        insta::assert_snapshot!(layer.data, @r#"
+        foo = 1
+
+        [bar]
+        qux = { inline = "table" }
+
+        [bar.baz]
+        blah = "2"
+        "#);
+
+        // Can delete value
+        let old_value = layer.delete_value("foo").unwrap();
+        assert_eq!(old_value.and_then(|v| v.as_integer()), Some(1));
+        // Can delete inline table
+        let old_value = layer.delete_value("bar.qux").unwrap();
+        assert!(old_value.is_some_and(|v| v.is_inline_table()));
+        // Cannot delete table
+        assert_matches!(
+            layer.delete_value("bar"),
+            Err(ConfigUpdateError::WouldDeleteTable { name }) if name == "bar"
+        );
+        // Deleting a non-table child isn't an error because the value doesn't
+        // exist
+        assert_matches!(layer.delete_value("bar.baz.blah.blah"), Ok(None));
+        insta::assert_snapshot!(layer.data, @r#"
+        [bar.baz]
+        blah = "2"
+        "#);
+    }
+
+    #[test]
     fn test_stacked_config_layer_order() {
-        let empty_data = || config::Config::builder().build().unwrap();
+        let empty_data = || DocumentMut::new();
         let layer_sources = |config: &StackedConfig| {
             config
                 .layers()
@@ -520,18 +1052,32 @@ mod tests {
             vec![ConfigSource::EnvBase, ConfigSource::Repo]
         );
 
+        // Insert multiple
+        config.extend_layers([
+            ConfigLayer::with_data(ConfigSource::Repo, empty_data()),
+            ConfigLayer::with_data(ConfigSource::Repo, empty_data()),
+            ConfigLayer::with_data(ConfigSource::User, empty_data()),
+        ]);
+        assert_eq!(
+            layer_sources(&config),
+            vec![
+                ConfigSource::EnvBase,
+                ConfigSource::User,
+                ConfigSource::Repo,
+                ConfigSource::Repo,
+                ConfigSource::Repo,
+            ]
+        );
+
         // Remove remainders
         config.remove_layers(ConfigSource::EnvBase);
+        config.remove_layers(ConfigSource::User);
         config.remove_layers(ConfigSource::Repo);
         assert_eq!(layer_sources(&config), vec![]);
     }
 
     fn new_user_layer(text: &str) -> ConfigLayer {
         ConfigLayer::parse(ConfigSource::User, text).unwrap()
-    }
-
-    fn parse_to_table(text: &str) -> ConfigTable {
-        new_user_layer(text).data.cache.into_table().unwrap()
     }
 
     #[test]
@@ -554,20 +1100,101 @@ mod tests {
         // Table "a.b" exists, but key doesn't
         assert_matches!(
             config.get::<String>("a.b.missing"),
-            Err(ConfigError::NotFound(name)) if name == "a.b.missing"
+            Err(ConfigGetError::NotFound { name }) if name == "a.b.missing"
         );
 
         // Node "a.b.c" is not a table
         assert_matches!(
             config.get::<String>("a.b.c.d"),
-            Err(ConfigError::NotFound(name)) if name == "a.b.c.d"
+            Err(ConfigGetError::NotFound { name }) if name == "a.b.c.d"
         );
 
         // Type error
         assert_matches!(
             config.get::<String>("a.b"),
-            Err(ConfigError::Type { key: Some(name), .. }) if name == "a.b"
+            Err(ConfigGetError::Type { name, .. }) if name == "a.b"
         );
+    }
+
+    #[test]
+    fn test_stacked_config_get_table_as_value() {
+        let mut config = StackedConfig::empty();
+        config.add_layer(new_user_layer(indoc! {"
+            a.b = { c = 'a.b.c #0' }
+        "}));
+        config.add_layer(new_user_layer(indoc! {"
+            a.d = ['a.d #1']
+        "}));
+
+        // Table can be converted to a value (so it can be deserialized to a
+        // structured value.)
+        insta::assert_snapshot!(
+            config.get_value("a").unwrap(),
+            @"{ b = { c = 'a.b.c #0' }, d = ['a.d #1'] }");
+    }
+
+    #[test]
+    fn test_stacked_config_get_inline_table() {
+        let mut config = StackedConfig::empty();
+        config.add_layer(new_user_layer(indoc! {"
+            a.b = { c = 'a.b.c #0' }
+        "}));
+        config.add_layer(new_user_layer(indoc! {"
+            a.b = { d = 'a.b.d #1' }
+        "}));
+
+        // Inline table should override the lower value
+        insta::assert_snapshot!(
+            config.get_value("a.b").unwrap(),
+            @" { d = 'a.b.d #1' }");
+
+        // For API consistency, inner key of inline table cannot be addressed by
+        // a dotted name path. This could be supported, but it would be weird if
+        // a value could sometimes be accessed as a table.
+        assert_matches!(
+            config.get_value("a.b.d"),
+            Err(ConfigGetError::NotFound { name }) if name == "a.b.d"
+        );
+        assert_matches!(
+            config.get_table("a.b"),
+            Err(ConfigGetError::Type { name, .. }) if name == "a.b"
+        );
+        assert_eq!(config.table_keys("a.b").collect_vec(), vec![""; 0]);
+    }
+
+    #[test]
+    fn test_stacked_config_get_inline_non_inline_table() {
+        let mut config = StackedConfig::empty();
+        config.add_layer(new_user_layer(indoc! {"
+            a.b = { c = 'a.b.c #0' }
+        "}));
+        config.add_layer(new_user_layer(indoc! {"
+            a.b.d = 'a.b.d #1'
+        "}));
+
+        // Non-inline table is not merged with the lower inline table. It might
+        // be tempting to merge them, but then the resulting type would become
+        // unclear. If the merged type were an inline table, the path "a.b.d"
+        // would be shadowed by the lower layer. If the type were a non-inline
+        // table, new path "a.b.c" would be born in the upper layer.
+        insta::assert_snapshot!(
+            config.get_value("a.b").unwrap(),
+            @"{ d = 'a.b.d #1' }");
+        assert_matches!(
+            config.get_value("a.b.c"),
+            Err(ConfigGetError::NotFound { name }) if name == "a.b.c"
+        );
+        insta::assert_snapshot!(
+            config.get_value("a.b.d").unwrap(),
+            @" 'a.b.d #1'");
+
+        insta::assert_snapshot!(
+            config.get_table("a.b").unwrap(),
+            @"d = 'a.b.d #1'");
+        insta::assert_snapshot!(
+            config.get_table("a").unwrap(),
+            @"b.d = 'a.b.d #1'");
+        assert_eq!(config.table_keys("a.b").collect_vec(), vec!["d"]);
     }
 
     #[test]
@@ -585,7 +1212,7 @@ mod tests {
 
         assert_matches!(
             config.get::<String>("a.b.c"),
-            Err(ConfigError::NotFound(name)) if name == "a.b.c"
+            Err(ConfigGetError::NotFound { name }) if name == "a.b.c"
         );
     }
 
@@ -599,11 +1226,7 @@ mod tests {
         config.add_layer(new_user_layer(indoc! {"
             a.b.c = 'a.b.c #1'
         "}));
-
-        let expected = parse_to_table(indoc! {"
-            c = 'a.b.c #1'
-        "});
-        assert_eq!(config.get_table("a.b").unwrap(), expected);
+        insta::assert_snapshot!(config.get_table("a.b").unwrap(), @"c = 'a.b.c #1'");
     }
 
     #[test]
@@ -619,14 +1242,17 @@ mod tests {
             a.a.c = 'a.a.c #1'
             a.c = 'a.c #1'
         "}));
-        let expected = parse_to_table(indoc! {"
-            a.a = 'a.a.a #0'
-            a.b = 'a.a.b #1'
-            a.c = 'a.a.c #1'
-            b = 'a.b #0'
-            c = 'a.c #1'
-        "});
-        assert_eq!(config.get_table("a").unwrap(), expected);
+        insta::assert_snapshot!(config.get_table("a").unwrap(), @r"
+        a.a = 'a.a.a #0'
+        a.b = 'a.a.b #1'
+        a.c = 'a.a.c #1'
+        b = 'a.b #0'
+        c = 'a.c #1'
+        ");
+        assert_eq!(config.table_keys("a").collect_vec(), vec!["a", "b", "c"]);
+        assert_eq!(config.table_keys("a.a").collect_vec(), vec!["a", "b", "c"]);
+        assert_eq!(config.table_keys("a.b").collect_vec(), vec![""; 0]);
+        assert_eq!(config.table_keys("a.missing").collect_vec(), vec![""; 0]);
     }
 
     #[test]
@@ -644,10 +1270,9 @@ mod tests {
         config.add_layer(new_user_layer(indoc! {"
             a.a.b = 'a.a.b #2'
         "}));
-        let expected = parse_to_table(indoc! {"
-            a.b = 'a.a.b #2'
-        "});
-        assert_eq!(config.get_table("a").unwrap(), expected);
+        insta::assert_snapshot!(config.get_table("a").unwrap(), @"a.b = 'a.a.b #2'");
+        assert_eq!(config.table_keys("a").collect_vec(), vec!["a"]);
+        assert_eq!(config.table_keys("a.a").collect_vec(), vec!["b"]);
     }
 
     #[test]
@@ -665,11 +1290,12 @@ mod tests {
         config.add_layer(new_user_layer(indoc! {"
             a.a.b = 'a.a.b #2'
         "}));
-        let expected = parse_to_table(indoc! {"
-            a.b = 'a.a.b #2'
-            b = 'a.b #0'
-        "});
-        assert_eq!(config.get_table("a").unwrap(), expected);
+        insta::assert_snapshot!(config.get_table("a").unwrap(), @r"
+        a.b = 'a.a.b #2'
+        b = 'a.b #0'
+        ");
+        assert_eq!(config.table_keys("a").collect_vec(), vec!["a", "b"]);
+        assert_eq!(config.table_keys("a.a").collect_vec(), vec!["b"]);
     }
 
     #[test]
@@ -686,10 +1312,8 @@ mod tests {
         config.add_layer(new_user_layer(indoc! {"
             a.a.b = 'a.a.b #2'
         "}));
-        let expected = parse_to_table(indoc! {"
-            b = 'a.a.b #2'
-        "});
         // a is not under a.a, but it should still shadow lower layers
-        assert_eq!(config.get_table("a.a").unwrap(), expected);
+        insta::assert_snapshot!(config.get_table("a.a").unwrap(), @"b = 'a.a.b #2'");
+        assert_eq!(config.table_keys("a.a").collect_vec(), vec!["b"]);
     }
 }

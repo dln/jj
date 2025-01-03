@@ -33,8 +33,7 @@ fn test_op_log() {
         &[
             "op",
             "log",
-            "--config-toml",
-            "template-aliases.'format_time_range(x)' = 'x'",
+            "--config=template-aliases.'format_time_range(x)'=x",
         ],
     );
     insta::assert_snapshot!(&stdout, @r#"
@@ -121,11 +120,8 @@ fn test_op_log_with_custom_symbols() {
         &[
             "op",
             "log",
-            "--config-toml",
-            concat!(
-                "template-aliases.'format_time_range(x)' = 'x'\n",
-                "templates.op_log_node = 'if(current_operation, \"$\", if(root, \"┴\", \"┝\"))'",
-            ),
+            "--config=template-aliases.'format_time_range(x)'=x",
+            "--config=templates.op_log_node='if(current_operation, \"$\", if(root, \"┴\", \"┝\"))'",
         ],
     );
     insta::assert_snapshot!(&stdout, @r#"
@@ -316,7 +312,7 @@ fn test_op_log_word_wrap() {
     let render = |args: &[&str], columns: u32, word_wrap: bool| {
         let mut args = args.to_vec();
         if word_wrap {
-            args.push("--config-toml=ui.log-word-wrap=true");
+            args.push("--config=ui.log-word-wrap=true");
         }
         let assert = test_env
             .jj_cmd(&repo_path, &args)
@@ -417,7 +413,7 @@ fn test_op_log_word_wrap() {
     // Nested graph widths should be subtracted from the term width
     let config = r#"templates.commit_summary='"0 1 2 3 4 5 6 7 8 9"'"#;
     insta::assert_snapshot!(
-        render(&["op", "log", "-T''", "--op-diff", "-n1", "--config-toml", config], 15, true), @r#"
+        render(&["op", "log", "-T''", "--op-diff", "-n1", "--config", config], 15, true), @r#"
     @
     │
     │  Changed
@@ -1277,7 +1273,7 @@ fn test_op_diff_patch() {
     Parent commit      : qpvuntsm 6b1027d2 (no description set)
     "###);
     let stdout = test_env.jj_cmd_success(&repo_path, &["op", "diff", "--op", "@-", "-p", "--git"]);
-    insta::assert_snapshot!(&stdout, @r#"
+    insta::assert_snapshot!(&stdout, @r"
     From operation: eac759b9ab75 (2001-02-03 08:05:07) add workspace 'default'
       To operation: 187a5a9d8a22 (2001-02-03 08:05:08) snapshot working copy
 
@@ -1290,9 +1286,9 @@ fn test_op_diff_patch() {
        index 0000000000..7898192261
        --- /dev/null
        +++ b/file
-       @@ -1,0 +1,1 @@
+       @@ -0,0 +1,1 @@
        +a
-    "#);
+    ");
     let stdout = test_env.jj_cmd_success(&repo_path, &["op", "diff", "--op", "@", "-p", "--git"]);
     insta::assert_snapshot!(&stdout, @r#"
     From operation: 187a5a9d8a22 (2001-02-03 08:05:08) snapshot working copy
@@ -1498,7 +1494,7 @@ fn test_op_diff_word_wrap() {
     let render = |args: &[&str], columns: u32, word_wrap: bool| {
         let mut args = args.to_vec();
         if word_wrap {
-            args.push("--config-toml=ui.log-word-wrap=true");
+            args.push("--config=ui.log-word-wrap=true");
         }
         let assert = test_env
             .jj_cmd(&repo_path, &args)
@@ -1568,7 +1564,7 @@ fn test_op_diff_word_wrap() {
     // Graph width should be subtracted from the term width
     let config = r#"templates.commit_summary='"0 1 2 3 4 5 6 7 8 9"'"#;
     insta::assert_snapshot!(
-        render(&["op", "diff", "--from=@---", "--config-toml", config], 10, true), @r#"
+        render(&["op", "diff", "--from=@---", "--config", config], 10, true), @r#"
     From operation: eac759b9ab75 (2001-02-03 08:05:07) add workspace 'default'
       To operation: f3052392e08c (2001-02-03 08:05:08) snapshot working copy
 
@@ -1970,7 +1966,7 @@ fn test_op_show_patch() {
     Parent commit      : qpvuntsm 6b1027d2 (no description set)
     "###);
     let stdout = test_env.jj_cmd_success(&repo_path, &["op", "show", "@-", "-p", "--git"]);
-    insta::assert_snapshot!(&stdout, @r#"
+    insta::assert_snapshot!(&stdout, @r"
     187a5a9d8a22 test-username@host.example.com 2001-02-03 04:05:08.000 +07:00 - 2001-02-03 04:05:08.000 +07:00
     snapshot working copy
     args: jj new
@@ -1984,9 +1980,9 @@ fn test_op_show_patch() {
        index 0000000000..7898192261
        --- /dev/null
        +++ b/file
-       @@ -1,0 +1,1 @@
+       @@ -0,0 +1,1 @@
        +a
-    "#);
+    ");
     let stdout = test_env.jj_cmd_success(&repo_path, &["op", "show", "@", "-p", "--git"]);
     insta::assert_snapshot!(&stdout, @r#"
     a7e535e73c4b test-username@host.example.com 2001-02-03 04:05:08.000 +07:00 - 2001-02-03 04:05:08.000 +07:00
@@ -2059,7 +2055,7 @@ fn test_op_show_patch() {
 
     // Try again with "op log".
     let stdout = test_env.jj_cmd_success(&repo_path, &["op", "log", "--git"]);
-    insta::assert_snapshot!(&stdout, @r#"
+    insta::assert_snapshot!(&stdout, @r"
     @  e5505aa79d31 test-username@host.example.com 2001-02-03 04:05:13.000 +07:00 - 2001-02-03 04:05:13.000 +07:00
     │  abandon commit 9f4fb57fba25a7b47ce5980a5d9a4766778331e8
     │  args: jj abandon
@@ -2130,7 +2126,7 @@ fn test_op_show_patch() {
     │     index 0000000000..7898192261
     │     --- /dev/null
     │     +++ b/file
-    │     @@ -1,0 +1,1 @@
+    │     @@ -0,0 +1,1 @@
     │     +a
     ○  eac759b9ab75 test-username@host.example.com 2001-02-03 04:05:07.000 +07:00 - 2001-02-03 04:05:07.000 +07:00
     │  add workspace 'default'
@@ -2139,7 +2135,7 @@ fn test_op_show_patch() {
     │  ○  Change qpvuntsmwlqt
     │     + qpvuntsm 230dd059 (empty) (no description set)
     ○  000000000000 root()
-    "#);
+    ");
 }
 
 fn init_bare_git_repo(git_repo_path: &Path) -> git2::Repository {

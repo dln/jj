@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use std::borrow::Cow;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::env;
 use std::fmt;
 use std::path::Path;
@@ -22,9 +22,12 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use itertools::Itertools;
-use jj_lib::config::ConfigError;
+use jj_lib::config::ConfigFile;
+use jj_lib::config::ConfigGetError;
 use jj_lib::config::ConfigLayer;
+use jj_lib::config::ConfigLoadError;
 use jj_lib::config::ConfigNamePathBuf;
+use jj_lib::config::ConfigResolutionContext;
 use jj_lib::config::ConfigSource;
 use jj_lib::config::ConfigValue;
 use jj_lib::config::StackedConfig;
@@ -33,62 +36,55 @@ use regex::Regex;
 use thiserror::Error;
 use tracing::instrument;
 
-use crate::command_error::user_error;
-use crate::command_error::user_error_with_message;
+use crate::command_error::config_error;
+use crate::command_error::config_error_with_message;
 use crate::command_error::CommandError;
 
 // TODO(#879): Consider generating entire schema dynamically vs. static file.
 pub const CONFIG_SCHEMA: &str = include_str!("config-schema.json");
 
 /// Parses a TOML value expression. Interprets the given value as string if it
-/// can't be parsed.
-pub fn parse_toml_value_or_bare_string(value_str: &str) -> toml_edit::Value {
+/// can't be parsed and doesn't look like a TOML expression.
+pub fn parse_value_or_bare_string(value_str: &str) -> Result<ConfigValue, toml_edit::TomlError> {
     match value_str.parse() {
-        Ok(value) => value,
-        // TODO: might be better to reject meta characters. A typo in TOML value
-        // expression shouldn't be silently converted to string.
-        _ => value_str.into(),
+        Ok(value) => Ok(value),
+        Err(_) if value_str.as_bytes().iter().copied().all(is_bare_char) => Ok(value_str.into()),
+        Err(err) => Err(err),
     }
 }
 
-pub fn to_toml_value(value: &ConfigValue) -> Result<toml_edit::Value, ConfigError> {
-    fn type_error<T: fmt::Display>(message: T) -> ConfigError {
-        ConfigError::Message(message.to_string())
-    }
-    // It's unlikely that the config object contained unsupported values, but
-    // there's no guarantee. For example, values coming from environment
-    // variables might be big int.
-    match value.kind {
-        config::ValueKind::Nil => Err(type_error(format!("Unexpected value: {value}"))),
-        config::ValueKind::Boolean(v) => Ok(v.into()),
-        config::ValueKind::I64(v) => Ok(v.into()),
-        config::ValueKind::I128(v) => Ok(i64::try_from(v).map_err(type_error)?.into()),
-        config::ValueKind::U64(v) => Ok(i64::try_from(v).map_err(type_error)?.into()),
-        config::ValueKind::U128(v) => Ok(i64::try_from(v).map_err(type_error)?.into()),
-        config::ValueKind::Float(v) => Ok(v.into()),
-        config::ValueKind::String(ref v) => Ok(v.into()),
-        // TODO: Remove sorting when config crate maintains deterministic ordering.
-        config::ValueKind::Table(ref table) => table
-            .iter()
-            .sorted_by_key(|(k, _)| *k)
-            .map(|(k, v)| Ok((k, to_toml_value(v)?)))
-            .collect(),
-        config::ValueKind::Array(ref array) => array.iter().map(to_toml_value).collect(),
+const fn is_bare_char(b: u8) -> bool {
+    match b {
+        // control chars (including tabs and newlines), which are unlikely to
+        // appear in command-line arguments
+        b'\x00'..=b'\x1f' | b'\x7f' => false,
+        // space and symbols that don't construct a TOML value
+        b' ' | b'!' | b'#' | b'$' | b'%' | b'&' | b'(' | b')' | b'*' | b'/' | b';' | b'<'
+        | b'>' | b'?' | b'@' | b'\\' | b'^' | b'_' | b'`' | b'|' | b'~' => true,
+        // there may be an error in integer, float, or date-time, but that's rare
+        b'+' | b'-' | b'.' | b':' => true,
+        // comma and equal don't construct a compound value by themselves, but
+        // they suggest that the value is an inline array or table
+        b',' | b'=' => false,
+        // unpaired quotes are often typo
+        b'"' | b'\'' => false,
+        // symbols that construct an inline array or table
+        b'[' | b']' | b'{' | b'}' => false,
+        // ASCII alphanumeric
+        b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' => true,
+        // non-ASCII
+        b'\x80'..=b'\xff' => true,
     }
 }
 
 #[derive(Error, Debug)]
 pub enum ConfigEnvError {
-    #[error(transparent)]
-    ConfigReadError(#[from] ConfigError),
     #[error("Both {0} and {1} exist. Please consolidate your configs in one of them.")]
     AmbiguousSource(PathBuf, PathBuf),
-    #[error(transparent)]
-    ConfigCreateError(#[from] std::io::Error),
 }
 
 /// Configuration variable with its source information.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct AnnotatedValue {
     /// Dotted name path to the configuration variable.
     pub name: ConfigNamePathBuf,
@@ -107,47 +103,74 @@ pub fn resolved_config_values(
     stacked_config: &StackedConfig,
     filter_prefix: &ConfigNamePathBuf,
 ) -> Vec<AnnotatedValue> {
-    // Collect annotated values from each config.
+    // Collect annotated values in reverse order and mark each value shadowed by
+    // value or table in upper layers.
     let mut config_vals = vec![];
-    for layer in stacked_config.layers() {
-        // TODO: Err(item) means all descendant paths are overridden by the
-        // current layer. For example, the default ui.pager.<field> should be
-        // marked as overridden if user had ui.pager = [...] set.
-        let Ok(Some(top_item)) = layer.look_up_item(filter_prefix) else {
-            continue;
+    let mut upper_value_names = BTreeSet::new();
+    for layer in stacked_config.layers().iter().rev() {
+        let top_item = match layer.look_up_item(filter_prefix) {
+            Ok(Some(item)) => item,
+            Ok(None) => continue, // parent is a table, but no value found
+            Err(_) => {
+                // parent is not a table, shadows lower layers
+                upper_value_names.insert(filter_prefix.clone());
+                continue;
+            }
         };
-        let mut config_stack = vec![(filter_prefix.clone(), top_item)];
-        while let Some((name, item)) = config_stack.pop() {
-            match &item.kind {
-                config::ValueKind::Table(table) => {
-                    // TODO: Remove sorting when config crate maintains deterministic ordering.
-                    for (k, v) in table.iter().sorted_by_key(|(k, _)| *k).rev() {
-                        let mut sub_name = name.clone();
-                        sub_name.push(k);
-                        config_stack.push((sub_name, v));
-                    }
+        let mut config_stack = vec![(filter_prefix.clone(), top_item, false)];
+        while let Some((name, item, is_parent_overridden)) = config_stack.pop() {
+            if let Some(table) = item.as_table() {
+                // current table and children may be shadowed by value in upper layer
+                let is_overridden = is_parent_overridden || upper_value_names.contains(&name);
+                for (k, v) in table {
+                    let mut sub_name = name.clone();
+                    sub_name.push(k);
+                    config_stack.push((sub_name, v, is_overridden)); // in reverse order
                 }
-                _ => {
-                    config_vals.push(AnnotatedValue {
-                        name,
-                        value: item.to_owned(),
-                        source: layer.source,
-                        // Note: Value updated below.
-                        is_overridden: false,
-                    });
+            } else {
+                // current value may be shadowed by value or table in upper layer
+                let maybe_child = upper_value_names
+                    .range(&name..)
+                    .next()
+                    .filter(|next| next.starts_with(&name));
+                let is_overridden = is_parent_overridden || maybe_child.is_some();
+                if maybe_child != Some(&name) {
+                    upper_value_names.insert(name.clone());
                 }
+                let value = item
+                    .clone()
+                    .into_value()
+                    .expect("Item::None should not exist in table");
+                config_vals.push(AnnotatedValue {
+                    name,
+                    value,
+                    source: layer.source,
+                    is_overridden,
+                });
             }
         }
     }
-
-    // Walk through config values in reverse order and mark each overridden value as
-    // overridden.
-    let mut names_found = HashSet::new();
-    for val in config_vals.iter_mut().rev() {
-        val.is_overridden = !names_found.insert(&val.name);
-    }
-
+    config_vals.reverse();
     config_vals
+}
+
+/// Newtype for unprocessed (or unresolved) [`StackedConfig`].
+///
+/// This doesn't provide any strict guarantee about the underlying config
+/// object. It just requires an explicit cast to access to the config object.
+#[derive(Clone, Debug)]
+pub struct RawConfig(StackedConfig);
+
+impl AsRef<StackedConfig> for RawConfig {
+    fn as_ref(&self) -> &StackedConfig {
+        &self.0
+    }
+}
+
+impl AsMut<StackedConfig> for RawConfig {
+    fn as_mut(&mut self) -> &mut StackedConfig {
+        &mut self.0
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -169,6 +192,13 @@ impl ConfigPath {
             None => ConfigPath::Unavailable,
         }
     }
+
+    fn as_path(&self) -> Option<&Path> {
+        match self {
+            ConfigPath::Existing(path) | ConfigPath::New(path) => Some(path),
+            ConfigPath::Unavailable => None,
+        }
+    }
 }
 
 /// Like std::fs::create_dir_all but creates new directories to be accessible to
@@ -182,18 +212,6 @@ fn create_dir_all(path: &Path) -> std::io::Result<()> {
         dir.mode(0o700);
     }
     dir.create(path)
-}
-
-fn create_config_file(path: &Path) -> std::io::Result<std::fs::File> {
-    if let Some(parent) = path.parent() {
-        create_dir_all(parent)?;
-    }
-    // TODO: Use File::create_new once stabilized.
-    std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .open(path)
 }
 
 // The struct exists so that we can mock certain global values in unit tests.
@@ -235,6 +253,8 @@ impl UnresolvedConfigEnv {
 
 #[derive(Clone, Debug)]
 pub struct ConfigEnv {
+    home_dir: Option<PathBuf>,
+    repo_path: Option<PathBuf>,
     user_config_path: ConfigPath,
     repo_config_path: ConfigPath,
 }
@@ -242,57 +262,73 @@ pub struct ConfigEnv {
 impl ConfigEnv {
     /// Initializes configuration loader based on environment variables.
     pub fn from_environment() -> Result<Self, ConfigEnvError> {
+        // Canonicalize home as we do canonicalize cwd in CliRunner. $HOME might
+        // point to symlink.
+        let home_dir = dirs::home_dir().map(|path| dunce::canonicalize(&path).unwrap_or(path));
         let env = UnresolvedConfigEnv {
             config_dir: dirs::config_dir(),
-            home_dir: dirs::home_dir(),
+            home_dir: home_dir.clone(),
             jj_config: env::var("JJ_CONFIG").ok(),
         };
         Ok(ConfigEnv {
+            home_dir,
+            repo_path: None,
             user_config_path: env.resolve()?,
             repo_config_path: ConfigPath::Unavailable,
         })
     }
 
+    /// Returns a path to the user-specific config file or directory.
+    pub fn user_config_path(&self) -> Option<&Path> {
+        self.user_config_path.as_path()
+    }
+
     /// Returns a path to the existing user-specific config file or directory.
-    pub fn existing_user_config_path(&self) -> Option<&Path> {
+    fn existing_user_config_path(&self) -> Option<&Path> {
         match &self.user_config_path {
             ConfigPath::Existing(path) => Some(path),
             _ => None,
         }
     }
 
-    /// Returns a path to the user-specific config file.
+    /// Returns user configuration files for modification. Instantiates one if
+    /// `config` has no user configuration layers.
     ///
-    /// If no config file is found, tries to guess a reasonable new location for
-    /// it. If a path to a new config file is returned, the parent directory may
-    /// be created as a result of this call.
-    pub fn new_user_config_path(&self) -> Result<Option<&Path>, ConfigEnvError> {
-        match &self.user_config_path {
-            ConfigPath::Existing(path) => Ok(Some(path)),
-            ConfigPath::New(path) => {
-                // TODO: Maybe we shouldn't create new file here. Not all
-                // callers need an empty file. For example, "jj config path"
-                // should be a readonly operation. "jj config set" doesn't have
-                // to create an empty file to be overwritten. Since it's unclear
-                // who and when to update ConfigPath::New(_) to ::Existing(_),
-                // it's probably better to not cache the path existence.
-                create_config_file(path)?;
-                Ok(Some(path))
-            }
-            ConfigPath::Unavailable => Ok(None),
-        }
+    /// The parent directory for the new file may be created by this function.
+    /// If the user configuration path is unknown, this function returns an
+    /// empty `Vec`.
+    pub fn user_config_files(
+        &self,
+        config: &RawConfig,
+    ) -> Result<Vec<ConfigFile>, ConfigLoadError> {
+        config_files_for(config, ConfigSource::User, || self.new_user_config_file())
+    }
+
+    fn new_user_config_file(&self) -> Result<Option<ConfigFile>, ConfigLoadError> {
+        self.user_config_path()
+            .map(|path| {
+                // No need to propagate io::Error here. If the directory
+                // couldn't be created, file.save() would fail later.
+                if let Some(dir) = path.parent() {
+                    create_dir_all(dir).ok();
+                }
+                // The path doesn't usually exist, but we shouldn't overwrite it
+                // with an empty config if it did exist.
+                ConfigFile::load_or_empty(ConfigSource::User, path)
+            })
+            .transpose()
     }
 
     /// Loads user-specific config files into the given `config`. The old
     /// user-config layers will be replaced if any.
     #[instrument]
-    pub fn reload_user_config(&self, config: &mut StackedConfig) -> Result<(), ConfigError> {
-        config.remove_layers(ConfigSource::User);
+    pub fn reload_user_config(&self, config: &mut RawConfig) -> Result<(), ConfigLoadError> {
+        config.as_mut().remove_layers(ConfigSource::User);
         if let Some(path) = self.existing_user_config_path() {
             if path.is_dir() {
-                config.load_dir(ConfigSource::User, path)?;
+                config.as_mut().load_dir(ConfigSource::User, path)?;
             } else {
-                config.load_file(ConfigSource::User, path)?;
+                config.as_mut().load_file(ConfigSource::User, path)?;
             }
         }
         Ok(())
@@ -301,250 +337,235 @@ impl ConfigEnv {
     /// Sets the directory where repo-specific config file is stored. The path
     /// is usually `.jj/repo`.
     pub fn reset_repo_path(&mut self, path: &Path) {
+        self.repo_path = Some(path.to_owned());
         self.repo_config_path = ConfigPath::new(Some(path.join("config.toml")));
     }
 
+    /// Returns a path to the repo-specific config file.
+    pub fn repo_config_path(&self) -> Option<&Path> {
+        self.repo_config_path.as_path()
+    }
+
     /// Returns a path to the existing repo-specific config file.
-    pub fn existing_repo_config_path(&self) -> Option<&Path> {
+    fn existing_repo_config_path(&self) -> Option<&Path> {
         match &self.repo_config_path {
             ConfigPath::Existing(path) => Some(path),
             _ => None,
         }
     }
 
-    /// Returns a path to the repo-specific config file.
-    pub fn new_repo_config_path(&self) -> Option<&Path> {
-        match &self.repo_config_path {
-            ConfigPath::Existing(path) => Some(path),
-            ConfigPath::New(path) => Some(path),
-            ConfigPath::Unavailable => None,
-        }
+    /// Returns repo configuration files for modification. Instantiates one if
+    /// `config` has no repo configuration layers.
+    ///
+    /// If the repo path is unknown, this function returns an empty `Vec`. Since
+    /// the repo config path cannot be a directory, the returned `Vec` should
+    /// have at most one config file.
+    pub fn repo_config_files(
+        &self,
+        config: &RawConfig,
+    ) -> Result<Vec<ConfigFile>, ConfigLoadError> {
+        config_files_for(config, ConfigSource::Repo, || self.new_repo_config_file())
+    }
+
+    fn new_repo_config_file(&self) -> Result<Option<ConfigFile>, ConfigLoadError> {
+        self.repo_config_path()
+            // The path doesn't usually exist, but we shouldn't overwrite it
+            // with an empty config if it did exist.
+            .map(|path| ConfigFile::load_or_empty(ConfigSource::Repo, path))
+            .transpose()
     }
 
     /// Loads repo-specific config file into the given `config`. The old
     /// repo-config layer will be replaced if any.
     #[instrument]
-    pub fn reload_repo_config(&self, config: &mut StackedConfig) -> Result<(), ConfigError> {
-        config.remove_layers(ConfigSource::Repo);
+    pub fn reload_repo_config(&self, config: &mut RawConfig) -> Result<(), ConfigLoadError> {
+        config.as_mut().remove_layers(ConfigSource::Repo);
         if let Some(path) = self.existing_repo_config_path() {
-            config.load_file(ConfigSource::Repo, path)?;
+            config.as_mut().load_file(ConfigSource::Repo, path)?;
         }
         Ok(())
     }
+
+    /// Resolves conditional scopes within the current environment. Returns new
+    /// resolved config.
+    pub fn resolve_config(&self, config: &RawConfig) -> Result<StackedConfig, ConfigGetError> {
+        let context = ConfigResolutionContext {
+            home_dir: self.home_dir.as_deref(),
+            repo_path: self.repo_path.as_deref(),
+        };
+        jj_lib::config::resolve(config.as_ref(), &context)
+    }
 }
 
-/// Initializes stacked config with the given `default` and infallible sources.
+fn config_files_for(
+    config: &RawConfig,
+    source: ConfigSource,
+    new_file: impl FnOnce() -> Result<Option<ConfigFile>, ConfigLoadError>,
+) -> Result<Vec<ConfigFile>, ConfigLoadError> {
+    let mut files = config
+        .as_ref()
+        .layers_for(source)
+        .iter()
+        .filter_map(|layer| ConfigFile::from_layer(layer.clone()).ok())
+        .collect_vec();
+    if files.is_empty() {
+        files.extend(new_file()?);
+    }
+    Ok(files)
+}
+
+/// Initializes stacked config with the given `default_layers` and infallible
+/// sources.
 ///
 /// Sources from the lowest precedence:
 /// 1. Default
 /// 2. Base environment variables
-/// 3. [User config](https://martinvonz.github.io/jj/latest/config/)
+/// 3. [User config](https://jj-vcs.github.io/jj/latest/config/)
 /// 4. Repo config `.jj/repo/config.toml`
 /// 5. TODO: Workspace config `.jj/config.toml`
 /// 6. Override environment variables
-/// 7. Command-line arguments `--config-toml`
+/// 7. Command-line arguments `--config`, `--config-toml`, `--config-file`
 ///
 /// This function sets up 1, 2, and 6.
-pub fn config_from_environment(default: config::Config) -> StackedConfig {
-    let mut config = StackedConfig::empty();
-    config.add_layer(ConfigLayer::with_data(ConfigSource::Default, default));
-    config.add_layer(ConfigLayer::with_data(ConfigSource::EnvBase, env_base()));
-    config.add_layer(ConfigLayer::with_data(
-        ConfigSource::EnvOverrides,
-        env_overrides(),
-    ));
-    config
+pub fn config_from_environment(default_layers: impl IntoIterator<Item = ConfigLayer>) -> RawConfig {
+    let mut config = StackedConfig::with_defaults();
+    config.extend_layers(default_layers);
+    config.add_layer(env_base_layer());
+    config.add_layer(env_overrides_layer());
+    RawConfig(config)
 }
 
 /// Environment variables that should be overridden by config values
-fn env_base() -> config::Config {
-    let mut builder = config::Config::builder();
-    if env::var("NO_COLOR").is_ok() {
+fn env_base_layer() -> ConfigLayer {
+    let mut layer = ConfigLayer::empty(ConfigSource::EnvBase);
+    if !env::var("NO_COLOR").unwrap_or_default().is_empty() {
         // "User-level configuration files and per-instance command-line arguments
         // should override $NO_COLOR." https://no-color.org/
-        builder = builder.set_override("ui.color", "never").unwrap();
+        layer.set_value("ui.color", "never").unwrap();
     }
     if let Ok(value) = env::var("PAGER") {
-        builder = builder.set_override("ui.pager", value).unwrap();
+        layer.set_value("ui.pager", value).unwrap();
     }
     if let Ok(value) = env::var("VISUAL") {
-        builder = builder.set_override("ui.editor", value).unwrap();
+        layer.set_value("ui.editor", value).unwrap();
     } else if let Ok(value) = env::var("EDITOR") {
-        builder = builder.set_override("ui.editor", value).unwrap();
+        layer.set_value("ui.editor", value).unwrap();
     }
-
-    builder.build().unwrap()
+    layer
 }
 
-pub fn default_config() -> config::Config {
+pub fn default_config_layers() -> Vec<ConfigLayer> {
     // Syntax error in default config isn't a user error. That's why defaults are
     // loaded by separate builder.
-    macro_rules! from_toml {
-        ($file:literal) => {
-            config::File::from_str(include_str!($file), config::FileFormat::Toml)
-        };
-    }
-    let mut builder = config::Config::builder()
-        .add_source(from_toml!("config/colors.toml"))
-        .add_source(from_toml!("config/merge_tools.toml"))
-        .add_source(from_toml!("config/misc.toml"))
-        .add_source(from_toml!("config/revsets.toml"))
-        .add_source(from_toml!("config/templates.toml"));
+    let parse = |text: &'static str| ConfigLayer::parse(ConfigSource::Default, text).unwrap();
+    let mut layers = vec![
+        parse(include_str!("config/colors.toml")),
+        parse(include_str!("config/merge_tools.toml")),
+        parse(include_str!("config/misc.toml")),
+        parse(include_str!("config/revsets.toml")),
+        parse(include_str!("config/templates.toml")),
+    ];
     if cfg!(unix) {
-        builder = builder.add_source(from_toml!("config/unix.toml"));
+        layers.push(parse(include_str!("config/unix.toml")));
     }
     if cfg!(windows) {
-        builder = builder.add_source(from_toml!("config/windows.toml"));
+        layers.push(parse(include_str!("config/windows.toml")));
     }
-    builder.build().unwrap()
+    layers
 }
 
 /// Environment variables that override config values
-fn env_overrides() -> config::Config {
-    let mut builder = config::Config::builder();
+fn env_overrides_layer() -> ConfigLayer {
+    let mut layer = ConfigLayer::empty(ConfigSource::EnvOverrides);
     if let Ok(value) = env::var("JJ_USER") {
-        builder = builder.set_override("user.name", value).unwrap();
+        layer.set_value("user.name", value).unwrap();
     }
     if let Ok(value) = env::var("JJ_EMAIL") {
-        builder = builder.set_override("user.email", value).unwrap();
+        layer.set_value("user.email", value).unwrap();
     }
     if let Ok(value) = env::var("JJ_TIMESTAMP") {
-        builder = builder
-            .set_override("debug.commit-timestamp", value)
-            .unwrap();
+        layer.set_value("debug.commit-timestamp", value).unwrap();
     }
     if let Ok(Ok(value)) = env::var("JJ_RANDOMNESS_SEED").map(|s| s.parse::<i64>()) {
-        builder = builder
-            .set_override("debug.randomness-seed", value)
-            .unwrap();
+        layer.set_value("debug.randomness-seed", value).unwrap();
     }
     if let Ok(value) = env::var("JJ_OP_TIMESTAMP") {
-        builder = builder
-            .set_override("debug.operation-timestamp", value)
-            .unwrap();
+        layer.set_value("debug.operation-timestamp", value).unwrap();
     }
     if let Ok(value) = env::var("JJ_OP_HOSTNAME") {
-        builder = builder.set_override("operation.hostname", value).unwrap();
+        layer.set_value("operation.hostname", value).unwrap();
     }
     if let Ok(value) = env::var("JJ_OP_USERNAME") {
-        builder = builder.set_override("operation.username", value).unwrap();
+        layer.set_value("operation.username", value).unwrap();
     }
     if let Ok(value) = env::var("JJ_EDITOR") {
-        builder = builder.set_override("ui.editor", value).unwrap();
+        layer.set_value("ui.editor", value).unwrap();
     }
-    builder.build().unwrap()
+    layer
 }
 
-/// Parses `--config-toml` arguments.
-pub fn parse_config_args(toml_strs: &[String]) -> Result<ConfigLayer, ConfigError> {
-    let config = toml_strs
-        .iter()
-        .fold(config::Config::builder(), |builder, s| {
-            builder.add_source(config::File::from_str(s, config::FileFormat::Toml))
-        })
-        .build()?;
-    Ok(ConfigLayer::with_data(ConfigSource::CommandArg, config))
+/// Configuration source/data type provided as command-line argument.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConfigArgKind {
+    /// `--config=NAME=VALUE`
+    Item,
+    /// `--config-toml=TOML`
+    Toml,
+    /// `--config-file=PATH`
+    File,
 }
 
-fn read_config(path: &Path) -> Result<toml_edit::ImDocument<String>, CommandError> {
-    let config_toml = std::fs::read_to_string(path).or_else(|err| {
-        match err.kind() {
-            // If config doesn't exist yet, read as empty and we'll write one.
-            std::io::ErrorKind::NotFound => Ok("".to_string()),
-            _ => Err(user_error_with_message(
-                format!("Failed to read file {path}", path = path.display()),
-                err,
-            )),
-        }
-    })?;
-    config_toml.parse().map_err(|err| {
-        user_error_with_message(
-            format!("Failed to parse file {path}", path = path.display()),
-            err,
-        )
-    })
-}
-
-fn write_config(path: &Path, doc: &toml_edit::DocumentMut) -> Result<(), CommandError> {
-    std::fs::write(path, doc.to_string()).map_err(|err| {
-        user_error_with_message(
-            format!("Failed to write file {path}", path = path.display()),
-            err,
-        )
-    })
-}
-
-pub fn write_config_value_to_file(
-    key: &ConfigNamePathBuf,
-    value: toml_edit::Value,
-    path: &Path,
-) -> Result<(), CommandError> {
-    let mut doc = read_config(path)?.into_mut();
-
-    // Apply config value
-    let mut target_table = doc.as_table_mut();
-    let mut key_parts_iter = key.components();
-    let last_key_part = key_parts_iter.next_back().expect("key must not be empty");
-    for key_part in key_parts_iter {
-        target_table = target_table
-            .entry(key_part)
-            .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()))
-            .as_table_mut()
-            .ok_or_else(|| {
-                user_error(format!(
-                    "Failed to set {key}: would overwrite non-table value with parent table"
-                ))
-            })?;
-    }
-    // Error out if overwriting non-scalar value for key (table or array) with
-    // scalar.
-    match target_table.get(last_key_part) {
-        None | Some(toml_edit::Item::None | toml_edit::Item::Value(_)) => {}
-        Some(toml_edit::Item::Table(_) | toml_edit::Item::ArrayOfTables(_)) => {
-            return Err(user_error(format!(
-                "Failed to set {key}: would overwrite entire table"
-            )));
-        }
-    }
-    target_table[last_key_part] = toml_edit::Item::Value(value);
-
-    write_config(path, &doc)
-}
-
-pub fn remove_config_value_from_file(
-    key: &ConfigNamePathBuf,
-    path: &Path,
-) -> Result<(), CommandError> {
-    let mut doc = read_config(path)?.into_mut();
-
-    // Find target table
-    let mut key_iter = key.components();
-    let last_key = key_iter.next_back().expect("key must not be empty");
-    let target_table = key_iter.try_fold(doc.as_table_mut(), |table, key| {
-        table
-            .get_mut(key)
-            .ok_or_else(|| ConfigError::NotFound(key.to_string()))
-            .and_then(|table| {
-                table
-                    .as_table_mut()
-                    .ok_or_else(|| ConfigError::Message(format!(r#""{key}" is not a table"#)))
-            })
-    })?;
-
-    // Remove config value
-    match target_table.entry(last_key) {
-        toml_edit::Entry::Occupied(entry) => {
-            if entry.get().is_table() {
-                return Err(user_error(format!("Won't remove table {key}")));
+/// Parses `--config*` arguments.
+pub fn parse_config_args(
+    toml_strs: &[(ConfigArgKind, &str)],
+) -> Result<Vec<ConfigLayer>, CommandError> {
+    let source = ConfigSource::CommandArg;
+    let mut layers = Vec::new();
+    for (kind, chunk) in &toml_strs.iter().chunk_by(|&(kind, _)| kind) {
+        match kind {
+            ConfigArgKind::Item => {
+                let mut layer = ConfigLayer::empty(source);
+                for (_, item) in chunk {
+                    let (name, value) = parse_config_arg_item(item)?;
+                    // Can fail depending on the argument order, but that
+                    // wouldn't matter in practice.
+                    layer.set_value(name, value).map_err(|err| {
+                        config_error_with_message("--config argument cannot be set", err)
+                    })?;
+                }
+                layers.push(layer);
             }
-            entry.remove();
-        }
-        toml_edit::Entry::Vacant(_) => {
-            return Err(ConfigError::NotFound(key.to_string()).into());
+            ConfigArgKind::Toml => {
+                for (_, text) in chunk {
+                    layers.push(ConfigLayer::parse(source, text)?);
+                }
+            }
+            ConfigArgKind::File => {
+                for (_, path) in chunk {
+                    layers.push(ConfigLayer::load_from_file(source, path.into())?);
+                }
+            }
         }
     }
+    Ok(layers)
+}
 
-    write_config(path, &doc)
+/// Parses `NAME=VALUE` string.
+fn parse_config_arg_item(item_str: &str) -> Result<(ConfigNamePathBuf, ConfigValue), CommandError> {
+    // split NAME=VALUE at the first parsable position
+    let split_candidates = item_str.as_bytes().iter().positions(|&b| b == b'=');
+    let Some((name, value_str)) = split_candidates
+        .map(|p| (&item_str[..p], &item_str[p + 1..]))
+        .map(|(name, value)| name.parse().map(|name| (name, value)))
+        .find_or_last(Result::is_ok)
+        .transpose()
+        .map_err(|err| config_error_with_message("--config name cannot be parsed", err))?
+    else {
+        return Err(config_error("--config must be specified as NAME=VALUE"));
+    };
+    let value = parse_value_or_bare_string(value_str)
+        .map_err(|err| config_error_with_message("--config value cannot be parsed", err))?;
+    Ok((name, value))
 }
 
 /// Command name and arguments specified by config.
@@ -685,12 +706,93 @@ impl TryFrom<Vec<String>> for NonEmptyCommandArgsVec {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
     use anyhow::anyhow;
     use assert_matches::assert_matches;
     use indoc::indoc;
     use maplit::hashmap;
 
     use super::*;
+
+    fn insta_settings() -> insta::Settings {
+        let mut settings = insta::Settings::clone_current();
+        // Suppress Decor { .. } which is uninteresting
+        settings.add_filter(r"\bDecor \{[^}]*\}", "Decor { .. }");
+        settings
+    }
+
+    #[test]
+    fn test_parse_value_or_bare_string() {
+        let parse = |s: &str| parse_value_or_bare_string(s);
+
+        // Value in TOML syntax
+        assert_eq!(parse("true").unwrap().as_bool(), Some(true));
+        assert_eq!(parse("42").unwrap().as_integer(), Some(42));
+        assert_eq!(parse("-1").unwrap().as_integer(), Some(-1));
+        assert_eq!(parse("'a'").unwrap().as_str(), Some("a"));
+        assert!(parse("[]").unwrap().is_array());
+        assert!(parse("{ a = 'b' }").unwrap().is_inline_table());
+
+        // Bare string
+        assert_eq!(parse("").unwrap().as_str(), Some(""));
+        assert_eq!(parse("John Doe").unwrap().as_str(), Some("John Doe"));
+        assert_eq!(
+            parse("<foo+bar@example.org>").unwrap().as_str(),
+            Some("<foo+bar@example.org>")
+        );
+        assert_eq!(parse("#ff00aa").unwrap().as_str(), Some("#ff00aa"));
+        assert_eq!(parse("all()").unwrap().as_str(), Some("all()"));
+        assert_eq!(parse("glob:*.*").unwrap().as_str(), Some("glob:*.*"));
+        assert_eq!(parse("柔術").unwrap().as_str(), Some("柔術"));
+
+        // Error in TOML value
+        assert!(parse("'foo").is_err());
+        assert!(parse("[0 1]").is_err());
+        assert!(parse("{ x = }").is_err());
+        assert!(parse("key = 'value'").is_err());
+        assert!(parse("[table]\nkey = 'value'").is_err());
+    }
+
+    #[test]
+    fn test_parse_config_arg_item() {
+        assert!(parse_config_arg_item("").is_err());
+        assert!(parse_config_arg_item("a").is_err());
+        assert!(parse_config_arg_item("=").is_err());
+        assert!(parse_config_arg_item("a=b=c").is_err());
+        // The value parser is sensitive to leading whitespaces, which seems
+        // good because the parsing falls back to a bare string.
+        assert!(parse_config_arg_item("a = 'b'").is_err());
+
+        let (name, value) = parse_config_arg_item("a=b").unwrap();
+        assert_eq!(name, ConfigNamePathBuf::from_iter(["a"]));
+        assert_eq!(value.as_str(), Some("b"));
+
+        let (name, value) = parse_config_arg_item("a=").unwrap();
+        assert_eq!(name, ConfigNamePathBuf::from_iter(["a"]));
+        assert_eq!(value.as_str(), Some(""));
+
+        let (name, value) = parse_config_arg_item("a= ").unwrap();
+        assert_eq!(name, ConfigNamePathBuf::from_iter(["a"]));
+        assert_eq!(value.as_str(), Some(" "));
+
+        let (name, value) = parse_config_arg_item("a.b=true").unwrap();
+        assert_eq!(name, ConfigNamePathBuf::from_iter(["a", "b"]));
+        assert_eq!(value.as_bool(), Some(true));
+
+        let (name, value) = parse_config_arg_item("a='b=c'").unwrap();
+        assert_eq!(name, ConfigNamePathBuf::from_iter(["a"]));
+        assert_eq!(value.as_str(), Some("b=c"));
+
+        let (name, value) = parse_config_arg_item("'a=b'=c").unwrap();
+        assert_eq!(name, ConfigNamePathBuf::from_iter(["a=b"]));
+        assert_eq!(value.as_str(), Some("c"));
+
+        let (name, value) = parse_config_arg_item("'a = b=c '={d = 'e=f'}").unwrap();
+        assert_eq!(name, ConfigNamePathBuf::from_iter(["a = b=c "]));
+        assert!(value.is_inline_table());
+        assert_eq!(value.to_string(), "{d = 'e=f'}");
+    }
 
     #[test]
     fn test_command_args() {
@@ -757,32 +859,27 @@ mod tests {
     #[test]
     fn test_resolved_config_values_empty() {
         let config = StackedConfig::empty();
-        assert_eq!(
-            resolved_config_values(&config, &ConfigNamePathBuf::root()),
-            []
-        );
+        assert!(resolved_config_values(&config, &ConfigNamePathBuf::root()).is_empty());
     }
 
     #[test]
     fn test_resolved_config_values_single_key() {
-        let env_base_config = config::Config::builder()
-            .set_override("user.name", "base-user-name")
-            .unwrap()
-            .set_override("user.email", "base@user.email")
-            .unwrap()
-            .build()
+        let settings = insta_settings();
+        let _guard = settings.bind_to_scope();
+        let mut env_base_layer = ConfigLayer::empty(ConfigSource::EnvBase);
+        env_base_layer
+            .set_value("user.name", "base-user-name")
             .unwrap();
-        let repo_config = config::Config::builder()
-            .set_override("user.email", "repo@user.email")
-            .unwrap()
-            .build()
+        env_base_layer
+            .set_value("user.email", "base@user.email")
+            .unwrap();
+        let mut repo_layer = ConfigLayer::empty(ConfigSource::Repo);
+        repo_layer
+            .set_value("user.email", "repo@user.email")
             .unwrap();
         let mut config = StackedConfig::empty();
-        config.add_layer(ConfigLayer::with_data(
-            ConfigSource::EnvBase,
-            env_base_config,
-        ));
-        config.add_layer(ConfigLayer::with_data(ConfigSource::Repo, repo_config));
+        config.add_layer(env_base_layer);
+        config.add_layer(repo_layer);
         // Note: "email" is alphabetized, before "name" from same layer.
         insta::assert_debug_snapshot!(
             resolved_config_values(&config, &ConfigNamePathBuf::root()),
@@ -794,73 +891,24 @@ mod tests {
                         Key {
                             key: "user",
                             repr: None,
-                            leaf_decor: Decor {
-                                prefix: "default",
-                                suffix: "default",
-                            },
-                            dotted_decor: Decor {
-                                prefix: "default",
-                                suffix: "default",
-                            },
-                        },
-                        Key {
-                            key: "email",
-                            repr: None,
-                            leaf_decor: Decor {
-                                prefix: "default",
-                                suffix: "default",
-                            },
-                            dotted_decor: Decor {
-                                prefix: "default",
-                                suffix: "default",
-                            },
-                        },
-                    ],
-                ),
-                value: Value {
-                    origin: None,
-                    kind: String(
-                        "base@user.email",
-                    ),
-                },
-                source: EnvBase,
-                is_overridden: true,
-            },
-            AnnotatedValue {
-                name: ConfigNamePathBuf(
-                    [
-                        Key {
-                            key: "user",
-                            repr: None,
-                            leaf_decor: Decor {
-                                prefix: "default",
-                                suffix: "default",
-                            },
-                            dotted_decor: Decor {
-                                prefix: "default",
-                                suffix: "default",
-                            },
+                            leaf_decor: Decor { .. },
+                            dotted_decor: Decor { .. },
                         },
                         Key {
                             key: "name",
                             repr: None,
-                            leaf_decor: Decor {
-                                prefix: "default",
-                                suffix: "default",
-                            },
-                            dotted_decor: Decor {
-                                prefix: "default",
-                                suffix: "default",
-                            },
+                            leaf_decor: Decor { .. },
+                            dotted_decor: Decor { .. },
                         },
                     ],
                 ),
-                value: Value {
-                    origin: None,
-                    kind: String(
-                        "base-user-name",
-                    ),
-                },
+                value: String(
+                    Formatted {
+                        value: "base-user-name",
+                        repr: "default",
+                        decor: Decor { .. },
+                    },
+                ),
                 source: EnvBase,
                 is_overridden: false,
             },
@@ -870,35 +918,51 @@ mod tests {
                         Key {
                             key: "user",
                             repr: None,
-                            leaf_decor: Decor {
-                                prefix: "default",
-                                suffix: "default",
-                            },
-                            dotted_decor: Decor {
-                                prefix: "default",
-                                suffix: "default",
-                            },
+                            leaf_decor: Decor { .. },
+                            dotted_decor: Decor { .. },
                         },
                         Key {
                             key: "email",
                             repr: None,
-                            leaf_decor: Decor {
-                                prefix: "default",
-                                suffix: "default",
-                            },
-                            dotted_decor: Decor {
-                                prefix: "default",
-                                suffix: "default",
-                            },
+                            leaf_decor: Decor { .. },
+                            dotted_decor: Decor { .. },
                         },
                     ],
                 ),
-                value: Value {
-                    origin: None,
-                    kind: String(
-                        "repo@user.email",
-                    ),
-                },
+                value: String(
+                    Formatted {
+                        value: "base@user.email",
+                        repr: "default",
+                        decor: Decor { .. },
+                    },
+                ),
+                source: EnvBase,
+                is_overridden: true,
+            },
+            AnnotatedValue {
+                name: ConfigNamePathBuf(
+                    [
+                        Key {
+                            key: "user",
+                            repr: None,
+                            leaf_decor: Decor { .. },
+                            dotted_decor: Decor { .. },
+                        },
+                        Key {
+                            key: "email",
+                            repr: None,
+                            leaf_decor: Decor { .. },
+                            dotted_decor: Decor { .. },
+                        },
+                    ],
+                ),
+                value: String(
+                    Formatted {
+                        value: "repo@user.email",
+                        repr: "default",
+                        decor: Decor { .. },
+                    },
+                ),
                 source: Repo,
                 is_overridden: false,
             },
@@ -909,21 +973,16 @@ mod tests {
 
     #[test]
     fn test_resolved_config_values_filter_path() {
-        let user_config = config::Config::builder()
-            .set_override("test-table1.foo", "user-FOO")
-            .unwrap()
-            .set_override("test-table2.bar", "user-BAR")
-            .unwrap()
-            .build()
-            .unwrap();
-        let repo_config = config::Config::builder()
-            .set_override("test-table1.bar", "repo-BAR")
-            .unwrap()
-            .build()
-            .unwrap();
+        let settings = insta_settings();
+        let _guard = settings.bind_to_scope();
+        let mut user_layer = ConfigLayer::empty(ConfigSource::User);
+        user_layer.set_value("test-table1.foo", "user-FOO").unwrap();
+        user_layer.set_value("test-table2.bar", "user-BAR").unwrap();
+        let mut repo_layer = ConfigLayer::empty(ConfigSource::Repo);
+        repo_layer.set_value("test-table1.bar", "repo-BAR").unwrap();
         let mut config = StackedConfig::empty();
-        config.add_layer(ConfigLayer::with_data(ConfigSource::User, user_config));
-        config.add_layer(ConfigLayer::with_data(ConfigSource::Repo, repo_config));
+        config.add_layer(user_layer);
+        config.add_layer(repo_layer);
         insta::assert_debug_snapshot!(
             resolved_config_values(&config, &ConfigNamePathBuf::from_iter(["test-table1"])),
             @r#"
@@ -934,35 +993,24 @@ mod tests {
                         Key {
                             key: "test-table1",
                             repr: None,
-                            leaf_decor: Decor {
-                                prefix: "default",
-                                suffix: "default",
-                            },
-                            dotted_decor: Decor {
-                                prefix: "default",
-                                suffix: "default",
-                            },
+                            leaf_decor: Decor { .. },
+                            dotted_decor: Decor { .. },
                         },
                         Key {
                             key: "foo",
                             repr: None,
-                            leaf_decor: Decor {
-                                prefix: "default",
-                                suffix: "default",
-                            },
-                            dotted_decor: Decor {
-                                prefix: "default",
-                                suffix: "default",
-                            },
+                            leaf_decor: Decor { .. },
+                            dotted_decor: Decor { .. },
                         },
                     ],
                 ),
-                value: Value {
-                    origin: None,
-                    kind: String(
-                        "user-FOO",
-                    ),
-                },
+                value: String(
+                    Formatted {
+                        value: "user-FOO",
+                        repr: "default",
+                        decor: Decor { .. },
+                    },
+                ),
                 source: User,
                 is_overridden: false,
             },
@@ -972,41 +1020,136 @@ mod tests {
                         Key {
                             key: "test-table1",
                             repr: None,
-                            leaf_decor: Decor {
-                                prefix: "default",
-                                suffix: "default",
-                            },
-                            dotted_decor: Decor {
-                                prefix: "default",
-                                suffix: "default",
-                            },
+                            leaf_decor: Decor { .. },
+                            dotted_decor: Decor { .. },
                         },
                         Key {
                             key: "bar",
                             repr: None,
-                            leaf_decor: Decor {
-                                prefix: "default",
-                                suffix: "default",
-                            },
-                            dotted_decor: Decor {
-                                prefix: "default",
-                                suffix: "default",
-                            },
+                            leaf_decor: Decor { .. },
+                            dotted_decor: Decor { .. },
                         },
                     ],
                 ),
-                value: Value {
-                    origin: None,
-                    kind: String(
-                        "repo-BAR",
-                    ),
-                },
+                value: String(
+                    Formatted {
+                        value: "repo-BAR",
+                        repr: "default",
+                        decor: Decor { .. },
+                    },
+                ),
                 source: Repo,
                 is_overridden: false,
             },
         ]
         "#
         );
+    }
+
+    #[test]
+    fn test_resolved_config_values_overridden() {
+        let list = |layers: &[&ConfigLayer], prefix: &str| -> String {
+            let mut config = StackedConfig::empty();
+            config.extend_layers(layers.iter().copied().cloned());
+            let prefix = if prefix.is_empty() {
+                ConfigNamePathBuf::root()
+            } else {
+                prefix.parse().unwrap()
+            };
+            let mut output = String::new();
+            for annotated in resolved_config_values(&config, &prefix) {
+                let AnnotatedValue { name, value, .. } = &annotated;
+                let sigil = if annotated.is_overridden { '!' } else { ' ' };
+                writeln!(output, "{sigil}{name} = {value}").unwrap();
+            }
+            output
+        };
+
+        let mut layer0 = ConfigLayer::empty(ConfigSource::User);
+        layer0.set_value("a.b.e", "0.0").unwrap();
+        layer0.set_value("a.b.c.f", "0.1").unwrap();
+        layer0.set_value("a.b.d", "0.2").unwrap();
+        let mut layer1 = ConfigLayer::empty(ConfigSource::User);
+        layer1.set_value("a.b", "1.0").unwrap();
+        layer1.set_value("a.c", "1.1").unwrap();
+        let mut layer2 = ConfigLayer::empty(ConfigSource::User);
+        layer2.set_value("a.b.g", "2.0").unwrap();
+        layer2.set_value("a.b.d", "2.1").unwrap();
+
+        // a.b.* is shadowed by a.b
+        let layers = [&layer0, &layer1];
+        insta::assert_snapshot!(list(&layers, ""), @r#"
+        !a.b.e = "0.0"
+        !a.b.c.f = "0.1"
+        !a.b.d = "0.2"
+         a.b = "1.0"
+         a.c = "1.1"
+        "#);
+        insta::assert_snapshot!(list(&layers, "a.b"), @r#"
+        !a.b.e = "0.0"
+        !a.b.c.f = "0.1"
+        !a.b.d = "0.2"
+         a.b = "1.0"
+        "#);
+        insta::assert_snapshot!(list(&layers, "a.b.c"), @r#"!a.b.c.f = "0.1""#);
+        insta::assert_snapshot!(list(&layers, "a.b.d"), @r#"!a.b.d = "0.2""#);
+
+        // a.b is shadowed by a.b.*
+        let layers = [&layer1, &layer2];
+        insta::assert_snapshot!(list(&layers, ""), @r#"
+        !a.b = "1.0"
+         a.c = "1.1"
+         a.b.g = "2.0"
+         a.b.d = "2.1"
+        "#);
+        insta::assert_snapshot!(list(&layers, "a.b"), @r#"
+        !a.b = "1.0"
+         a.b.g = "2.0"
+         a.b.d = "2.1"
+        "#);
+
+        // a.b.d is shadowed by a.b.d
+        let layers = [&layer0, &layer2];
+        insta::assert_snapshot!(list(&layers, ""), @r#"
+         a.b.e = "0.0"
+         a.b.c.f = "0.1"
+        !a.b.d = "0.2"
+         a.b.g = "2.0"
+         a.b.d = "2.1"
+        "#);
+        insta::assert_snapshot!(list(&layers, "a.b"), @r#"
+         a.b.e = "0.0"
+         a.b.c.f = "0.1"
+        !a.b.d = "0.2"
+         a.b.g = "2.0"
+         a.b.d = "2.1"
+        "#);
+        insta::assert_snapshot!(list(&layers, "a.b.c"), @r#" a.b.c.f = "0.1""#);
+        insta::assert_snapshot!(list(&layers, "a.b.d"), @r#"
+        !a.b.d = "0.2"
+         a.b.d = "2.1"
+        "#);
+
+        // a.b.* is shadowed by a.b, which is shadowed by a.b.*
+        let layers = [&layer0, &layer1, &layer2];
+        insta::assert_snapshot!(list(&layers, ""), @r#"
+        !a.b.e = "0.0"
+        !a.b.c.f = "0.1"
+        !a.b.d = "0.2"
+        !a.b = "1.0"
+         a.c = "1.1"
+         a.b.g = "2.0"
+         a.b.d = "2.1"
+        "#);
+        insta::assert_snapshot!(list(&layers, "a.b"), @r#"
+        !a.b.e = "0.0"
+        !a.b.c.f = "0.1"
+        !a.b.d = "0.2"
+        !a.b = "1.0"
+         a.b.g = "2.0"
+         a.b.d = "2.1"
+        "#);
+        insta::assert_snapshot!(list(&layers, "a.b.c"), @r#"!a.b.c.f = "0.1""#);
     }
 
     #[test]
@@ -1177,9 +1320,10 @@ mod tests {
 
     impl TestCase {
         fn resolve(&self, root: &Path) -> Result<ConfigEnv, ConfigEnvError> {
+            let home_dir = self.env.home_dir.as_ref().map(|p| root.join(p));
             let env = UnresolvedConfigEnv {
                 config_dir: self.env.config_dir.as_ref().map(|p| root.join(p)),
-                home_dir: self.env.home_dir.as_ref().map(|p| root.join(p)),
+                home_dir: home_dir.clone(),
                 jj_config: self
                     .env
                     .jj_config
@@ -1187,6 +1331,8 @@ mod tests {
                     .map(|p| root.join(p).to_str().unwrap().to_string()),
             };
             Ok(ConfigEnv {
+                home_dir,
+                repo_path: None,
                 user_config_path: env.resolve()?,
                 repo_config_path: ConfigPath::Unavailable,
             })
@@ -1226,18 +1372,9 @@ mod tests {
             let env = self
                 .resolve(tmp.path())
                 .map_err(|e| anyhow!("new_config_path: {e}"))?;
-            let got = env
-                .new_user_config_path()
-                .map_err(|e| anyhow!("new_config_path: {e}"))?;
+            let got = env.user_config_path();
             if got != want.as_deref() {
                 return Err(anyhow!("new_config_path: got {got:?}, want {want:?}"));
-            }
-            if let Some(path) = got {
-                if !Path::new(&path).is_file() {
-                    return Err(anyhow!(
-                        "new_config_path returned {path:?} which is not a file"
-                    ));
-                }
             }
             Ok(())
         }

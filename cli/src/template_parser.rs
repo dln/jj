@@ -74,8 +74,12 @@ impl Rule {
             Rule::concat_op => Some("++"),
             Rule::logical_or_op => Some("||"),
             Rule::logical_and_op => Some("&&"),
-            Rule::logical_eq_op => Some("=="),
-            Rule::logical_ne_op => Some("!="),
+            Rule::eq_op => Some("=="),
+            Rule::ne_op => Some("!="),
+            Rule::ge_op => Some(">="),
+            Rule::gt_op => Some(">"),
+            Rule::le_op => Some("<="),
+            Rule::lt_op => Some("<"),
             Rule::logical_not_op => Some("!"),
             Rule::negate_op => Some("-"),
             Rule::prefix_ops => None,
@@ -377,9 +381,17 @@ pub enum BinaryOp {
     /// `&&`
     LogicalAnd,
     /// `==`
-    LogicalEq,
+    Eq,
     /// `!=`
-    LogicalNe,
+    Ne,
+    /// `>=`
+    Ge,
+    /// `>`
+    Gt,
+    /// `<=`
+    Le,
+    /// `<`
+    Lt,
 }
 
 pub type ExpressionNode<'i> = dsl_util::ExpressionNode<'i, ExpressionKind<'i>>;
@@ -510,8 +522,11 @@ fn parse_expression_node(pair: Pair<Rule>) -> TemplateParseResult<ExpressionNode
         PrattParser::new()
             .op(Op::infix(Rule::logical_or_op, Assoc::Left))
             .op(Op::infix(Rule::logical_and_op, Assoc::Left))
-            .op(Op::infix(Rule::logical_eq_op, Assoc::Left)
-                | Op::infix(Rule::logical_ne_op, Assoc::Left))
+            .op(Op::infix(Rule::eq_op, Assoc::Left) | Op::infix(Rule::ne_op, Assoc::Left))
+            .op(Op::infix(Rule::ge_op, Assoc::Left)
+                | Op::infix(Rule::gt_op, Assoc::Left)
+                | Op::infix(Rule::le_op, Assoc::Left)
+                | Op::infix(Rule::lt_op, Assoc::Left))
             .op(Op::prefix(Rule::logical_not_op) | Op::prefix(Rule::negate_op))
     });
     PRATT
@@ -531,8 +546,12 @@ fn parse_expression_node(pair: Pair<Rule>) -> TemplateParseResult<ExpressionNode
             let op_kind = match op.as_rule() {
                 Rule::logical_or_op => BinaryOp::LogicalOr,
                 Rule::logical_and_op => BinaryOp::LogicalAnd,
-                Rule::logical_eq_op => BinaryOp::LogicalEq,
-                Rule::logical_ne_op => BinaryOp::LogicalNe,
+                Rule::eq_op => BinaryOp::Eq,
+                Rule::ne_op => BinaryOp::Ne,
+                Rule::ge_op => BinaryOp::Ge,
+                Rule::gt_op => BinaryOp::Gt,
+                Rule::le_op => BinaryOp::Le,
+                Rule::lt_op => BinaryOp::Lt,
                 r => panic!("unexpected infix operator rule {r:?}"),
             };
             let lhs = Box::new(lhs?);
@@ -861,8 +880,14 @@ mod tests {
             parse_normalized("(!(x.f())) || (!(g()))"),
         );
         assert_eq!(
-            parse_normalized("!x.f() == !x.f() || !g() != !g()"),
-            parse_normalized("((!(x.f())) == (!(x.f()))) || ((!(g())) != (!(g())))"),
+            parse_normalized("!x.f() <= !x.f()"),
+            parse_normalized("((!(x.f())) <= (!(x.f())))"),
+        );
+        assert_eq!(
+            parse_normalized("!x.f() < !x.f() == !x.f() >= !x.f() || !g() != !g()"),
+            parse_normalized(
+                "((!(x.f()) < (!(x.f()))) == ((!(x.f())) >= (!(x.f())))) || ((!(g())) != (!(g())))"
+            ),
         );
         assert_eq!(
             parse_normalized("x.f() || y == y || z"),

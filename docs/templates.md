@@ -31,8 +31,10 @@ The following operators are supported.
 * `x.f()`: Method call.
 * `-x`: Negate integer value.
 * `!x`: Logical not.
-* `x == y`, `x != y`: Logical equal/not equal. Operands must be either
-  `Boolean`, `Integer`, or `String`.
+* `x >= y`, `x > y`, `x <= y`, `x < y`: Greater than or equal/greater than/
+  lesser than or equal/lesser than. Operands must be `Integer`s.
+* `x == y`, `x != y`: Equal/not equal. Operands must be either `Boolean`,
+  `Integer`, or `String`.
 * `x && y`: Logical and, short-circuiting.
 * `x || y`: Logical or, short-circuiting.
 * `x ++ y`: Concatenate `x` and `y` templates.
@@ -127,6 +129,13 @@ The following methods are defined.
 * `.short([len: Integer]) -> String`
 * `.shortest([min_len: Integer]) -> ShortestIdPrefix`: Shortest unique prefix.
 
+### Email type
+
+The following methods are defined.
+
+* `.local() -> String`
+* `.domain() -> String`
+
 ### Integer type
 
 No methods are defined.
@@ -210,8 +219,7 @@ The following methods are defined.
 The following methods are defined.
 
 * `.name() -> String`
-* `.email() -> String`
-* `.username() -> String`
+* `.email() -> Email`
 * `.timestamp() -> Timestamp`
 
 ### SizeHint type

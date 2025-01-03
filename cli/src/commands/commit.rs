@@ -42,6 +42,7 @@ pub(crate) struct CommitArgs {
     message_paragraphs: Vec<String>,
     /// Put these paths in the first commit
     #[arg(
+        value_name = "FILESETS", 
         value_hint = clap::ValueHint::AnyPath,
         add = ArgValueCompleter::new(complete::modified_files),
     )]
@@ -114,10 +115,7 @@ new working-copy commit.
         )?;
     }
 
-    let mut commit_builder = tx
-        .repo_mut()
-        .rewrite_commit(command.settings(), &commit)
-        .detach();
+    let mut commit_builder = tx.repo_mut().rewrite_commit(&commit).detach();
     commit_builder.set_tree_id(tree_id);
     if args.reset_author {
         commit_builder.set_author(commit_builder.committer().clone());
@@ -135,7 +133,8 @@ new working-copy commit.
         join_message_paragraphs(&args.message_paragraphs)
     } else {
         if commit_builder.description().is_empty() {
-            commit_builder.set_description(command.settings().default_description());
+            commit_builder
+                .set_description(command.settings().get_string("ui.default-description")?);
         }
         let temp_commit = commit_builder.write_hidden()?;
         let template = description_template(ui, &tx, "", &temp_commit)?;
@@ -152,11 +151,7 @@ new working-copy commit.
     if !workspace_ids.is_empty() {
         let new_wc_commit = tx
             .repo_mut()
-            .new_commit(
-                command.settings(),
-                vec![new_commit.id().clone()],
-                commit.tree_id().clone(),
-            )
+            .new_commit(vec![new_commit.id().clone()], commit.tree_id().clone())
             .write()?;
 
         // Does nothing if there's no bookmarks to advance.

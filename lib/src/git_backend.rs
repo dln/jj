@@ -206,7 +206,7 @@ impl GitBackend {
     ) -> Result<Self, Box<GitBackendInitError>> {
         let canonical_workspace_root = {
             let path = store_path.join(workspace_root);
-            path.canonicalize()
+            dunce::canonicalize(&path)
                 .context(&path)
                 .map_err(GitBackendInitError::Path)?
         };
@@ -472,9 +472,9 @@ impl GitBackend {
 pub fn canonicalize_git_repo_path(path: &Path) -> io::Result<PathBuf> {
     if path.ends_with(".git") {
         let workdir = path.parent().unwrap();
-        workdir.canonicalize().map(|dir| dir.join(".git"))
+        dunce::canonicalize(workdir).map(|dir| dir.join(".git"))
     } else {
-        path.canonicalize()
+        dunce::canonicalize(path)
     }
 }
 
@@ -769,7 +769,7 @@ fn recreate_no_gc_refs(
         // TODO: might be better to switch to a dummy merge, where new no-gc ref
         // will always have a unique name. Doing that with the current
         // ref-per-head strategy would increase the number of the no-gc refs.
-        // https://github.com/martinvonz/jj/pull/2659#issuecomment-1837057782
+        // https://github.com/jj-vcs/jj/pull/2659#issuecomment-1837057782
         let loose_ref_path = git_repo.path().join(git_ref.name.to_path());
         if let Ok(metadata) = loose_ref_path.metadata() {
             let mtime = metadata.modified().expect("unsupported platform?");
@@ -806,8 +806,8 @@ fn run_git_gc(git_dir: &Path) -> Result<(), GitGcError> {
     let mut git = Command::new("git");
     git.arg("--git-dir=."); // turn off discovery
     git.arg("gc");
-    // Don't specify it by GIT_DIR/--git-dir. On Windows, the "\\?\" path might
-    // not be supported by git.
+    // Don't specify it by GIT_DIR/--git-dir. On Windows, the path could be
+    // canonicalized as UNC path, which wouldn't be supported by git.
     git.current_dir(git_dir);
     // TODO: pass output to UI layer instead of printing directly here
     let status = git.status().map_err(GitGcError::GcCommand)?;
@@ -1178,7 +1178,7 @@ impl Backend for GitBackend {
             // TODO: Remove this hack and map to ObjectNotFound error if we're sure that
             // there are no reachable ancestor commits without extras metadata. Git commits
             // imported by jj < 0.8.0 might not have extras (#924).
-            // https://github.com/martinvonz/jj/issues/2343
+            // https://github.com/jj-vcs/jj/issues/2343
             tracing::info!("unimported Git commit found");
             self.import_head_commits([id])?;
             let table = self.cached_extra_metadata_table()?;
@@ -1424,13 +1424,13 @@ fn write_tree_conflict(
     .collect_vec();
     let readme_id = repo
         .write_blob(
-            r#"This commit was made by jj, https://github.com/martinvonz/jj.
+            r#"This commit was made by jj, https://github.com/jj-vcs/jj.
 The commit contains file conflicts, and therefore looks wrong when used with plain
 Git or other tools that are unfamiliar with jj.
 
 The .jjconflict-* directories represent the different inputs to the conflict.
 For details, see
-https://martinvonz.github.io/jj/prerelease/git-compatibility/#format-mapping-details
+https://jj-vcs.github.io/jj/prerelease/git-compatibility/#format-mapping-details
 
 If you see this file in your working copy, it probably means that you used a
 regular `git` command to check out a conflicted commit. Use `jj abandon` to
@@ -2221,7 +2221,7 @@ mod tests {
     // UserSettings type. testutils returns jj_lib (2)'s UserSettings, whereas
     // our UserSettings type comes from jj_lib (1).
     fn user_settings() -> UserSettings {
-        let config = StackedConfig::empty();
-        UserSettings::from_config(config)
+        let config = StackedConfig::with_defaults();
+        UserSettings::from_config(config).unwrap()
     }
 }

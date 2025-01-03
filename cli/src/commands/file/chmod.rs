@@ -49,12 +49,14 @@ pub(crate) struct FileChmodArgs {
     #[arg(
         long, short,
         default_value = "@",
+        value_name = "REVSET",
         add = ArgValueCandidates::new(complete::mutable_revisions),
     )]
     revision: RevisionArg,
     /// Paths to change the executable bit for
     #[arg(
         required = true,
+        value_name = "FILESETS",
         value_hint = clap::ValueHint::AnyPath,
         add = ArgValueCompleter::new(complete::all_revision_files),
     )]
@@ -120,7 +122,7 @@ pub(crate) fn cmd_file_chmod(
 
     let new_tree_id = tree_builder.write_tree(store)?;
     tx.repo_mut()
-        .rewrite_commit(command.settings(), &commit)
+        .rewrite_commit(&commit)
         .set_tree_id(new_tree_id)
         .write()?;
     tx.finish(

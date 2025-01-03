@@ -52,7 +52,6 @@ use crate::command_error::config_error;
 use crate::command_error::print_parse_diagnostics;
 use crate::command_error::CommandError;
 use crate::complete;
-use crate::config::to_toml_value;
 use crate::config::CommandNameAndArgs;
 use crate::ui::Ui;
 
@@ -127,10 +126,15 @@ pub(crate) struct FixArgs {
     /// Fix files in the specified revision(s) and their descendants. If no
     /// revisions are specified, this defaults to the `revsets.fix` setting, or
     /// `reachable(@, mutable())` if it is not set.
-    #[arg(long, short, add = ArgValueCandidates::new(complete::mutable_revisions))]
+    #[arg(
+        long,
+        short,
+        value_name = "REVSETS",
+        add = ArgValueCandidates::new(complete::mutable_revisions)
+    )]
     source: Vec<RevisionArg>,
     /// Fix only these paths
-    #[arg(value_hint = clap::ValueHint::AnyPath)]
+    #[arg(value_name = "FILESETS", value_hint = clap::ValueHint::AnyPath)]
     paths: Vec<String>,
     /// Fix unchanged files in addition to changed ones. If no paths are
     /// specified, all files in the repo will be fixed.
@@ -248,7 +252,6 @@ pub(crate) fn cmd_fix(
     let mut num_checked_commits = 0;
     let mut num_fixed_commits = 0;
     tx.repo_mut().transform_descendants(
-        command.settings(),
         root_commits.iter().cloned().collect_vec(),
         |mut rewriter| {
             // TODO: Build the trees in parallel before `transform_descendants()` and only
@@ -283,7 +286,7 @@ pub(crate) fn cmd_fix(
             if changes > 0 {
                 num_fixed_commits += 1;
                 let new_tree = tree_builder.write_tree(rewriter.mut_repo().store())?;
-                let builder = rewriter.reparent(command.settings())?;
+                let builder = rewriter.reparent();
                 builder.set_tree_id(new_tree).write()?;
             }
             Ok(())
@@ -470,41 +473,42 @@ fn get_tools_config(ui: &mut Ui, settings: &UserSettings) -> Result<ToolsConfig,
             command = {}
             patterns = ["all()"]
             "###,
-            to_toml_value(&settings.get_value("fix.tool-command").unwrap()).unwrap()
+            settings
+                .get_value("fix.tool-command")
+                .unwrap()
+                .decorated("", "") // trim whitespace
         )?;
     }
-    if let Ok(tools_table) = settings.get_table("fix.tools") {
-        // Convert the map into a sorted vector early so errors are deterministic.
-        let mut tools: Vec<ToolConfig> = tools_table
-            .into_iter()
-            .sorted_by(|a, b| a.0.cmp(&b.0))
-            .map(|(name, value)| -> Result<ToolConfig, CommandError> {
-                let mut diagnostics = FilesetDiagnostics::new();
-                let tool: RawToolConfig = value.try_deserialize()?;
-                let expression = FilesetExpression::union_all(
-                    tool.patterns
-                        .iter()
-                        .map(|arg| {
-                            fileset::parse(
-                                &mut diagnostics,
-                                arg,
-                                &RepoPathUiConverter::Fs {
-                                    cwd: "".into(),
-                                    base: "".into(),
-                                },
-                            )
-                        })
-                        .try_collect()?,
-                );
-                print_parse_diagnostics(ui, &format!("In `fix.tools.{name}`"), &diagnostics)?;
-                Ok(ToolConfig {
-                    command: tool.command,
-                    matcher: expression.to_matcher(),
-                })
+    let tools: Vec<ToolConfig> = settings
+        .table_keys("fix.tools")
+        // Sort keys early so errors are deterministic.
+        .sorted()
+        .map(|name| -> Result<ToolConfig, CommandError> {
+            let mut diagnostics = FilesetDiagnostics::new();
+            let tool: RawToolConfig = settings.get(["fix", "tools", name])?;
+            let expression = FilesetExpression::union_all(
+                tool.patterns
+                    .iter()
+                    .map(|arg| {
+                        fileset::parse(
+                            &mut diagnostics,
+                            arg,
+                            &RepoPathUiConverter::Fs {
+                                cwd: "".into(),
+                                base: "".into(),
+                            },
+                        )
+                    })
+                    .try_collect()?,
+            );
+            print_parse_diagnostics(ui, &format!("In `fix.tools.{name}`"), &diagnostics)?;
+            Ok(ToolConfig {
+                command: tool.command,
+                matcher: expression.to_matcher(),
             })
-            .try_collect()?;
-        tools_config.tools.append(&mut tools);
-    }
+        })
+        .try_collect()?;
+    tools_config.tools.extend(tools);
     if tools_config.tools.is_empty() {
         // TODO: This is not a useful message when one or both fields are present but
         // have the wrong type. After removing `fix.tool-command`, it will be simpler to

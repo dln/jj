@@ -29,14 +29,13 @@ use crate::cli_util::GlobalArgs;
 use crate::command_error::user_error;
 use crate::command_error::CommandError;
 use crate::config::config_from_environment;
-use crate::config::default_config;
+use crate::config::default_config_layers;
+use crate::config::ConfigArgKind;
 use crate::config::ConfigEnv;
 use crate::config::CONFIG_SCHEMA;
 use crate::ui::Ui;
 
-const BOOKMARK_HELP_TEMPLATE: &str = r#"
-[template-aliases]
-"bookmark_help()" = """
+const BOOKMARK_HELP_TEMPLATE: &str = r#"template-aliases.'bookmark_help()'='''
 " " ++
 if(normal_target,
     if(normal_target.description(),
@@ -45,8 +44,7 @@ if(normal_target,
     ),
     "(conflicted bookmark)",
 )
-"""
-"#;
+'''"#;
 
 /// A helper function for various completer functions. It returns
 /// (candidate, help) assuming they are separated by a space.
@@ -63,7 +61,7 @@ pub fn local_bookmarks() -> Vec<CompletionCandidate> {
             .build()
             .arg("bookmark")
             .arg("list")
-            .arg("--config-toml")
+            .arg("--config")
             .arg(BOOKMARK_HELP_TEMPLATE)
             .arg("--template")
             .arg(r#"if(!remote, name ++ bookmark_help()) ++ "\n""#)
@@ -85,7 +83,7 @@ pub fn tracked_bookmarks() -> Vec<CompletionCandidate> {
             .arg("bookmark")
             .arg("list")
             .arg("--tracked")
-            .arg("--config-toml")
+            .arg("--config")
             .arg(BOOKMARK_HELP_TEMPLATE)
             .arg("--template")
             .arg(r#"if(remote, name ++ '@' ++ remote ++ bookmark_help() ++ "\n")"#)
@@ -107,7 +105,7 @@ pub fn untracked_bookmarks() -> Vec<CompletionCandidate> {
             .arg("bookmark")
             .arg("list")
             .arg("--all-remotes")
-            .arg("--config-toml")
+            .arg("--config")
             .arg(BOOKMARK_HELP_TEMPLATE)
             .arg("--template")
             .arg(
@@ -145,7 +143,7 @@ pub fn bookmarks() -> Vec<CompletionCandidate> {
             .arg("bookmark")
             .arg("list")
             .arg("--all-remotes")
-            .arg("--config-toml")
+            .arg("--config")
             .arg(BOOKMARK_HELP_TEMPLATE)
             .arg("--template")
             .arg(
@@ -206,8 +204,7 @@ pub fn git_remotes() -> Vec<CompletionCandidate> {
 pub fn aliases() -> Vec<CompletionCandidate> {
     with_jj(|_, settings| {
         Ok(settings
-            .get_table("aliases")?
-            .into_keys()
+            .table_keys("aliases")
             // This is opinionated, but many people probably have several
             // single- or two-letter aliases they use all the time. These
             // aliases don't need to be completed and they would only clutter
@@ -238,7 +235,7 @@ fn revisions(revisions: Option<&str>) -> Vec<CompletionCandidate> {
         cmd.arg("bookmark")
             .arg("list")
             .arg("--all-remotes")
-            .arg("--config-toml")
+            .arg("--config")
             .arg(BOOKMARK_HELP_TEMPLATE)
             .arg("--template")
             .arg(
@@ -278,7 +275,7 @@ fn revisions(revisions: Option<&str>) -> Vec<CompletionCandidate> {
                 .build()
                 .arg("tag")
                 .arg("list")
-                .arg("--config-toml")
+                .arg("--config")
                 .arg(BOOKMARK_HELP_TEMPLATE)
                 .arg("--template")
                 .arg(r#"name ++ bookmark_help() ++ "\n""#)
@@ -370,8 +367,8 @@ pub fn workspaces() -> Vec<CompletionCandidate> {
     with_jj(|jj, _| {
         let output = jj
             .build()
-            .arg("--config-toml")
-            .arg(r#"templates.commit_summary = 'if(description, description.first_line(), "(no description set)")'"#)
+            .arg("--config")
+            .arg(r#"templates.commit_summary='if(description, description.first_line(), "(no description set)")'"#)
             .arg("workspace")
             .arg("list")
             .output()
@@ -472,8 +469,7 @@ fn all_files_from_rev(rev: String, current: &std::ffi::OsStr) -> Vec<CompletionC
             .arg("list")
             .arg("--revision")
             .arg(rev)
-            .arg("--config-toml")
-            .arg("ui.allow-filesets = true")
+            .arg("--config=ui.allow-filesets=true")
             .arg(current_prefix_to_fileset(current))
             .stdout(std::process::Stdio::piped())
             .spawn()
@@ -505,8 +501,7 @@ fn modified_files_from_rev_with_jj_cmd(
     };
     cmd.arg("diff")
         .arg("--summary")
-        .arg("--config-toml")
-        .arg("ui.allow-filesets = true")
+        .arg("--config=ui.allow-filesets=true")
         .arg(current_prefix_to_fileset(current));
     match rev {
         (rev, None) => cmd.arg("--revision").arg(rev),
@@ -558,8 +553,7 @@ fn conflicted_files_from_rev(rev: &str, current: &std::ffi::OsStr) -> Vec<Comple
             .arg("--list")
             .arg("--revision")
             .arg(rev)
-            .arg("--config-toml")
-            .arg("ui.allow-filesets = true")
+            .arg("--config=ui.allow-filesets=true")
             .arg(current_prefix_to_fileset(current))
             .output()
             .map_err(user_error)?;
@@ -638,6 +632,17 @@ pub fn interdiff_files(current: &std::ffi::OsStr) -> Vec<CompletionCandidate> {
     })
 }
 
+/// Specific function for completing file paths for `jj log`
+pub fn log_files(current: &std::ffi::OsStr) -> Vec<CompletionCandidate> {
+    let mut rev = parse::log_revisions().join(")|(");
+    if rev.is_empty() {
+        rev = "@".into();
+    } else {
+        rev = format!("latest(heads(({rev})))"); // limit to one
+    };
+    all_files_from_rev(rev, current)
+}
+
 /// Shell out to jj during dynamic completion generation
 ///
 /// In case of errors, print them and early return an empty vector.
@@ -676,34 +681,38 @@ fn get_jj_command() -> Result<(JjBuilder, UserSettings), CommandError> {
     // child process. This shouldn't fail, since none of the global args are
     // required.
     let app = crate::commands::default_app();
-    let mut config = config_from_environment(default_config());
-    let ui = Ui::with_config(&config).expect("default config should be valid");
+    let mut raw_config = config_from_environment(default_config_layers());
+    let ui = Ui::with_config(raw_config.as_ref()).expect("default config should be valid");
     let cwd = std::env::current_dir()
-        .and_then(|cwd| cwd.canonicalize())
+        .and_then(dunce::canonicalize)
         .map_err(user_error)?;
     let mut config_env = ConfigEnv::from_environment()?;
     let maybe_cwd_workspace_loader = DefaultWorkspaceLoaderFactory.create(find_workspace_dir(&cwd));
-    let _ = config_env.reload_user_config(&mut config);
+    let _ = config_env.reload_user_config(&mut raw_config);
     if let Ok(loader) = &maybe_cwd_workspace_loader {
         config_env.reset_repo_path(loader.repo_path());
-        let _ = config_env.reload_repo_config(&mut config);
+        let _ = config_env.reload_repo_config(&mut raw_config);
     }
+    let mut config = config_env.resolve_config(&raw_config)?;
     // skip 2 because of the clap_complete prelude: jj -- jj <actual args...>
     let args = std::env::args_os().skip(2);
     let args = expand_args(&ui, &app, args, &config)?;
-    let args = app
+    let arg_matches = app
         .clone()
         .disable_version_flag(true)
         .disable_help_flag(true)
         .ignore_errors(true)
         .try_get_matches_from(args)?;
-    let args: GlobalArgs = GlobalArgs::from_arg_matches(&args)?;
+    let args: GlobalArgs = GlobalArgs::from_arg_matches(&arg_matches)?;
 
     if let Some(repository) = args.repository {
         // Try to update repo-specific config on a best-effort basis.
         if let Ok(loader) = DefaultWorkspaceLoaderFactory.create(&cwd.join(&repository)) {
             config_env.reset_repo_path(loader.repo_path());
-            let _ = config_env.reload_repo_config(&mut config);
+            let _ = config_env.reload_repo_config(&mut raw_config);
+            if let Ok(new_config) = config_env.resolve_config(&raw_config) {
+                config = new_config;
+            }
         }
         cmd_args.push("--repository".into());
         cmd_args.push(repository);
@@ -735,16 +744,20 @@ fn get_jj_command() -> Result<(JjBuilder, UserSettings), CommandError> {
             _ => {} // Invalid operation ID, ignore.
         }
     }
-    for config_toml in args.early_args.config_toml {
-        cmd_args.push("--config-toml".into());
-        cmd_args.push(config_toml);
+    for (kind, value) in args.early_args.merged_config_args(&arg_matches) {
+        let arg = match kind {
+            ConfigArgKind::Item => format!("--config={value}"),
+            ConfigArgKind::Toml => format!("--config-toml={value}"),
+            ConfigArgKind::File => format!("--config-file={value}"),
+        };
+        cmd_args.push(arg);
     }
 
     let builder = JjBuilder {
         cmd: current_exe,
         args: cmd_args,
     };
-    let settings = UserSettings::from_config(config);
+    let settings = UserSettings::from_config(config)?;
 
     Ok((builder, settings))
 }
@@ -773,36 +786,41 @@ impl JjBuilder {
 /// multiple times, the parsing will pick any of the available ones, while the
 /// actual execution of the command would fail.
 mod parse {
-    fn parse_flag(candidates: &[&str], mut args: impl Iterator<Item = String>) -> Option<String> {
-        for arg in args.by_ref() {
-            // -r REV syntax
-            if candidates.contains(&arg.as_ref()) {
-                match args.next() {
-                    Some(val) if !val.starts_with('-') => return Some(val),
-                    _ => return None,
+    pub(super) fn parse_flag<'a>(
+        candidates: &'a [&str],
+        mut args: impl Iterator<Item = String> + 'a,
+    ) -> impl Iterator<Item = String> + 'a {
+        std::iter::from_fn(move || {
+            for arg in args.by_ref() {
+                // -r REV syntax
+                if candidates.contains(&arg.as_ref()) {
+                    match args.next() {
+                        Some(val) if !val.starts_with('-') => return Some(val),
+                        _ => return None,
+                    }
                 }
+
+                // -r=REV syntax
+                if let Some(value) = candidates.iter().find_map(|candidate| {
+                    let rest = arg.strip_prefix(candidate)?;
+                    match rest.strip_prefix('=') {
+                        Some(value) => Some(value),
+
+                        // -rREV syntax
+                        None if candidate.len() == 2 => Some(rest),
+
+                        None => None,
+                    }
+                }) {
+                    return Some(value.into());
+                };
             }
-
-            // -r=REV syntax
-            if let Some(value) = candidates.iter().find_map(|candidate| {
-                let rest = arg.strip_prefix(candidate)?;
-                match rest.strip_prefix('=') {
-                    Some(value) => Some(value),
-
-                    // -rREV syntax
-                    None if candidate.len() == 2 => Some(rest),
-
-                    None => None,
-                }
-            }) {
-                return Some(value.into());
-            };
-        }
-        None
+            None
+        })
     }
 
     pub fn parse_revision_impl(args: impl Iterator<Item = String>) -> Option<String> {
-        parse_flag(&["-r", "--revision"], args)
+        parse_flag(&["-r", "--revision"], args).next()
     }
 
     pub fn revision() -> Option<String> {
@@ -817,8 +835,10 @@ mod parse {
     where
         T: Iterator<Item = String>,
     {
-        let from = parse_flag(&["-f", "--from"], args())?;
-        let to = parse_flag(&["-t", "--to"], args()).unwrap_or_else(|| "@".into());
+        let from = parse_flag(&["-f", "--from"], args()).next()?;
+        let to = parse_flag(&["-t", "--to"], args())
+            .next()
+            .unwrap_or_else(|| "@".into());
 
         Some((from, to))
     }
@@ -832,10 +852,17 @@ mod parse {
     // the files changed only in some other revision in the range between
     // --from and --to cannot be squashed into --to like that.
     pub fn squash_revision() -> Option<String> {
-        if let Some(rev) = parse_flag(&["-r", "--revision"], std::env::args()) {
+        if let Some(rev) = parse_flag(&["-r", "--revision"], std::env::args()).next() {
             return Some(rev);
         }
-        parse_flag(&["-f", "--from"], std::env::args())
+        parse_flag(&["-f", "--from"], std::env::args()).next()
+    }
+
+    // Special parse function only for `jj log`. It has a --revisions flag,
+    // instead of the usual --revision, and it can be supplied multiple times.
+    pub fn log_revisions() -> Vec<String> {
+        let candidates = &["-r", "--revisions"];
+        parse_flag(candidates, std::env::args()).collect()
     }
 }
 
@@ -914,5 +941,26 @@ mod tests {
                 "case: {case:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_parse_multiple_flags() {
+        let candidates = &["-r", "--revisions"];
+        let args = &[
+            "unrelated_arg_at_the_beginning",
+            "-r",
+            "1",
+            "--revisions",
+            "2",
+            "-r=3",
+            "--revisions=4",
+            "unrelated_arg_in_the_middle",
+            "-r5",
+            "unrelated_arg_at_the_end",
+        ];
+        let flags: Vec<_> =
+            parse::parse_flag(candidates, args.iter().map(|a| a.to_string())).collect();
+        let expected = ["1", "2", "3", "4", "5"];
+        assert_eq!(flags, expected);
     }
 }

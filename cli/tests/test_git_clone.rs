@@ -162,6 +162,24 @@ fn test_git_clone() {
 }
 
 #[test]
+fn test_git_clone_bad_source() {
+    let test_env = TestEnvironment::default();
+
+    let stderr = test_env.jj_cmd_cli_error(test_env.env_root(), &["git", "clone", "", "dest"]);
+    insta::assert_snapshot!(stderr, @r#"Error: local path "" does not specify a path to a repository"#);
+
+    // Invalid port number
+    let stderr = test_env.jj_cmd_cli_error(
+        test_env.env_root(),
+        &["git", "clone", "https://example.net:bad-port/bar", "dest"],
+    );
+    insta::assert_snapshot!(stderr, @r#"
+    Error: URL "https://example.net:bad-port/bar" can not be parsed as valid URL
+    Caused by: invalid port number
+    "#);
+}
+
+#[test]
 fn test_git_clone_colocate() {
     let test_env = TestEnvironment::default();
     test_env.add_config("git.auto-local-bookmark = true");
@@ -482,7 +500,7 @@ fn test_git_clone_ignore_working_copy() {
     insta::assert_snapshot!(stderr, @r##"
     Error: The working copy is stale (not updated since operation eac759b9ab75).
     Hint: Run `jj workspace update-stale` to update it.
-    See https://martinvonz.github.io/jj/latest/working-copy/#stale-working-copy for more information.
+    See https://jj-vcs.github.io/jj/latest/working-copy/#stale-working-copy for more information.
     "##);
 }
 
@@ -607,7 +625,7 @@ fn test_git_clone_invalid_immutable_heads() {
     bookmark: main@origin [new] untracked
     Config error: Invalid `revset-aliases.immutable_heads()`
     Caused by: Revision "unknown" doesn't exist
-    For help, see https://martinvonz.github.io/jj/latest/config/.
+    For help, see https://jj-vcs.github.io/jj/latest/config/.
     "#);
 }
 
@@ -637,7 +655,7 @@ fn test_git_clone_malformed() {
     insta::assert_snapshot!(stderr, @r##"
     Error: The working copy is stale (not updated since operation 4a8ddda0ff63).
     Hint: Run `jj workspace update-stale` to update it.
-    See https://martinvonz.github.io/jj/latest/working-copy/#stale-working-copy for more information.
+    See https://jj-vcs.github.io/jj/latest/working-copy/#stale-working-copy for more information.
     "##);
 
     // The error can be somehow recovered.

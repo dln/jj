@@ -28,7 +28,7 @@ use testutils::TestWorkspace;
 
 fn canonicalize(input: &Path) -> (PathBuf, PathBuf) {
     let uncanonical = input.join("..").join(input.file_name().unwrap());
-    let canonical = uncanonical.canonicalize().unwrap();
+    let canonical = dunce::canonicalize(&uncanonical).unwrap();
     (canonical, uncanonical)
 }
 
@@ -46,8 +46,8 @@ fn test_init_local() {
     assert_eq!(workspace.workspace_root(), &canonical);
 
     // Just test that we can write a commit to the store
-    let mut tx = repo.start_transaction(&settings);
-    write_random_commit(tx.repo_mut(), &settings);
+    let mut tx = repo.start_transaction();
+    write_random_commit(tx.repo_mut());
 }
 
 #[test]
@@ -74,8 +74,8 @@ fn test_init_internal_git() {
     );
 
     // Just test that we can write a commit to the store
-    let mut tx = repo.start_transaction(&settings);
-    write_random_commit(tx.repo_mut(), &settings);
+    let mut tx = repo.start_transaction();
+    write_random_commit(tx.repo_mut());
 }
 
 #[test]
@@ -99,8 +99,8 @@ fn test_init_colocated_git() {
     );
 
     // Just test that we can write a commit to the store
-    let mut tx = repo.start_transaction(&settings);
-    write_random_commit(tx.repo_mut(), &settings);
+    let mut tx = repo.start_transaction();
+    write_random_commit(tx.repo_mut());
 }
 
 #[test]
@@ -133,17 +133,15 @@ fn test_init_external_git() {
     );
 
     // Just test that we can write a commit to the store
-    let mut tx = repo.start_transaction(&settings);
-    write_random_commit(tx.repo_mut(), &settings);
+    let mut tx = repo.start_transaction();
+    write_random_commit(tx.repo_mut());
 }
 
 #[test_case(TestRepoBackend::Local ; "local backend")]
 #[test_case(TestRepoBackend::Git ; "git backend")]
-fn test_init_no_config_set(backend: TestRepoBackend) {
-    // Test that we can create a repo without setting any config
-    // TODO: Perhaps, StackedConfig::empty() will be replaced with ::default()
-    // or something that includes the minimal configuration variables.
-    let settings = UserSettings::from_config(StackedConfig::empty());
+fn test_init_with_default_config(backend: TestRepoBackend) {
+    // Test that we can create a repo without setting any non-default config
+    let settings = UserSettings::from_config(StackedConfig::with_defaults()).unwrap();
     let test_workspace = TestWorkspace::init_with_backend(&settings, backend);
     let repo = &test_workspace.repo;
     let wc_commit_id = repo

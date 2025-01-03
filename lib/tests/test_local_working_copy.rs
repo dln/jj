@@ -42,12 +42,11 @@ use jj_lib::repo_path::RepoPath;
 use jj_lib::repo_path::RepoPathBuf;
 use jj_lib::repo_path::RepoPathComponent;
 use jj_lib::secret_backend::SecretBackend;
-use jj_lib::settings::UserSettings;
 use jj_lib::working_copy::CheckoutError;
 use jj_lib::working_copy::CheckoutOptions;
 use jj_lib::working_copy::CheckoutStats;
-use jj_lib::working_copy::SnapshotError;
 use jj_lib::working_copy::SnapshotOptions;
+use jj_lib::working_copy::UntrackedReason;
 use jj_lib::workspace::default_working_copy_factories;
 use jj_lib::workspace::LockedWorkspace;
 use jj_lib::workspace::Workspace;
@@ -151,7 +150,6 @@ fn test_checkout_file_transitions(backend: TestRepoBackend) {
     }
 
     fn write_path(
-        settings: &UserSettings,
         repo: &Arc<ReadonlyRepo>,
         tree_builder: &mut MergedTreeBuilder,
         kind: Kind,
@@ -241,8 +239,8 @@ fn test_checkout_file_transitions(backend: TestRepoBackend) {
                 return;
             }
             Kind::GitSubmodule => {
-                let mut tx = repo.start_transaction(settings);
-                let id = write_random_commit(tx.repo_mut(), settings).id().clone();
+                let mut tx = repo.start_transaction();
+                let id = write_random_commit(tx.repo_mut()).id().clone();
                 tx.commit("test").unwrap();
                 Merge::normal(TreeValue::GitSubmodule(id))
             }
@@ -269,8 +267,8 @@ fn test_checkout_file_transitions(backend: TestRepoBackend) {
     for left_kind in &kinds {
         for right_kind in &kinds {
             let path = RepoPathBuf::from_internal_string(format!("{left_kind:?}_{right_kind:?}"));
-            write_path(&settings, repo, &mut left_tree_builder, *left_kind, &path);
-            write_path(&settings, repo, &mut right_tree_builder, *right_kind, &path);
+            write_path(repo, &mut left_tree_builder, *left_kind, &path);
+            write_path(repo, &mut right_tree_builder, *right_kind, &path);
             files.push((*left_kind, *right_kind, path.clone()));
         }
     }
@@ -751,6 +749,55 @@ fn test_checkout_discard() {
 }
 
 #[test]
+fn test_snapshot_file_directory_transition() {
+    let settings = testutils::user_settings();
+    let mut test_workspace = TestWorkspace::init(&settings);
+    let repo = test_workspace.repo.clone();
+    let workspace_root = test_workspace.workspace.workspace_root().to_owned();
+    let checkout_options = CheckoutOptions::empty_for_test();
+    let to_ws_path = |path: &RepoPath| path.to_fs_path(&workspace_root).unwrap();
+
+    // file <-> directory transition at root and sub directories
+    let file1_path = RepoPath::from_internal_string("foo/bar");
+    let file2_path = RepoPath::from_internal_string("sub/bar/baz");
+    let file1p_path = file1_path.parent().unwrap();
+    let file2p_path = file2_path.parent().unwrap();
+
+    let tree1 = create_tree(&repo, &[(file1p_path, "1p"), (file2p_path, "2p")]);
+    let tree2 = create_tree(&repo, &[(file1_path, "1"), (file2_path, "2")]);
+    let commit1 = commit_with_tree(repo.store(), tree1.id());
+    let commit2 = commit_with_tree(repo.store(), tree2.id());
+
+    let ws = &mut test_workspace.workspace;
+    ws.check_out(repo.op_id().clone(), None, &commit1, &checkout_options)
+        .unwrap();
+
+    // file -> directory
+    std::fs::remove_file(to_ws_path(file1p_path)).unwrap();
+    std::fs::remove_file(to_ws_path(file2p_path)).unwrap();
+    std::fs::create_dir(to_ws_path(file1p_path)).unwrap();
+    std::fs::create_dir(to_ws_path(file2p_path)).unwrap();
+    std::fs::write(to_ws_path(file1_path), "1").unwrap();
+    std::fs::write(to_ws_path(file2_path), "2").unwrap();
+    let new_tree = test_workspace.snapshot().unwrap();
+    assert_eq!(new_tree.id(), tree2.id());
+
+    let ws = &mut test_workspace.workspace;
+    ws.check_out(repo.op_id().clone(), None, &commit2, &checkout_options)
+        .unwrap();
+
+    // directory -> file
+    std::fs::remove_file(to_ws_path(file1_path)).unwrap();
+    std::fs::remove_file(to_ws_path(file2_path)).unwrap();
+    std::fs::remove_dir(to_ws_path(file1p_path)).unwrap();
+    std::fs::remove_dir(to_ws_path(file2p_path)).unwrap();
+    std::fs::write(to_ws_path(file1p_path), "1p").unwrap();
+    std::fs::write(to_ws_path(file2p_path), "2p").unwrap();
+    let new_tree = test_workspace.snapshot().unwrap();
+    assert_eq!(new_tree.id(), tree1.id());
+}
+
+#[test]
 fn test_materialize_snapshot_conflicted_files() {
     let settings = testutils::user_settings();
     let mut test_workspace = TestWorkspace::init(&settings);
@@ -890,7 +937,7 @@ fn test_snapshot_racy_timestamps() {
             .workspace
             .start_working_copy_mutation()
             .unwrap();
-        let new_tree_id = locked_ws
+        let (new_tree_id, _stats) = locked_ws
             .locked_wc()
             .snapshot(&SnapshotOptions::empty_for_test())
             .unwrap();
@@ -924,7 +971,7 @@ fn test_snapshot_special_file() {
 
     // Snapshot the working copy with the socket file
     let mut locked_ws = ws.start_working_copy_mutation().unwrap();
-    let tree_id = locked_ws
+    let (tree_id, _stats) = locked_ws
         .locked_wc()
         .snapshot(&SnapshotOptions::empty_for_test())
         .unwrap();
@@ -1256,7 +1303,7 @@ fn test_git_submodule() {
     let repo = test_workspace.repo.clone();
     let store = repo.store().clone();
     let workspace_root = test_workspace.workspace.workspace_root().to_owned();
-    let mut tx = repo.start_transaction(&settings);
+    let mut tx = repo.start_transaction();
 
     let added_path = RepoPath::from_internal_string("added");
     let submodule_path = RepoPath::from_internal_string("submodule");
@@ -1272,7 +1319,7 @@ fn test_git_submodule() {
         }),
     );
 
-    let submodule_id1 = write_random_commit(tx.repo_mut(), &settings).id().clone();
+    let submodule_id1 = write_random_commit(tx.repo_mut()).id().clone();
 
     tree_builder.set_or_remove(
         submodule_path.to_owned(),
@@ -1283,7 +1330,7 @@ fn test_git_submodule() {
     let commit1 = commit_with_tree(repo.store(), tree_id1.clone());
 
     let mut tree_builder = MergedTreeBuilder::new(tree_id1.clone());
-    let submodule_id2 = write_random_commit(tx.repo_mut(), &settings).id().clone();
+    let submodule_id2 = write_random_commit(tx.repo_mut()).id().clone();
     tree_builder.set_or_remove(
         submodule_path.to_owned(),
         Merge::normal(TreeValue::GitSubmodule(submodule_id2)),
@@ -2003,7 +2050,7 @@ fn test_fsmonitor() {
             .iter()
             .map(|p| p.to_fs_path_unchecked(Path::new("")))
             .collect();
-        locked_ws
+        let (tree_id, _stats) = locked_ws
             .locked_wc()
             .snapshot(&SnapshotOptions {
                 fsmonitor_settings: FsmonitorSettings::Test {
@@ -2011,7 +2058,8 @@ fn test_fsmonitor() {
                 },
                 ..SnapshotOptions::empty_for_test()
             })
-            .unwrap()
+            .unwrap();
+        tree_id
     };
 
     {
@@ -2095,20 +2143,61 @@ fn test_snapshot_max_new_file_size() {
         vec![0; limit + 1],
     )
     .unwrap();
-    test_workspace
+    let (old_tree, _stats) = test_workspace
         .snapshot_with_options(&options)
         .expect("existing files may grow beyond the size limit");
-    // A new file of 1KiB + 1 bytes should fail
+
+    // A new file of 1KiB + 1 bytes should be left untracked
     std::fs::write(
         large_path.to_fs_path_unchecked(&workspace_root),
         vec![0; limit + 1],
     )
     .unwrap();
-    let err = test_workspace
+    let (new_tree, stats) = test_workspace
         .snapshot_with_options(&options)
-        .expect_err("new files beyond the size limit should fail");
-    assert!(
-        matches!(err, SnapshotError::NewFileTooLarge { .. }),
-        "the failure should be attributed to new file size"
+        .expect("snapshot should not fail because of new files beyond the size limit");
+    assert_eq!(new_tree, old_tree);
+    assert_eq!(
+        stats
+            .untracked_paths
+            .keys()
+            .map(AsRef::as_ref)
+            .collect_vec(),
+        [large_path]
+    );
+    assert_matches!(
+        stats.untracked_paths.values().next().unwrap(),
+        UntrackedReason::FileTooLarge { size, .. } if *size == (limit as u64) + 1
+    );
+
+    // A file in sub directory should also be caught
+    let sub_large_path = RepoPath::from_internal_string("sub/large");
+    std::fs::create_dir(
+        sub_large_path
+            .parent()
+            .unwrap()
+            .to_fs_path_unchecked(&workspace_root),
+    )
+    .unwrap();
+    std::fs::rename(
+        large_path.to_fs_path_unchecked(&workspace_root),
+        sub_large_path.to_fs_path_unchecked(&workspace_root),
+    )
+    .unwrap();
+    let (new_tree, stats) = test_workspace
+        .snapshot_with_options(&options)
+        .expect("snapshot should not fail because of new files beyond the size limit");
+    assert_eq!(new_tree, old_tree);
+    assert_eq!(
+        stats
+            .untracked_paths
+            .keys()
+            .map(AsRef::as_ref)
+            .collect_vec(),
+        [sub_large_path]
+    );
+    assert_matches!(
+        stats.untracked_paths.values().next().unwrap(),
+        UntrackedReason::FileTooLarge { .. }
     );
 }

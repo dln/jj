@@ -48,12 +48,14 @@ pub(crate) struct FileShowArgs {
     #[arg(
         long, short,
         default_value = "@",
+        value_name = "REVSET",
         add = ArgValueCandidates::new(complete::all_revisions),
     )]
     revision: RevisionArg,
     /// Paths to print
     #[arg(
         required = true,
+        value_name = "FILESETS",
         value_hint = clap::ValueHint::FilePath,
         add = ArgValueCompleter::new(complete::all_revision_files),
     )]

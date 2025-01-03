@@ -48,6 +48,7 @@ pub(crate) struct ResolveArgs {
     #[arg(
         long, short,
         default_value = "@",
+        value_name = "REVSET",
         add = ArgValueCandidates::new(complete::mutable_revisions),
     )]
     revision: RevisionArg,
@@ -64,6 +65,7 @@ pub(crate) struct ResolveArgs {
     /// the `--list` argument to find paths to use here.
     // TODO: Find the conflict we can resolve even if it's not the first one.
     #[arg(
+        value_name = "FILESETS",
         value_hint = clap::ValueHint::AnyPath,
         add = ArgValueCompleter::new(complete::revision_conflicted_files),
     )]
@@ -113,7 +115,7 @@ pub(crate) fn cmd_resolve(
     let new_tree_id = merge_editor.edit_file(&tree, repo_path)?;
     let new_commit = tx
         .repo_mut()
-        .rewrite_commit(command.settings(), &commit)
+        .rewrite_commit(&commit)
         .set_tree_id(new_tree_id)
         .write()?;
     tx.finish(

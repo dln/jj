@@ -21,6 +21,8 @@ use std::sync::Arc;
 use itertools::Itertools as _;
 use jj_lib::backend::CommitId;
 use jj_lib::commit::Commit;
+use jj_lib::config::ConfigGetError;
+use jj_lib::config::ConfigNamePathBuf;
 use jj_lib::config::ConfigSource;
 use jj_lib::config::StackedConfig;
 use jj_lib::id_prefix::IdPrefixContext;
@@ -40,7 +42,6 @@ use jj_lib::revset::RevsetParseError;
 use jj_lib::revset::RevsetResolutionError;
 use jj_lib::revset::SymbolResolverExtension;
 use jj_lib::revset::UserRevsetExpression;
-use jj_lib::settings::ConfigResultExt as _;
 use thiserror::Error;
 
 use crate::command_error::user_error;
@@ -166,28 +167,34 @@ pub fn load_revset_aliases(
     ui: &Ui,
     stacked_config: &StackedConfig,
 ) -> Result<RevsetAliasesMap, CommandError> {
-    const TABLE_KEY: &str = "revset-aliases";
+    let table_name = ConfigNamePathBuf::from_iter(["revset-aliases"]);
     let mut aliases_map = RevsetAliasesMap::new();
     // Load from all config layers in order. 'f(x)' in default layer should be
     // overridden by 'f(a)' in user.
     for layer in stacked_config.layers() {
-        let table = if let Some(table) = layer.data.get_table(TABLE_KEY).optional()? {
-            table
-        } else {
-            continue;
+        let table = match layer.look_up_table(&table_name) {
+            Ok(Some(table)) => table,
+            Ok(None) => continue,
+            Err(item) => {
+                return Err(ConfigGetError::Type {
+                    name: table_name.to_string(),
+                    error: format!("Expected a table, but is {}", item.type_name()).into(),
+                    source_path: layer.path.clone(),
+                }
+                .into());
+            }
         };
-        for (decl, value) in table.into_iter().sorted_by(|a, b| a.0.cmp(&b.0)) {
-            warn_user_redefined_builtin(ui, layer.source, &decl)?;
+        for (decl, item) in table {
+            warn_user_redefined_builtin(ui, layer.source, decl)?;
 
-            let r = value
-                .into_string()
-                .map_err(|e| e.to_string())
-                .and_then(|v| aliases_map.insert(&decl, v).map_err(|e| e.to_string()));
-
+            let r = item
+                .as_str()
+                .ok_or_else(|| format!("Expected a string, but is {}", item.type_name()))
+                .and_then(|v| aliases_map.insert(decl, v).map_err(|e| e.to_string()));
             if let Err(s) = r {
                 writeln!(
                     ui.warning_default(),
-                    r#"Failed to load "{TABLE_KEY}.{decl}": {s}"#
+                    r#"Failed to load "{table_name}.{decl}": {s}"#
                 )?;
             }
         }

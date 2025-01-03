@@ -56,7 +56,6 @@ clap-markdown = { workspace = true }
 clap_complete = { workspace = true }
 clap_complete_nushell = { workspace = true }
 clap_mangen = { workspace = true }
-config = { workspace = true }
 criterion = { workspace = true, optional = true }
 crossterm = { workspace = true }
 dirs = { workspace = true }
@@ -111,7 +110,8 @@ jj-cli = { path = ".", features = ["test-fakes"], default-features = false }
 [features]
 default = ["watchman"]
 bench = ["dep:criterion"]
-packaging = []
+gix-max-performance = ["jj-lib/gix-max-performance"]
+packaging = ["gix-max-performance"]
 test-fakes = ["jj-lib/testing"]
 vendored-openssl = ["git2/vendored-openssl", "jj-lib/vendored-openssl"]
 watchman = ["jj-lib/watchman"]

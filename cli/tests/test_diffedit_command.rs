@@ -14,7 +14,6 @@
 
 use indoc::indoc;
 
-use crate::common::escaped_fake_diff_editor_path;
 use crate::common::TestEnvironment;
 
 #[test]
@@ -68,7 +67,7 @@ fn test_diffedit() {
     std::fs::write(&edit_script, "files-before file1 file2\0files-after file2").unwrap();
     let (stdout, stderr) = test_env.jj_cmd_ok(
         &repo_path,
-        &["diffedit", "--config-toml=ui.diff-instructions=false"],
+        &["diffedit", "--config=ui.diff-instructions=false"],
     );
     insta::assert_snapshot!(stdout, @"");
     insta::assert_snapshot!(stderr, @r###"
@@ -90,7 +89,7 @@ fn test_diffedit() {
         &repo_path,
         &[
             "diffedit",
-            "--config-toml=ui.diff-editor='false'",
+            "--config=ui.diff-editor='false'",
             "--tool=fake-diff-editor",
         ],
     );
@@ -330,17 +329,17 @@ fn test_diffedit_external_tool_conflict_marker_style() {
     .unwrap();
     let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["diffedit"]);
     insta::assert_snapshot!(stdout, @"");
-    insta::assert_snapshot!(stderr, @r#"
-    Created mzvwutvl 7b92839f (conflict) (empty) (no description set)
-    Working copy now at: mzvwutvl 7b92839f (conflict) (empty) (no description set)
+    insta::assert_snapshot!(stderr, @r###"
+    Created mzvwutvl fb39e804 (conflict) (empty) (no description set)
+    Working copy now at: mzvwutvl fb39e804 (conflict) (empty) (no description set)
     Parent commit      : rlvkpnrz 3765cc27 side-a
     Parent commit      : zsuskuln 8b3de837 side-b
     Added 0 files, modified 1 files, removed 0 files
     There are unresolved conflicts at these paths:
     file    2-sided conflict
     Existing conflicts were resolved or abandoned from these commits:
-      mzvwutvl hidden fae32b29 (conflict) (no description set)
-    "#);
+      mzvwutvl hidden a813239f (conflict) (no description set)
+    "###);
     // Conflicts should render using "snapshot" format in diff editor
     insta::assert_snapshot!(
         std::fs::read_to_string(test_env.env_root().join("before-file")).unwrap(), @r##"
@@ -410,14 +409,14 @@ fn test_diffedit_external_tool_conflict_marker_style() {
 
     // File should be conflicted with no changes
     let stdout = test_env.jj_cmd_success(&repo_path, &["st"]);
-    insta::assert_snapshot!(stdout, @r#"
+    insta::assert_snapshot!(stdout, @r###"
     The working copy is clean
     There are unresolved conflicts at these paths:
     file    2-sided conflict
-    Working copy : mzvwutvl 7b92839f (conflict) (empty) (no description set)
+    Working copy : mzvwutvl fb39e804 (conflict) (empty) (no description set)
     Parent commit: rlvkpnrz 3765cc27 side-a
     Parent commit: zsuskuln 8b3de837 side-b
-    "#);
+    "###);
 }
 
 #[test]
@@ -436,17 +435,12 @@ fn test_diffedit_3pane() {
 
     // 2 configs for a 3-pane setup. In the first, "$right" is passed to what the
     // fake diff editor considers the "after" state.
-    let config_with_right_as_after = format!(
-        r#"ui.diff-editor=["{}", "$left", "$right", "--ignore=$output"]"#,
-        escaped_fake_diff_editor_path()
-    );
-    let config_with_output_as_after = format!(
-        r#"ui.diff-editor=["{}", "$left", "$output", "--ignore=$right"]"#,
-        escaped_fake_diff_editor_path()
-    );
-    let edit_script = test_env.env_root().join("diff_edit_script");
+    let config_with_right_as_after =
+        "merge-tools.fake-diff-editor.edit-args=['$left', '$right', '--ignore=$output']";
+    let config_with_output_as_after =
+        "merge-tools.fake-diff-editor.edit-args=['$left', '$output', '--ignore=$right']";
+    let edit_script = test_env.set_up_fake_diff_editor();
     std::fs::write(&edit_script, "").unwrap();
-    test_env.add_env_var("DIFF_EDIT_SCRIPT", edit_script.to_str().unwrap());
 
     // Nothing happens if we make no changes
     std::fs::write(
@@ -456,7 +450,7 @@ fn test_diffedit_3pane() {
     .unwrap();
     let (stdout, stderr) = test_env.jj_cmd_ok(
         &repo_path,
-        &["diffedit", "--config-toml", &config_with_output_as_after],
+        &["diffedit", "--config", config_with_output_as_after],
     );
     insta::assert_snapshot!(stdout, @"");
     insta::assert_snapshot!(stderr, @r###"
@@ -470,7 +464,7 @@ fn test_diffedit_3pane() {
     // Nothing happens if we make no changes, `config_with_right_as_after` version
     let (stdout, stderr) = test_env.jj_cmd_ok(
         &repo_path,
-        &["diffedit", "--config-toml", &config_with_right_as_after],
+        &["diffedit", "--config", config_with_right_as_after],
     );
     insta::assert_snapshot!(stdout, @"");
     insta::assert_snapshot!(stderr, @r###"
@@ -486,7 +480,7 @@ fn test_diffedit_3pane() {
     std::fs::write(&edit_script, "reset file2").unwrap();
     let (stdout, stderr) = test_env.jj_cmd_ok(
         &repo_path,
-        &["diffedit", "--config-toml", &config_with_output_as_after],
+        &["diffedit", "--config", config_with_output_as_after],
     );
     insta::assert_snapshot!(stdout, @"");
     insta::assert_snapshot!(stderr, @r###"
@@ -505,7 +499,7 @@ fn test_diffedit_3pane() {
     std::fs::write(&edit_script, "write file1\nnew content").unwrap();
     let (stdout, stderr) = test_env.jj_cmd_ok(
         &repo_path,
-        &["diffedit", "--config-toml", &config_with_output_as_after],
+        &["diffedit", "--config", config_with_output_as_after],
     );
     insta::assert_snapshot!(stdout, @"");
     insta::assert_snapshot!(stderr, @r###"
@@ -525,7 +519,7 @@ fn test_diffedit_3pane() {
     std::fs::write(&edit_script, "write file1\nnew content").unwrap();
     let (stdout, stderr) = test_env.jj_cmd_ok(
         &repo_path,
-        &["diffedit", "--config-toml", &config_with_right_as_after],
+        &["diffedit", "--config", config_with_right_as_after],
     );
     insta::assert_snapshot!(stdout, @"");
     insta::assert_snapshot!(stderr, @r###"
@@ -580,10 +574,10 @@ fn test_diffedit_merge() {
     let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["diffedit", "-r", "@-"]);
     insta::assert_snapshot!(stdout, @"");
     insta::assert_snapshot!(stderr, @r###"
-    Created royxmykx 263b3c63 (conflict) merge
+    Created royxmykx 0105de4a (conflict) merge
     Rebased 1 descendant commits
-    Working copy now at: yqosqzyt 5771c919 (conflict) (empty) (no description set)
-    Parent commit      : royxmykx 263b3c63 (conflict) merge
+    Working copy now at: yqosqzyt abbb78c1 (conflict) (empty) (no description set)
+    Parent commit      : royxmykx 0105de4a (conflict) merge
     Added 0 files, modified 0 files, removed 1 files
     There are unresolved conflicts at these paths:
     file2    2-sided conflict
@@ -675,13 +669,13 @@ fn test_diffedit_old_restore_interactive_tests() {
     Added 0 files, modified 1 files, removed 0 files
     "###);
     let stdout = test_env.jj_cmd_success(&repo_path, &["diff", "--git"]);
-    insta::assert_snapshot!(stdout, @r###"
+    insta::assert_snapshot!(stdout, @r"
     diff --git a/file1 b/file1
     deleted file mode 100644
     index 7898192261..0000000000
     --- a/file1
     +++ /dev/null
-    @@ -1,1 +1,0 @@
+    @@ -1,1 +0,0 @@
     -a
     diff --git a/file2 b/file2
     index 7898192261..6178079822 100644
@@ -695,9 +689,9 @@ fn test_diffedit_old_restore_interactive_tests() {
     index 0000000000..c21c9352f7
     --- /dev/null
     +++ b/file3
-    @@ -1,0 +1,1 @@
+    @@ -0,0 +1,1 @@
     +unrelated
-    "###);
+    ");
 }
 
 #[test]

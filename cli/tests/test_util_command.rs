@@ -28,7 +28,7 @@ fn test_util_config_schema() {
             "$schema": "http://json-schema.org/draft-07/schema",
             "title": "Jujutsu config",
             "type": "object",
-            "description": "User configuration for Jujutsu VCS. See https://martinvonz.github.io/jj/latest/config/ for details",
+            "description": "User configuration for Jujutsu VCS. See https://jj-vcs.github.io/jj/latest/config/ for details",
             "properties": {
                 [...]
             "fix": {
@@ -45,7 +45,7 @@ fn test_gc_args() {
     // Use the local backend because GitBackend::gc() depends on the git CLI.
     test_env.jj_cmd_ok(
         test_env.env_root(),
-        &["init", "repo", "--config-toml=ui.allow-init-native=true"],
+        &["init", "repo", "--config=ui.allow-init-native=true"],
     );
     let repo_path = test_env.env_root().join("repo");
 
@@ -69,7 +69,7 @@ fn test_gc_operation_log() {
     // Use the local backend because GitBackend::gc() depends on the git CLI.
     test_env.jj_cmd_ok(
         test_env.env_root(),
-        &["init", "repo", "--config-toml=ui.allow-init-native=true"],
+        &["init", "repo", "--config=ui.allow-init-native=true"],
     );
     let repo_path = test_env.env_root().join("repo");
 

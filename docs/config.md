@@ -20,9 +20,8 @@ located in `.jj/repo/config.toml`.
 - Settings [specified in the command-line](#specifying-config-on-the-command-line).
 
 These are listed in the order they are loaded; the settings from earlier items
-in
-the list are overridden by the settings from later items if they disagree. Every
-type of config except for the built-in settings is optional.
+in the list are overridden by the settings from later items if they disagree.
+Every type of config except for the built-in settings is optional.
 
 See the [TOML site] and the [syntax guide] for a detailed description of the
 syntax. We cover some of the basics below.
@@ -34,7 +33,8 @@ syntax. We cover some of the basics below.
 The first thing to remember is that the value of a setting (the part to the
 right of the `=` sign) should be surrounded in quotes if it's a string.
 
-### Dotted style and headings
+### Dotted style, headings, and inline tables
+
 In TOML, anything under a heading can be dotted instead. For example,
 `user.name = "YOUR NAME"` is equivalent to:
 
@@ -48,7 +48,7 @@ For future reference, here are a couple of more complicated examples,
 ```toml
 # Dotted style
 template-aliases."format_short_id(id)" = "id.shortest(12)"
-colors."commit_id prefix".bold = true
+colors."commit_id prefix" = { bold = true }
 
 # is equivalent to:
 [template-aliases]
@@ -57,6 +57,14 @@ colors."commit_id prefix".bold = true
 [colors]
 "commit_id prefix" = { bold = true }
 ```
+
+Dotted and non-inline table items are merged one by one if the same keys exist
+in multiple files. In the example above, `template-aliases` and `colors` are
+the tables to be merged. `template-aliases."format_short_id(id)"` and
+`colors."commit_id prefix"` in the default settings are overridden. On the other
+hand, inner items of an inline table are *not* merged. For example, `{ bold =
+true }` wouldn't be merged as `{ fg = "blue", bold = true }` even if the default
+settings had `colors."commit_id prefix" = { fg = "blue" }`.
 
 The docs below refer to keys in text using dotted notation, but example
 blocks will use heading notation to be unambiguous. If you are confident with TOML
@@ -146,10 +154,10 @@ commit_id = "green"
 ```
 
 Parts of the style that are not overridden - such as the foreground color in the
-example above - are inherited from the parent style.
+example above - are inherited from the style of the parent label.
 
 Which elements can be colored is not yet documented, but see
-the [default color configuration](https://github.com/martinvonz/jj/blob/main/cli/src/config/colors.toml)
+the [default color configuration](https://github.com/jj-vcs/jj/blob/main/cli/src/config/colors.toml)
 for some examples of what's possible.
 
 ### Default command
@@ -177,6 +185,8 @@ concat(
     "\nJJ: This commit contains the following changes:\n", "",
     indent("JJ:     ", diff.stat(72)),
   ),
+  "\nJJ: ignore-rest\n",
+  diff.git(),
 )
 '''
 ```
@@ -356,7 +366,7 @@ You can configure the template used when no `-T` is specified.
 # Use builtin log template
 log = "builtin_log_compact"
 # Use builtin op log template
-op_log = "builtin_log_compact"
+op_log = "builtin_op_log_compact"
 # Use builtin show template
 show = "builtin_log_detailed"
 ```
@@ -474,6 +484,20 @@ Can be customized by the `format_short_signature()` template alias.
 'format_short_signature(signature)' = 'signature'
 # Username part of the email address
 'format_short_signature(signature)' = 'signature.username()'
+```
+
+### Commit timestamp
+
+Commits have both an "author timestamp" and "committer timestamp". By default,
+jj displays the committer timestamp, but can be changed to show the author
+timestamp instead.
+
+The function must return a timestamp because the return value will likely be
+formatted with `format_timestamp()`.
+
+```toml
+[template-aliases]
+'commit_timestamp(commit)' = 'commit.author().timestamp()'
 ```
 
 ### Allow "large" revsets by default
@@ -778,7 +802,7 @@ Using `ui.diff-editor = "vimdiff"` is possible but not recommended. For a better
 experience, you can follow [instructions from the Wiki] to configure the
 [DirDiff Vim plugin] and/or the [vimtabdiff Python script].
 
-[instructions from the Wiki]: https://github.com/martinvonz/jj/wiki/Vim#using-vim-as-a-diff-tool
+[instructions from the Wiki]: https://github.com/jj-vcs/jj/wiki/Vim#using-vim-as-a-diff-tool
 
 [DirDiff Vim plugin]: https://github.com/will133/vim-dirdiff
 [vimtabdiff Python script]: https://github.com/balki/vimtabdiff
@@ -837,6 +861,11 @@ merge-tool-edits-conflict-markers = true    # See below for an explanation
 
 - `$base` is replaced with the path to a file containing the contents of the
   conflicted file in the last common ancestor of the two sides of the conflict.
+
+- `$marker_length` is replaced with the length of the conflict markers which
+  should be used for the file. This can be useful if the merge tool parses
+  and/or generates conflict markers. Usually, `jj` uses conflict markers of
+  length 7, but they can be longer if necessary to make parsing unambiguous.
 
 ### Editing conflict markers with a tool or a text editor
 
@@ -1195,21 +1224,52 @@ env JJ_CONFIG=/dev/null jj log       # Ignores any settings specified in the con
 
 ### Specifying config on the command-line
 
-You can use one or more `--config-toml` options on the command line to specify
-additional configuration settings. This overrides settings defined in config
-files or environment variables. For example,
+You can use one or more `--config`/`--config-file` options on the command line
+to specify additional configuration settings. This overrides settings defined in
+config files or environment variables. For example,
 
 ```shell
-jj --config-toml='ui.color="always"' --config-toml='ui.diff-editor="kdiff3"' split
+jj --config=ui.color=always --config=ui.diff-editor=kdiff3 split
 ```
 
-Config specified this way must be valid TOML. In particular, string values must
-be surrounded by quotes. To pass these quotes to `jj`, most shells require
-surrounding those quotes with single quotes as shown above.
+Config value should be specified as a TOML expression. If string value doesn't
+contain any TOML constructs (such as array notation), quotes can be omitted.
 
-In `sh`-compatible shells, `--config-toml` can be used to merge entire TOML
-files with the config specified in `.jjconfig.toml`:
+To load an entire TOML document, use `--config-file`:
 
 ```shell
-jj --config-toml="$(cat extra-config.toml)" log
+jj --config-file=extra-config.toml log
 ```
+
+### Conditional variables
+
+You can conditionally enable config variables by using `--when` and
+`[[--scope]]` tables. Variables defined in `[[--scope]]` tables are expanded to
+the root table. `--when` specifies the condition to enable the scope table.
+
+```toml
+[user]
+name = "YOUR NAME"
+email = "YOUR_DEFAULT_EMAIL@example.com"
+
+# override user.email if the repository is located under ~/oss
+[[--scope]]
+--when.repositories = ["~/oss"]
+[--scope.user]
+email = "YOUR_OSS_EMAIL@example.org"
+```
+
+Condition keys:
+
+* `--when.repositories`: List of paths to match the repository path prefix.
+
+Paths should be absolute. Each path component (directory or file name, drive
+letter, etc.) is compared case-sensitively on all platforms. A path starting
+with `~` is expanded to the home directory. On Windows, directory separator may
+be either `\` or `/`. (Beware that `\` needs escape in double-quoted strings.)
+
+Use `jj root` to see the workspace root directory. Note that the repository path
+is in the main workspace if you're using multiple workspaces with `jj
+workspace`.
+
+If no conditions are specified, table is always enabled.

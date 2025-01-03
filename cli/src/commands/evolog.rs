@@ -42,6 +42,7 @@ pub(crate) struct EvologArgs {
     #[arg(
         long, short,
         default_value = "@",
+        value_name = "REVSET",
         add = ArgValueCandidates::new(complete::all_revisions),
     )]
     revision: RevisionArg,
@@ -61,7 +62,7 @@ pub(crate) struct EvologArgs {
     no_graph: bool,
     /// Render each revision using the given template
     ///
-    /// For the syntax, see https://martinvonz.github.io/jj/latest/templates/
+    /// For the syntax, see https://jj-vcs.github.io/jj/latest/templates/
     #[arg(long, short = 'T')]
     template: Option<String>,
     /// Show patch compared to the previous version of this change

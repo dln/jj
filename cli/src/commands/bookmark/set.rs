@@ -30,7 +30,12 @@ use crate::ui::Ui;
 #[derive(clap::Args, Clone, Debug)]
 pub struct BookmarkSetArgs {
     /// The bookmark's target revision
-    #[arg(long, short, visible_alias = "to")]
+    #[arg(
+        long, short,
+        visible_alias = "to",
+        value_name = "REVSET",
+        add = ArgValueCandidates::new(complete::all_revisions),
+    )]
     revision: Option<RevisionArg>,
 
     /// Allow moving the bookmark backwards or sideways

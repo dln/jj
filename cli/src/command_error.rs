@@ -21,8 +21,11 @@ use std::str;
 use std::sync::Arc;
 
 use itertools::Itertools as _;
+use jj_lib::absorb::AbsorbError;
 use jj_lib::backend::BackendError;
-use jj_lib::config::ConfigError;
+use jj_lib::config::ConfigFileSaveError;
+use jj_lib::config::ConfigGetError;
+use jj_lib::config::ConfigLoadError;
 use jj_lib::dsl_util::Diagnostics;
 use jj_lib::fileset::FilePatternParseError;
 use jj_lib::fileset::FilesetParseError;
@@ -239,15 +242,43 @@ impl From<jj_lib::file_util::PathError> for CommandError {
     }
 }
 
-impl From<ConfigError> for CommandError {
-    fn from(err: ConfigError) -> Self {
+impl From<ConfigEnvError> for CommandError {
+    fn from(err: ConfigEnvError) -> Self {
         config_error(err)
     }
 }
 
-impl From<ConfigEnvError> for CommandError {
-    fn from(err: ConfigEnvError) -> Self {
-        config_error(err)
+impl From<ConfigFileSaveError> for CommandError {
+    fn from(err: ConfigFileSaveError) -> Self {
+        user_error(err)
+    }
+}
+
+impl From<ConfigGetError> for CommandError {
+    fn from(err: ConfigGetError) -> Self {
+        let hint = match &err {
+            ConfigGetError::NotFound { .. } => None,
+            ConfigGetError::Type { source_path, .. } => source_path
+                .as_ref()
+                .map(|path| format!("Check the config file: {}", path.display())),
+        };
+        let mut cmd_err = config_error(err);
+        cmd_err.extend_hints(hint);
+        cmd_err
+    }
+}
+
+impl From<ConfigLoadError> for CommandError {
+    fn from(err: ConfigLoadError) -> Self {
+        let hint = match &err {
+            ConfigLoadError::Read(_) => None,
+            ConfigLoadError::Parse { source_path, .. } => source_path
+                .as_ref()
+                .map(|path| format!("Check the config file: {}", path.display())),
+        };
+        let mut cmd_err = config_error(err);
+        cmd_err.extend_hints(hint);
+        cmd_err
     }
 }
 
@@ -347,45 +378,7 @@ impl From<OpsetEvaluationError> for CommandError {
 
 impl From<SnapshotError> for CommandError {
     fn from(err: SnapshotError) -> Self {
-        match err {
-            SnapshotError::NewFileTooLarge {
-                path,
-                size,
-                max_size,
-            } => {
-                // if the size difference is < 1KiB, then show exact bytes.
-                // otherwise, show in human-readable form; this avoids weird cases
-                // where a file is 400 bytes too large but the error says something
-                // like '1.0MiB, maximum size allowed is ~1.0MiB'
-                let size_diff = size.0 - max_size.0;
-                let err_str = if size_diff <= 1024 {
-                    format!(
-                        "it is {} bytes too large; the maximum size allowed is {} bytes ({}).",
-                        size_diff, max_size.0, max_size,
-                    )
-                } else {
-                    format!("it is {size}; the maximum size allowed is ~{max_size}.")
-                };
-
-                user_error(format!(
-                    "Failed to snapshot the working copy\nThe file '{}' is too large to be \
-                     snapshotted: {}",
-                    path.display(),
-                    err_str,
-                ))
-                .hinted(format!(
-                    "This is to prevent large files from being added by accident. You can fix \
-                     this error by:
-  - Adding the file to `.gitignore`
-  - Run `jj config set --repo snapshot.max-new-file-size {}`
-    This will increase the maximum file size allowed for new files, in this repository only.
-  - Run `jj --config-toml 'snapshot.max-new-file-size={}' st`
-    This will increase the maximum file size allowed for new files, for this command only.",
-                    size.0, size.0
-                ))
-            }
-            err => internal_error_with_message("Failed to snapshot the working copy", err),
-        }
+        internal_error_with_message("Failed to snapshot the working copy", err)
     }
 }
 
@@ -598,6 +591,15 @@ impl From<ParseBulkEditMessageError> for CommandError {
     }
 }
 
+impl From<AbsorbError> for CommandError {
+    fn from(err: AbsorbError) -> Self {
+        match err {
+            AbsorbError::Backend(err) => err.into(),
+            AbsorbError::RevsetEvaluation(err) => err.into(),
+        }
+    }
+}
+
 fn find_source_parse_error_hint(err: &dyn error::Error) -> Option<String> {
     let source = err.source()?;
     if let Some(source) = source.downcast_ref() {
@@ -636,8 +638,8 @@ fn file_pattern_parse_error_hint(err: &FilePatternParseError) -> Option<String> 
 fn fileset_parse_error_hint(err: &FilesetParseError) -> Option<String> {
     match err.kind() {
         FilesetParseErrorKind::SyntaxError => Some(String::from(
-            "See https://martinvonz.github.io/jj/latest/filesets/ for filesets syntax, or for how \
-             to match file paths.",
+            "See https://jj-vcs.github.io/jj/latest/filesets/ for filesets syntax, or for how to \
+             match file paths.",
         )),
         FilesetParseErrorKind::NoSuchFunction {
             name: _,
@@ -758,7 +760,7 @@ fn try_handle_command_result(
             print_error(ui, "Config error: ", err, hints)?;
             writeln!(
                 ui.stderr_formatter().labeled("hint"),
-                "For help, see https://martinvonz.github.io/jj/latest/config/."
+                "For help, see https://jj-vcs.github.io/jj/latest/config/."
             )?;
             Ok(ExitCode::from(1))
         }

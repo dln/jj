@@ -62,7 +62,7 @@ pub(crate) fn cmd_help(
     args_to_show_help.extend(args.command.iter().map(|s| s.as_str()));
     args_to_show_help.push("--help");
 
-    // TODO: `help log -- -r` will gives an cryptic error, ideally, it should state
+    // TODO: `help log -- -r` will give a cryptic error, ideally, it should state
     // that the subcommand `log -r` doesn't exist.
     let help_err = command
         .app()
@@ -93,12 +93,37 @@ struct Keyword {
 //
 // TODO: Find a way to render markdown using ANSI escape codes.
 //
-// Maybe we can steal some ideas from https://github.com/martinvonz/jj/pull/3130
+// Maybe we can steal some ideas from https://github.com/jj-vcs/jj/pull/3130
 const KEYWORDS: &[Keyword] = &[
+    Keyword {
+        name: "bookmarks",
+        description: "Named pointers to revisions (similar to Git's branches)",
+        content: include_str!(concat!("../../", env!("JJ_DOCS_DIR"), "bookmarks.md")),
+    },
+    Keyword {
+        name: "config",
+        description: "How and where to set configuration options",
+        content: include_str!(concat!("../../", env!("JJ_DOCS_DIR"), "config.md")),
+    },
+    Keyword {
+        name: "filesets",
+        description: "A functional language for selecting a set of files",
+        content: include_str!(concat!("../../", env!("JJ_DOCS_DIR"), "filesets.md")),
+    },
+    Keyword {
+        name: "glossary",
+        description: "Definitions of various terms",
+        content: include_str!(concat!("../../", env!("JJ_DOCS_DIR"), "glossary.md")),
+    },
     Keyword {
         name: "revsets",
         description: "A functional language for selecting a set of revision",
         content: include_str!(concat!("../../", env!("JJ_DOCS_DIR"), "revsets.md")),
+    },
+    Keyword {
+        name: "templates",
+        description: "A functional language to customize command output",
+        content: include_str!(concat!("../../", env!("JJ_DOCS_DIR"), "templates.md")),
     },
     Keyword {
         name: "tutorial",
@@ -115,7 +140,7 @@ pub fn show_keyword_hint_after_help() -> StyledStr {
     let mut ret = StyledStr::new();
     writeln!(
         ret,
-        "{} list available keywords. Use {} to show help for one of these keywords.",
+        "{} lists available keywords. Use {} to show help for one of these keywords.",
         "'jj help --help'".bold(),
         "'jj help -k'".bold(),
     )

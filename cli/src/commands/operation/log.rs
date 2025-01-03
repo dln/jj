@@ -15,11 +15,11 @@
 use std::slice;
 
 use itertools::Itertools as _;
-use jj_lib::config::ConfigError;
+use jj_lib::config::ConfigGetError;
+use jj_lib::config::ConfigGetResultExt as _;
 use jj_lib::op_walk;
 use jj_lib::operation::Operation;
 use jj_lib::repo::RepoLoader;
-use jj_lib::settings::ConfigResultExt as _;
 use jj_lib::settings::UserSettings;
 
 use super::diff::show_op_diff;
@@ -62,7 +62,7 @@ pub struct OperationLogArgs {
     no_graph: bool,
     /// Render each operation using the given template
     ///
-    /// For the syntax, see https://martinvonz.github.io/jj/latest/templates/
+    /// For the syntax, see https://jj-vcs.github.io/jj/latest/templates/
     #[arg(long, short = 'T')]
     template: Option<String>,
     /// Show changes to the repository at each operation
@@ -151,7 +151,7 @@ fn do_op_log(
                          op: &Operation,
                          with_content_format: &LogContentFormat| {
             let parents: Vec<_> = op.parents().try_collect()?;
-            let parent_op = repo_loader.merge_operations(settings, parents, None)?;
+            let parent_op = repo_loader.merge_operations(parents, None)?;
             let parent_repo = repo_loader.load_at(&parent_op)?;
             let repo = repo_loader.load_at(op)?;
 
@@ -247,7 +247,7 @@ fn do_op_log(
     Ok(())
 }
 
-fn get_node_template(style: GraphStyle, settings: &UserSettings) -> Result<String, ConfigError> {
+fn get_node_template(style: GraphStyle, settings: &UserSettings) -> Result<String, ConfigGetError> {
     let symbol = settings.get_string("templates.op_log_node").optional()?;
     let default = if style.is_ascii() {
         "builtin_op_log_node_ascii"

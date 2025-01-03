@@ -27,14 +27,18 @@ use crate::ui::Ui;
 #[derive(clap::Args, Clone, Debug)]
 pub(crate) struct ShowArgs {
     /// Show changes in this revision, compared to its parent(s)
-    #[arg(default_value = "@", add = ArgValueCandidates::new(complete::all_revisions))]
+    #[arg(
+        default_value = "@",
+        value_name = "REVSET",
+        add = ArgValueCandidates::new(complete::all_revisions)
+    )]
     revision: RevisionArg,
     /// Ignored (but lets you pass `-r` for consistency with other commands)
     #[arg(short = 'r', hide = true)]
     unused_revision: bool,
     /// Render a revision using the given template
     ///
-    /// For the syntax, see https://martinvonz.github.io/jj/latest/templates/
+    /// For the syntax, see https://jj-vcs.github.io/jj/latest/templates/
     #[arg(long, short = 'T')]
     template: Option<String>,
     #[command(flatten)]

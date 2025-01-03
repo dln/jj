@@ -32,7 +32,8 @@ use jj_lib::backend::CommitId;
 use jj_lib::backend::CopyRecord;
 use jj_lib::backend::TreeValue;
 use jj_lib::commit::Commit;
-use jj_lib::config::ConfigError;
+use jj_lib::config::ConfigGetError;
+use jj_lib::config::ConfigGetResultExt as _;
 use jj_lib::conflicts::materialize_merge_result_to_bytes;
 use jj_lib::conflicts::materialized_diff_stream;
 use jj_lib::conflicts::ConflictMarkerStyle;
@@ -61,7 +62,6 @@ use jj_lib::repo_path::InvalidRepoPathError;
 use jj_lib::repo_path::RepoPath;
 use jj_lib::repo_path::RepoPathUiConverter;
 use jj_lib::rewrite::rebase_to_dest_parent;
-use jj_lib::settings::ConfigResultExt as _;
 use jj_lib::settings::UserSettings;
 use jj_lib::store::Store;
 use pollster::FutureExt;
@@ -106,7 +106,7 @@ pub struct DiffFormatArgs {
     /// For each path, show only its path
     ///
     /// Typically useful for shell commands like:
-    ///    `jj diff -r @- --name_only | xargs perl -pi -e's/OLD/NEW/g`
+    ///    `jj diff -r @- --name-only | xargs perl -pi -e's/OLD/NEW/g`
     #[arg(long)]
     pub name_only: bool,
     /// Show a Git-format diff
@@ -147,7 +147,7 @@ pub enum DiffFormat {
 pub fn diff_formats_for(
     settings: &UserSettings,
     args: &DiffFormatArgs,
-) -> Result<Vec<DiffFormat>, ConfigError> {
+) -> Result<Vec<DiffFormat>, ConfigGetError> {
     let formats = diff_formats_from_args(settings, args)?;
     if formats.is_empty() {
         Ok(vec![default_diff_format(settings, args)?])
@@ -162,7 +162,7 @@ pub fn diff_formats_for_log(
     settings: &UserSettings,
     args: &DiffFormatArgs,
     patch: bool,
-) -> Result<Vec<DiffFormat>, ConfigError> {
+) -> Result<Vec<DiffFormat>, ConfigGetError> {
     let mut formats = diff_formats_from_args(settings, args)?;
     // --patch implies default if no format other than --summary is specified
     if patch && matches!(formats.as_slice(), [] | [DiffFormat::Summary]) {
@@ -175,7 +175,7 @@ pub fn diff_formats_for_log(
 fn diff_formats_from_args(
     settings: &UserSettings,
     args: &DiffFormatArgs,
-) -> Result<Vec<DiffFormat>, ConfigError> {
+) -> Result<Vec<DiffFormat>, ConfigGetError> {
     let mut formats = Vec::new();
     if args.summary {
         formats.push(DiffFormat::Summary);
@@ -209,7 +209,7 @@ fn diff_formats_from_args(
 fn default_diff_format(
     settings: &UserSettings,
     args: &DiffFormatArgs,
-) -> Result<DiffFormat, ConfigError> {
+) -> Result<DiffFormat, ConfigGetError> {
     if let Some(args) = settings.get("ui.diff.tool").optional()? {
         // External "tool" overrides the internal "format" option.
         let tool = if let CommandNameAndArgs::String(name) = &args {
@@ -243,7 +243,11 @@ fn default_diff_format(
             let options = DiffStatOptions::from_args(args);
             Ok(DiffFormat::Stat(Box::new(options)))
         }
-        _ => Err(ConfigError::Message(format!("invalid diff format: {name}"))),
+        _ => Err(ConfigGetError::Type {
+            name: "ui.diff.format".to_owned(),
+            error: format!("Invalid diff format: {name}").into(),
+            source_path: None,
+        }),
     }
 }
 
@@ -544,15 +548,16 @@ impl ColorWordsDiffOptions {
     fn from_settings_and_args(
         settings: &UserSettings,
         args: &DiffFormatArgs,
-    ) -> Result<Self, ConfigError> {
+    ) -> Result<Self, ConfigGetError> {
         let max_inline_alternation = {
-            let key = "diff.color-words.max-inline-alternation";
-            match settings.get_int(key)? {
+            let name = "diff.color-words.max-inline-alternation";
+            match settings.get_int(name)? {
                 -1 => None, // unlimited
-                n => Some(
-                    usize::try_from(n)
-                        .map_err(|err| ConfigError::Message(format!("invalid {key}: {err}")))?,
-                ),
+                n => Some(usize::try_from(n).map_err(|err| ConfigGetError::Type {
+                    name: name.to_owned(),
+                    error: err.into(),
+                    source_path: None,
+                })?),
             }
         };
         let context = args
@@ -1252,7 +1257,7 @@ impl UnifiedDiffOptions {
     fn from_settings_and_args(
         settings: &UserSettings,
         args: &DiffFormatArgs,
-    ) -> Result<Self, ConfigError> {
+    ) -> Result<Self, ConfigGetError> {
         let context = args
             .context
             .map_or_else(|| settings.get("diff.git.context"), Ok)?;
@@ -1317,8 +1322,8 @@ fn unified_diff_hunks<'content>(
 ) -> Vec<UnifiedDiffHunk<'content>> {
     let mut hunks = vec![];
     let mut current_hunk = UnifiedDiffHunk {
-        left_line_range: 1..1,
-        right_line_range: 1..1,
+        left_line_range: 0..0,
+        right_line_range: 0..0,
         lines: vec![],
     };
     let diff = diff_by_line([left_content, right_content], &options.line_diff);
@@ -1433,13 +1438,28 @@ fn show_unified_diff_hunks(
     right_content: &[u8],
     options: &UnifiedDiffOptions,
 ) -> io::Result<()> {
+    // "If the chunk size is 0, the first number is one lower than one would
+    // expect." - https://www.artima.com/weblogs/viewpost.jsp?thread=164293
+    //
+    // The POSIX spec also states that "the ending line number of an empty range
+    // shall be the number of the preceding line, or 0 if the range is at the
+    // start of the file."
+    // - https://pubs.opengroup.org/onlinepubs/9799919799/utilities/diff.html
+    fn to_line_number(range: Range<usize>) -> usize {
+        if range.is_empty() {
+            range.start
+        } else {
+            range.start + 1
+        }
+    }
+
     for hunk in unified_diff_hunks(left_content, right_content, options) {
         writeln!(
             formatter.labeled("hunk_header"),
             "@@ -{},{} +{},{} @@",
-            hunk.left_line_range.start,
+            to_line_number(hunk.left_line_range.clone()),
             hunk.left_line_range.len(),
-            hunk.right_line_range.start,
+            to_line_number(hunk.right_line_range.clone()),
             hunk.right_line_range.len()
         )?;
         for (line_type, tokens) in &hunk.lines {

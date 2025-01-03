@@ -29,8 +29,11 @@ use crossterm::style::SetAttribute;
 use crossterm::style::SetBackgroundColor;
 use crossterm::style::SetForegroundColor;
 use itertools::Itertools;
-use jj_lib::config::ConfigError;
+use jj_lib::config::ConfigGetError;
 use jj_lib::config::StackedConfig;
+use serde::de::Deserialize as _;
+use serde::de::Error as _;
+use serde::de::IntoDeserializer as _;
 
 // Lets the caller label strings and translates the labels to colors
 pub trait Formatter: Write {
@@ -160,7 +163,7 @@ impl FormatterFactory {
         FormatterFactory { kind }
     }
 
-    pub fn color(config: &StackedConfig, debug: bool) -> Result<Self, ConfigError> {
+    pub fn color(config: &StackedConfig, debug: bool) -> Result<Self, ConfigGetError> {
         let rules = Arc::new(rules_from_config(config)?);
         let kind = FormatterFactoryKind::Color { rules, debug };
         Ok(FormatterFactory { kind })
@@ -253,20 +256,23 @@ impl<W: Write> Formatter for SanitizingFormatter<W> {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
 pub struct Style {
-    pub fg_color: Option<Color>,
-    pub bg_color: Option<Color>,
+    #[serde(deserialize_with = "deserialize_color_opt")]
+    pub fg: Option<Color>,
+    #[serde(deserialize_with = "deserialize_color_opt")]
+    pub bg: Option<Color>,
     pub bold: Option<bool>,
-    pub underlined: Option<bool>,
+    pub underline: Option<bool>,
 }
 
 impl Style {
     fn merge(&mut self, other: &Style) {
-        self.fg_color = other.fg_color.or(self.fg_color);
-        self.bg_color = other.bg_color.or(self.bg_color);
+        self.fg = other.fg.or(self.fg);
+        self.bg = other.bg.or(self.bg);
         self.bold = other.bold.or(self.bold);
-        self.underlined = other.underlined.or(self.underlined);
+        self.underline = other.underline.or(self.underline);
     }
 }
 
@@ -297,7 +303,11 @@ impl<W: Write> ColorFormatter<W> {
         }
     }
 
-    pub fn for_config(output: W, config: &StackedConfig, debug: bool) -> Result<Self, ConfigError> {
+    pub fn for_config(
+        output: W,
+        config: &StackedConfig,
+        debug: bool,
+    ) -> Result<Self, ConfigGetError> {
         let rules = rules_from_config(config)?;
         Ok(Self::new(output, Arc::new(rules), debug))
     }
@@ -370,23 +380,23 @@ impl<W: Write> ColorFormatter<W> {
                     self.current_style = Style::default();
                 }
             }
-            if new_style.underlined != self.current_style.underlined {
-                if new_style.underlined.unwrap_or_default() {
+            if new_style.underline != self.current_style.underline {
+                if new_style.underline.unwrap_or_default() {
                     queue!(self.output, SetAttribute(Attribute::Underlined))?;
                 } else {
                     queue!(self.output, SetAttribute(Attribute::NoUnderline))?;
                 }
             }
-            if new_style.fg_color != self.current_style.fg_color {
+            if new_style.fg != self.current_style.fg {
                 queue!(
                     self.output,
-                    SetForegroundColor(new_style.fg_color.unwrap_or(Color::Reset))
+                    SetForegroundColor(new_style.fg.unwrap_or(Color::Reset))
                 )?;
             }
-            if new_style.bg_color != self.current_style.bg_color {
+            if new_style.bg != self.current_style.bg {
                 queue!(
                     self.output,
-                    SetBackgroundColor(new_style.bg_color.unwrap_or(Color::Reset))
+                    SetBackgroundColor(new_style.bg.unwrap_or(Color::Reset))
                 )?;
             }
             self.current_style = new_style;
@@ -401,55 +411,52 @@ impl<W: Write> ColorFormatter<W> {
     }
 }
 
-fn rules_from_config(config: &StackedConfig) -> Result<Rules, ConfigError> {
-    let mut result = vec![];
-    let table = config.get_table("colors")?;
-    for (key, value) in table {
-        let labels = key
-            .split_whitespace()
-            .map(ToString::to_string)
-            .collect_vec();
-        match value.kind {
-            config::ValueKind::String(color_name) => {
-                let style = Style {
-                    fg_color: Some(color_for_name_or_hex(&color_name)?),
-                    bg_color: None,
-                    bold: None,
-                    underlined: None,
-                };
-                result.push((labels, style));
-            }
-            config::ValueKind::Table(style_table) => {
-                let mut style = Style::default();
-                if let Some(value) = style_table.get("fg") {
-                    if let config::ValueKind::String(color_name) = &value.kind {
-                        style.fg_color = Some(color_for_name_or_hex(color_name)?);
-                    }
+fn rules_from_config(config: &StackedConfig) -> Result<Rules, ConfigGetError> {
+    config
+        .table_keys("colors")
+        .map(|key| {
+            let labels = key
+                .split_whitespace()
+                .map(ToString::to_string)
+                .collect_vec();
+            let style = config.get_value_with(["colors", key], |value| {
+                if value.is_str() {
+                    Ok(Style {
+                        fg: Some(deserialize_color(value.into_deserializer())?),
+                        bg: None,
+                        bold: None,
+                        underline: None,
+                    })
+                } else if value.is_inline_table() {
+                    Style::deserialize(value.into_deserializer())
+                } else {
+                    Err(toml_edit::de::Error::custom(format!(
+                        "invalid type: {}, expected a color name or a table of styles",
+                        value.type_name()
+                    )))
                 }
-                if let Some(value) = style_table.get("bg") {
-                    if let config::ValueKind::String(color_name) = &value.kind {
-                        style.bg_color = Some(color_for_name_or_hex(color_name)?);
-                    }
-                }
-                if let Some(value) = style_table.get("bold") {
-                    if let config::ValueKind::Boolean(value) = &value.kind {
-                        style.bold = Some(*value);
-                    }
-                }
-                if let Some(value) = style_table.get("underline") {
-                    if let config::ValueKind::Boolean(value) = &value.kind {
-                        style.underlined = Some(*value);
-                    }
-                }
-                result.push((labels, style));
-            }
-            _ => {}
-        }
-    }
-    Ok(result)
+            })?;
+            Ok((labels, style))
+        })
+        .collect()
 }
 
-fn color_for_name_or_hex(name_or_hex: &str) -> Result<Color, ConfigError> {
+fn deserialize_color<'de, D>(deserializer: D) -> Result<Color, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let name_or_hex = String::deserialize(deserializer)?;
+    color_for_name_or_hex(&name_or_hex).map_err(D::Error::custom)
+}
+
+fn deserialize_color_opt<'de, D>(deserializer: D) -> Result<Option<Color>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_color(deserializer).map(Some)
+}
+
+fn color_for_name_or_hex(name_or_hex: &str) -> Result<Color, String> {
     match name_or_hex {
         "default" => Ok(Color::Reset),
         "black" => Ok(Color::Black),
@@ -468,8 +475,7 @@ fn color_for_name_or_hex(name_or_hex: &str) -> Result<Color, ConfigError> {
         "bright magenta" => Ok(Color::Magenta),
         "bright cyan" => Ok(Color::Cyan),
         "bright white" => Ok(Color::White),
-        _ => color_for_hex(name_or_hex)
-            .ok_or_else(|| ConfigError::Message(format!("invalid color: {name_or_hex}"))),
+        _ => color_for_hex(name_or_hex).ok_or_else(|| format!("Invalid color: {name_or_hex}")),
     }
 }
 
@@ -699,8 +705,10 @@ fn write_sanitized(output: &mut impl Write, buf: &[u8]) -> Result<(), Error> {
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error as _;
     use std::str;
 
+    use indexmap::IndexMap;
     use indoc::indoc;
     use jj_lib::config::ConfigLayer;
     use jj_lib::config::ConfigSource;
@@ -766,11 +774,10 @@ mod tests {
             bright-cyan = 'bright cyan'
             bright-white = 'bright white'
         "});
-        // TODO: migrate off config::Config and switch to IndexMap
-        let colors: HashMap<String, String> = config.get("colors").unwrap();
+        let colors: IndexMap<String, String> = config.get("colors").unwrap();
         let mut output: Vec<u8> = vec![];
         let mut formatter = ColorFormatter::for_config(&mut output, &config, false).unwrap();
-        for (label, color) in colors.iter().sorted() {
+        for (label, color) in &colors {
             formatter.push_label(label).unwrap();
             write!(formatter, " {color} ").unwrap();
             formatter.pop_label().unwrap();
@@ -779,21 +786,21 @@ mod tests {
         drop(formatter);
         insta::assert_snapshot!(String::from_utf8(output).unwrap(), @r"
         [38;5;0m black [39m
-        [38;5;4m blue [39m
-        [38;5;8m bright black [39m
-        [38;5;12m bright blue [39m
-        [38;5;14m bright cyan [39m
-        [38;5;10m bright green [39m
-        [38;5;13m bright magenta [39m
-        [38;5;9m bright red [39m
-        [38;5;15m bright white [39m
-        [38;5;11m bright yellow [39m
-        [38;5;6m cyan [39m
-        [38;5;2m green [39m
-        [38;5;5m magenta [39m
         [38;5;1m red [39m
-        [38;5;7m white [39m
+        [38;5;2m green [39m
         [38;5;3m yellow [39m
+        [38;5;4m blue [39m
+        [38;5;5m magenta [39m
+        [38;5;6m cyan [39m
+        [38;5;7m white [39m
+        [38;5;8m bright black [39m
+        [38;5;9m bright red [39m
+        [38;5;10m bright green [39m
+        [38;5;11m bright yellow [39m
+        [38;5;12m bright blue [39m
+        [38;5;13m bright magenta [39m
+        [38;5;14m bright cyan [39m
+        [38;5;15m bright white [39m
         ");
     }
 
@@ -806,11 +813,10 @@ mod tests {
             white = '#ffffff'
             pastel-blue = '#AFE0D9'
         "});
-        // TODO: migrate off config::Config and switch to IndexMap
-        let colors: HashMap<String, String> = config.get("colors").unwrap();
+        let colors: IndexMap<String, String> = config.get("colors").unwrap();
         let mut output: Vec<u8> = vec![];
         let mut formatter = ColorFormatter::for_config(&mut output, &config, false).unwrap();
-        for label in colors.keys().sorted() {
+        for label in colors.keys() {
             formatter.push_label(&label.replace(' ', "-")).unwrap();
             write!(formatter, " {label} ").unwrap();
             formatter.pop_label().unwrap();
@@ -819,8 +825,8 @@ mod tests {
         drop(formatter);
         insta::assert_snapshot!(String::from_utf8(output).unwrap(), @r"
         [38;2;0;0;0m black [39m
-        [38;2;175;224;217m pastel-blue [39m
         [38;2;255;255;255m white [39m
+        [38;2;175;224;217m pastel-blue [39m
         ");
     }
 
@@ -1018,11 +1024,9 @@ mod tests {
         "#,
         );
         let mut output: Vec<u8> = vec![];
-        let err = ColorFormatter::for_config(&mut output, &config, false)
-            .unwrap_err()
-            .to_string();
-        insta::assert_snapshot!(err,
-        @"invalid color: bloo");
+        let err = ColorFormatter::for_config(&mut output, &config, false).unwrap_err();
+        insta::assert_snapshot!(err, @r#"Invalid type or value for colors."outer inner""#);
+        insta::assert_snapshot!(err.source().unwrap(), @"Invalid color: bloo");
     }
 
     #[test]
@@ -1035,11 +1039,30 @@ mod tests {
             "##,
         );
         let mut output: Vec<u8> = vec![];
-        let err = ColorFormatter::for_config(&mut output, &config, false)
-            .unwrap_err()
-            .to_string();
-        insta::assert_snapshot!(err,
-            @"invalid color: #ffgggg");
+        let err = ColorFormatter::for_config(&mut output, &config, false).unwrap_err();
+        insta::assert_snapshot!(err, @r#"Invalid type or value for colors."outer inner""#);
+        insta::assert_snapshot!(err.source().unwrap(), @"Invalid color: #ffgggg");
+    }
+
+    #[test]
+    fn test_color_formatter_invalid_type_of_color() {
+        let config = config_from_string("colors.foo = []");
+        let err = ColorFormatter::for_config(&mut Vec::new(), &config, false).unwrap_err();
+        insta::assert_snapshot!(err, @"Invalid type or value for colors.foo");
+        insta::assert_snapshot!(
+            err.source().unwrap(),
+            @"invalid type: array, expected a color name or a table of styles");
+    }
+
+    #[test]
+    fn test_color_formatter_invalid_type_of_style() {
+        let config = config_from_string("colors.foo = { bold = 1 }");
+        let err = ColorFormatter::for_config(&mut Vec::new(), &config, false).unwrap_err();
+        insta::assert_snapshot!(err, @"Invalid type or value for colors.foo");
+        insta::assert_snapshot!(err.source().unwrap(), @r"
+        invalid type: integer `1`, expected a boolean
+        in `bold`
+        ");
     }
 
     #[test]

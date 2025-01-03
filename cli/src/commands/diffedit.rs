@@ -36,7 +36,7 @@ use crate::ui::Ui;
 /// the "from" revision to the "to" revision.
 ///
 /// [diff editor]:
-///     https://martinvonz.github.io/jj/latest/config/#editing-diffs
+///     https://jj-vcs.github.io/jj/latest/config/#editing-diffs
 ///
 /// Edit the right side of the diff until it looks the way you want. Once you
 /// close the editor, the revision specified with `-r` or `--to` will be
@@ -50,7 +50,12 @@ pub(crate) struct DiffeditArgs {
     /// The revision to touch up
     ///
     /// Defaults to @ if neither --to nor --from are specified.
-    #[arg(long, short, add = ArgValueCandidates::new(complete::mutable_revisions))]
+    #[arg(
+        long,
+        short,
+        value_name = "REVSET",
+        add = ArgValueCandidates::new(complete::mutable_revisions)
+    )]
     revision: Option<RevisionArg>,
     /// Show changes from this revision
     ///
@@ -58,6 +63,7 @@ pub(crate) struct DiffeditArgs {
     #[arg(
         long, short,
         conflicts_with = "revision",
+        value_name = "REVSET",
         add = ArgValueCandidates::new(complete::all_revisions),
     )]
     from: Option<RevisionArg>,
@@ -67,6 +73,7 @@ pub(crate) struct DiffeditArgs {
     #[arg(
         long, short,
         conflicts_with = "revision",
+        value_name = "REVSET",
         add = ArgValueCandidates::new(complete::mutable_revisions),
     )]
     to: Option<RevisionArg>,
@@ -131,18 +138,18 @@ don't make any changes, then the operation will be aborted.",
     } else {
         let new_commit = tx
             .repo_mut()
-            .rewrite_commit(command.settings(), &target_commit)
+            .rewrite_commit(&target_commit)
             .set_tree_id(tree_id)
             .write()?;
         // rebase_descendants early; otherwise `new_commit` would always have
         // a conflicted change id at this point.
         let (num_rebased, extra_msg) = if args.restore_descendants {
             (
-                tx.repo_mut().reparent_descendants(command.settings())?,
+                tx.repo_mut().reparent_descendants()?,
                 " (while preserving their content)",
             )
         } else {
-            (tx.repo_mut().rebase_descendants(command.settings())?, "")
+            (tx.repo_mut().rebase_descendants()?, "")
         };
         if let Some(mut formatter) = ui.status_formatter() {
             write!(formatter, "Created ")?;

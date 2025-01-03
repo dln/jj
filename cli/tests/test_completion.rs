@@ -82,7 +82,8 @@ fn test_bookmark_names() {
     --color	When to colorize output (always, never, debug, auto)
     --quiet	Silence non-primary command output
     --no-pager	Disable the pager
-    --config-toml	Additional configuration options (can be repeated)
+    --config	Additional configuration options (can be repeated)
+    --config-file	Additional configuration files (can be repeated)
     --help	Print help (see more with '--help')
     ");
 
@@ -335,14 +336,13 @@ fn test_aliases_are_completed() {
     );
     insta::assert_snapshot!(stdout, @"repo-alias");
 
-    // cannot load aliases from --config-toml flag
+    // cannot load aliases from --config flag
     let stdout = test_env.jj_cmd_success(
         test_env.env_root(),
         &[
             "--",
             "jj",
-            "--config-toml",
-            "aliases.cli-alias = ['bookmark']",
+            "--config=aliases.cli-alias=['bookmark']",
             "cli-al",
         ],
     );
@@ -652,7 +652,7 @@ fn test_files() {
     );
 
     let stdout = test_env.jj_cmd_success(&repo_path, &["log", "-r", "all()", "--summary"]);
-    insta::assert_snapshot!(stdout.replace('\\', "/"), @r"
+    insta::assert_snapshot!(stdout.replace('\\', "/"), @r###"
     @  wqnwkozp test.user@example.com 2001-02-03 08:05:20 working_copy 45c3a621
     │  working_copy
     │  A f_added_2
@@ -666,7 +666,7 @@ fn test_files() {
     │  A f_dir/dir_file_3
     │  M f_modified
     │  A f_renamed
-    │ ×  royxmykx test.user@example.com 2001-02-03 08:05:14 conflicted 23eb154d conflict
+    │ ×  royxmykx test.user@example.com 2001-02-03 08:05:14 conflicted 0ba6786b conflict
     ├─╯  conflicted
     │    A f_added_2
     │    A f_dir/dir_file_1
@@ -688,7 +688,7 @@ fn test_files() {
     │    A f_interdiff_only_from
     │    A f_interdiff_same
     ◆  zzzzzzzz root() 00000000
-    ");
+    "###);
 
     let mut test_env = test_env;
     test_env.add_env_var("COMPLETE", "fish");
@@ -787,5 +787,36 @@ fn test_files() {
     insta::assert_snapshot!(stdout.replace('\\', "/"), @r"
     f_dir/
     f_modified
+    ");
+
+    let stdout = test_env.jj_cmd_success(&repo_path, &["--", "jj", "log", "f_"]);
+    insta::assert_snapshot!(stdout.replace('\\', "/"), @r"
+    f_added
+    f_added_2
+    f_dir/
+    f_modified
+    f_not_yet_renamed
+    f_renamed
+    f_unchanged
+    ");
+    let stdout = test_env.jj_cmd_success(
+        &repo_path,
+        &[
+            "--",
+            "jj",
+            "log",
+            "-r=first",
+            "--revisions",
+            "conflicted",
+            "f_",
+        ],
+    );
+    insta::assert_snapshot!(stdout.replace('\\', "/"), @r"
+    f_added_2
+    f_deleted
+    f_dir/
+    f_modified
+    f_not_yet_renamed
+    f_unchanged
     ");
 }

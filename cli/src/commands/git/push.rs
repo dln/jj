@@ -21,6 +21,7 @@ use clap::ArgGroup;
 use clap_complete::ArgValueCandidates;
 use itertools::Itertools;
 use jj_lib::backend::CommitId;
+use jj_lib::config::ConfigGetResultExt as _;
 use jj_lib::git;
 use jj_lib::git::GitBranchPushTargets;
 use jj_lib::git::GitPushError;
@@ -32,7 +33,6 @@ use jj_lib::refs::BookmarkPushUpdate;
 use jj_lib::refs::LocalAndRemoteRef;
 use jj_lib::repo::Repo;
 use jj_lib::revset::RevsetExpression;
-use jj_lib::settings::ConfigResultExt as _;
 use jj_lib::settings::UserSettings;
 use jj_lib::str_util::StringPattern;
 use jj_lib::view::View;
@@ -62,16 +62,20 @@ use crate::ui::Ui;
 /// bookmarks. Use `--all` to push all bookmarks. Use `--change` to generate
 /// bookmark names based on the change IDs of specific commits.
 ///
+/// Unlike in Git, the remote to push to is not derived from the tracked remote
+/// bookmarks. Use `--remote` to select the remote Git repository by name. There
+/// is no option to push to multiple remotes.
+///
 /// Before the command actually moves, creates, or deletes a remote bookmark, it
 /// makes several [safety checks]. If there is a problem, you may need to run
 /// `jj git fetch --remote <remote name>` and/or resolve some [bookmark
 /// conflicts].
 ///
 /// [safety checks]:
-///     https://martinvonz.github.io/jj/latest/bookmarks/#pushing-bookmarks-safety-checks
+///     https://jj-vcs.github.io/jj/latest/bookmarks/#pushing-bookmarks-safety-checks
 ///
 /// [bookmark conflicts]:
-///     https://martinvonz.github.io/jj/latest/bookmarks/#conflicts
+///     https://jj-vcs.github.io/jj/latest/bookmarks/#conflicts
 
 #[derive(clap::Args, Clone, Debug)]
 #[command(group(ArgGroup::new("specific").args(&["bookmark", "change", "revisions"]).multiple(true)))]
@@ -81,8 +85,6 @@ pub struct GitPushArgs {
     ///
     /// This defaults to the `git.push` setting. If that is not configured, and
     /// if there are multiple remotes, the remote named "origin" will be used.
-    /// Unlike in Git, the default remote is not derived from the tracked remote
-    /// bookmarks.
     #[arg(long, add = ArgValueCandidates::new(complete::git_remotes))]
     remote: Option<String>,
     /// Push only this bookmark, or bookmarks matching a pattern (can be
@@ -90,7 +92,7 @@ pub struct GitPushArgs {
     ///
     /// By default, the specified name matches exactly. Use `glob:` prefix to
     /// select bookmarks by wildcard pattern. For details, see
-    /// https://martinvonz.github.io/jj/latest/revsets#string-patterns.
+    /// https://jj-vcs.github.io/jj/latest/revsets#string-patterns.
     #[arg(
         long, short,
         alias = "branch",
@@ -105,7 +107,7 @@ pub struct GitPushArgs {
     ///
     /// This usually means that the bookmark was already pushed to or fetched
     /// from the relevant remote. For details, see
-    /// https://martinvonz.github.io/jj/latest/bookmarks#remotes-and-tracked-bookmarks
+    /// https://jj-vcs.github.io/jj/latest/bookmarks#remotes-and-tracked-bookmarks
     #[arg(long)]
     tracked: bool,
     /// Push all deleted bookmarks
@@ -127,7 +129,7 @@ pub struct GitPushArgs {
     #[arg(long)]
     allow_private: bool,
     /// Push bookmarks pointing to these commits (can be repeated)
-    #[arg(long, short)]
+    #[arg(long, short, value_name = "REVSETS")]
     revisions: Vec<RevisionArg>,
     /// Push this commit by creating a bookmark based on its change ID (can be
     /// repeated)
@@ -135,7 +137,7 @@ pub struct GitPushArgs {
     /// The created bookmark will be tracked automatically. Use the
     /// `git.push-bookmark-prefix` setting to change the prefix for generated
     /// names.
-    #[arg(long, short)]
+    #[arg(long, short, value_name = "REVSETS")]
     change: Vec<RevisionArg>,
     /// Only display what will change on the remote
     #[arg(long)]
@@ -216,17 +218,7 @@ pub fn cmd_git_push(
         let mut seen_bookmarks: HashSet<&str> = HashSet::new();
 
         // Process --change bookmarks first because matching bookmarks can be moved.
-        // TODO: Drop support support for git.push-branch-prefix in 0.28.0+
-        let bookmark_prefix = if let Some(prefix) = command.settings().push_branch_prefix() {
-            writeln!(
-                ui.warning_default(),
-                "Config git.push-branch-prefix is deprecated. Please switch to \
-                 git.push-bookmark-prefix",
-            )?;
-            prefix
-        } else {
-            command.settings().push_bookmark_prefix()
-        };
+        let bookmark_prefix = get_change_bookmark_prefix(ui, command.settings())?;
         let change_bookmark_names =
             update_change_bookmarks(ui, &mut tx, &args.change, &bookmark_prefix)?;
         let change_bookmarks = change_bookmark_names.iter().map(|bookmark_name| {
@@ -511,6 +503,23 @@ fn get_default_push_remote(
         Ok(remote)
     } else {
         Ok(DEFAULT_REMOTE.to_owned())
+    }
+}
+
+fn get_change_bookmark_prefix(ui: &Ui, settings: &UserSettings) -> Result<String, CommandError> {
+    // TODO: Drop support support for git.push-branch-prefix in 0.28.0+ and move
+    // the default value to config/*.toml
+    if let Some(prefix) = settings.get_string("git.push-branch-prefix").optional()? {
+        writeln!(
+            ui.warning_default(),
+            "Config git.push-branch-prefix is deprecated. Please switch to \
+             git.push-bookmark-prefix",
+        )?;
+        Ok(prefix)
+    } else if let Some(prefix) = settings.get_string("git.push-bookmark-prefix").optional()? {
+        Ok(prefix)
+    } else {
+        Ok("push-".to_owned())
     }
 }
 

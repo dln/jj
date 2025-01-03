@@ -15,8 +15,9 @@
 use indoc::indoc;
 use itertools::Itertools;
 
-use crate::common::escaped_fake_diff_editor_path;
+use crate::common::fake_diff_editor_path;
 use crate::common::strip_last_line;
+use crate::common::to_toml_value;
 use crate::common::TestEnvironment;
 
 #[test]
@@ -87,15 +88,15 @@ fn test_diff_basic() {
     "###);
 
     let stdout = test_env.jj_cmd_success(&repo_path, &["diff", "--git", "file1"]);
-    insta::assert_snapshot!(stdout, @r###"
+    insta::assert_snapshot!(stdout, @r"
     diff --git a/file1 b/file1
     deleted file mode 100644
     index 257cc5642c..0000000000
     --- a/file1
     +++ /dev/null
-    @@ -1,1 +1,0 @@
+    @@ -1,1 +0,0 @@
     -foo
-    "###);
+    ");
 
     let stdout = test_env.jj_cmd_success(&repo_path, &["diff", "--git"]);
     insta::assert_snapshot!(stdout, @r###"
@@ -118,7 +119,7 @@ fn test_diff_basic() {
     "###);
 
     let stdout = test_env.jj_cmd_success(&repo_path, &["diff", "--git", "--context=0"]);
-    insta::assert_snapshot!(stdout, @r###"
+    insta::assert_snapshot!(stdout, @r"
     diff --git a/file2 b/file2
     index 94ebaf9001..1ffc51b472 100644
     --- a/file2
@@ -126,7 +127,7 @@ fn test_diff_basic() {
     @@ -2,1 +2,1 @@
     -2
     +5
-    @@ -4,1 +4,0 @@
+    @@ -4,1 +3,0 @@
     -4
     diff --git a/file1 b/file3
     rename from file1
@@ -134,7 +135,7 @@ fn test_diff_basic() {
     diff --git a/file2 b/file4
     copy from file2
     copy to file4
-    "###);
+    ");
 
     let stdout = test_env.jj_cmd_success(&repo_path, &["diff", "--git", "--color=debug"]);
     insta::assert_snapshot!(stdout, @r###"
@@ -313,7 +314,7 @@ fn test_diff_file_mode() {
     "###);
 
     let stdout = test_env.jj_cmd_success(&repo_path, &["diff", "-r@--", "--git"]);
-    insta::assert_snapshot!(stdout, @r###"
+    insta::assert_snapshot!(stdout, @r"
     diff --git a/file1 b/file1
     new file mode 100755
     index 0000000000..e69de29bb2
@@ -322,28 +323,28 @@ fn test_diff_file_mode() {
     index 0000000000..d00491fd7e
     --- /dev/null
     +++ b/file2
-    @@ -1,0 +1,1 @@
+    @@ -0,0 +1,1 @@
     +1
     diff --git a/file3 b/file3
     new file mode 100644
     index 0000000000..d00491fd7e
     --- /dev/null
     +++ b/file3
-    @@ -1,0 +1,1 @@
+    @@ -0,0 +1,1 @@
     +1
     diff --git a/file4 b/file4
     new file mode 100644
     index 0000000000..e69de29bb2
-    "###);
+    ");
     let stdout = test_env.jj_cmd_success(&repo_path, &["diff", "-r@-", "--git"]);
-    insta::assert_snapshot!(stdout, @r###"
+    insta::assert_snapshot!(stdout, @r"
     diff --git a/file1 b/file1
     old mode 100755
     new mode 100644
     index e69de29bb2..0cfbf08886
     --- a/file1
     +++ b/file1
-    @@ -1,0 +1,1 @@
+    @@ -0,0 +1,1 @@
     +2
     diff --git a/file2 b/file2
     old mode 100755
@@ -360,34 +361,34 @@ fn test_diff_file_mode() {
     diff --git a/file4 b/file4
     old mode 100644
     new mode 100755
-    "###);
+    ");
     let stdout = test_env.jj_cmd_success(&repo_path, &["diff", "-r@", "--git"]);
-    insta::assert_snapshot!(stdout, @r###"
+    insta::assert_snapshot!(stdout, @r"
     diff --git a/file1 b/file1
     deleted file mode 100644
     index 0cfbf08886..0000000000
     --- a/file1
     +++ /dev/null
-    @@ -1,1 +1,0 @@
+    @@ -1,1 +0,0 @@
     -2
     diff --git a/file2 b/file2
     deleted file mode 100644
     index d00491fd7e..0000000000
     --- a/file2
     +++ /dev/null
-    @@ -1,1 +1,0 @@
+    @@ -1,1 +0,0 @@
     -1
     diff --git a/file3 b/file3
     deleted file mode 100755
     index 0cfbf08886..0000000000
     --- a/file3
     +++ /dev/null
-    @@ -1,1 +1,0 @@
+    @@ -1,1 +0,0 @@
     -2
     diff --git a/file4 b/file4
     deleted file mode 100755
     index e69de29bb2..0000000000
-    "###);
+    ");
 }
 
 #[test]
@@ -497,7 +498,7 @@ fn test_diff_bad_args() {
     insta::assert_snapshot!(stderr, @r###"
     error: the argument '--summary' cannot be used with '--types'
 
-    Usage: jj diff --summary [PATHS]...
+    Usage: jj diff --summary [FILESETS]...
 
     For more information, try '--help'.
     "###);
@@ -506,7 +507,7 @@ fn test_diff_bad_args() {
     insta::assert_snapshot!(stderr, @r###"
     error: the argument '--color-words' cannot be used with '--git'
 
-    Usage: jj diff --color-words [PATHS]...
+    Usage: jj diff --color-words [FILESETS]...
 
     For more information, try '--help'.
     "###);
@@ -686,18 +687,18 @@ fn test_diff_hunks() {
     "###);
 
     let stdout = test_env.jj_cmd_success(&repo_path, &["diff", "--git"]);
-    insta::assert_snapshot!(stdout, @r###"
+    insta::assert_snapshot!(stdout, @r"
     diff --git a/file1 b/file1
     index e69de29bb2..257cc5642c 100644
     --- a/file1
     +++ b/file1
-    @@ -1,0 +1,1 @@
+    @@ -0,0 +1,1 @@
     +foo
     diff --git a/file2 b/file2
     index 257cc5642c..e69de29bb2 100644
     --- a/file2
     +++ b/file2
-    @@ -1,1 +1,0 @@
+    @@ -1,1 +0,0 @@
     -foo
     diff --git a/file3 b/file3
     index 221a95a095..a543ef3892 100644
@@ -708,21 +709,21 @@ fn test_diff_hunks() {
     -baz qux blah blah
     +bar
     +baz quux blah blah
-    "###);
+    ");
 
     let stdout = test_env.jj_cmd_success(&repo_path, &["diff", "--git", "--color=debug"]);
-    insta::assert_snapshot!(stdout, @r###"
+    insta::assert_snapshot!(stdout, @r"
     [1m<<diff file_header::diff --git a/file1 b/file1>>[0m
     [1m<<diff file_header::index e69de29bb2..257cc5642c 100644>>[0m
     [1m<<diff file_header::--- a/file1>>[0m
     [1m<<diff file_header::+++ b/file1>>[0m
-    [38;5;6m<<diff hunk_header::@@ -1,0 +1,1 @@>>[39m
+    [38;5;6m<<diff hunk_header::@@ -0,0 +1,1 @@>>[39m
     [38;5;2m<<diff added::+>>[4m<<diff added token::foo>>[24m[39m
     [1m<<diff file_header::diff --git a/file2 b/file2>>[0m
     [1m<<diff file_header::index 257cc5642c..e69de29bb2 100644>>[0m
     [1m<<diff file_header::--- a/file2>>[0m
     [1m<<diff file_header::+++ b/file2>>[0m
-    [38;5;6m<<diff hunk_header::@@ -1,1 +1,0 @@>>[39m
+    [38;5;6m<<diff hunk_header::@@ -1,1 +0,0 @@>>[39m
     [38;5;1m<<diff removed::->>[4m<<diff removed token::foo>>[24m[39m
     [1m<<diff file_header::diff --git a/file3 b/file3>>[0m
     [1m<<diff file_header::index 221a95a095..a543ef3892 100644>>[0m
@@ -733,7 +734,7 @@ fn test_diff_hunks() {
     [38;5;1m<<diff removed::-baz >>[4m<<diff removed token::qux>>[24m<<diff removed:: blah blah>>[39m
     [38;5;2m<<diff added::+>>[4m<<diff added token::bar>>[24m[39m
     [38;5;2m<<diff added::+baz >>[4m<<diff added token::quux>>[24m<<diff added:: blah blah>>[39m
-    "###);
+    ");
 }
 
 #[test]
@@ -744,10 +745,7 @@ fn test_diff_color_words_inlining_threshold() {
 
     let render_diff = |max_alternation: i32, args: &[&str]| {
         let config = format!("diff.color-words.max-inline-alternation={max_alternation}");
-        test_env.jj_cmd_success(
-            &repo_path,
-            &[&["diff", "--config-toml", &config], args].concat(),
-        )
+        test_env.jj_cmd_success(&repo_path, &[&["diff", "--config", &config], args].concat())
     };
 
     let file1_path = "file1-single-line";
@@ -1441,7 +1439,7 @@ fn test_color_words_diff_missing_newline() {
         &repo_path,
         &[
             "log",
-            "--config-toml=diff.color-words.max-inline-alternation=0",
+            "--config=diff.color-words.max-inline-alternation=0",
             "-Tdescription",
             "-pr::@-",
             "--no-graph",
@@ -1805,14 +1803,14 @@ context = 0
             "--reversed",
         ],
     );
-    insta::assert_snapshot!(stdout, @r#"
+    insta::assert_snapshot!(stdout, @r"
     === First commit
     diff --git a/file1 b/file1
     new file mode 100644
     index 0000000000..0fec236860
     --- /dev/null
     +++ b/file1
-    @@ -1,0 +1,5 @@
+    @@ -0,0 +1,5 @@
     +a
     +b
     +c
@@ -1827,7 +1825,7 @@ context = 0
     @@ -3,1 +3,1 @@
     -c
     +C
-    "#);
+    ");
 }
 
 #[test]
@@ -2086,10 +2084,10 @@ fn test_diff_external_tool() {
     "###);
 
     insta::assert_snapshot!(
-        test_env.jj_cmd_success(&repo_path, &["show", "--tool=fake-diff-editor"]), @r###"
+        test_env.jj_cmd_success(&repo_path, &["show", "--tool=fake-diff-editor"]), @r#"
     Commit ID: 39d9055d70873099fd924b9af218289d5663eac8
     Change ID: rlvkpnrzqnoowoytxnquwvuryrwnrmlp
-    Author: Test User <test.user@example.com> (2001-02-03 08:05:09)
+    Author   : Test User <test.user@example.com> (2001-02-03 08:05:09)
     Committer: Test User <test.user@example.com> (2001-02-03 08:05:09)
 
         (no description set)
@@ -2099,10 +2097,10 @@ fn test_diff_external_tool() {
     --
     file2
     file3
-    "###);
+    "#);
 
     // Enabled by default, looks up the merge-tools table
-    let config = "--config-toml=ui.diff.tool='fake-diff-editor'";
+    let config = "--config=ui.diff.tool=fake-diff-editor";
     insta::assert_snapshot!(test_env.jj_cmd_success(&repo_path, &["diff", config]), @r###"
     file1
     file2
@@ -2112,8 +2110,8 @@ fn test_diff_external_tool() {
     "###);
 
     // Inlined command arguments
-    let command = escaped_fake_diff_editor_path();
-    let config = format!(r#"--config-toml=ui.diff.tool=["{command}", "$right", "$left"]"#);
+    let command_toml = to_toml_value(fake_diff_editor_path());
+    let config = format!("--config=ui.diff.tool=[{command_toml}, '$right', '$left']");
     insta::assert_snapshot!(test_env.jj_cmd_success(&repo_path, &["diff", &config]), @r###"
     file2
     file3
@@ -2133,16 +2131,16 @@ fn test_diff_external_tool() {
     // Non-zero exit code isn't an error
     std::fs::write(&edit_script, "print diff\0fail").unwrap();
     let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["show", "--tool=fake-diff-editor"]);
-    insta::assert_snapshot!(stdout, @r###"
+    insta::assert_snapshot!(stdout, @r#"
     Commit ID: 39d9055d70873099fd924b9af218289d5663eac8
     Change ID: rlvkpnrzqnoowoytxnquwvuryrwnrmlp
-    Author: Test User <test.user@example.com> (2001-02-03 08:05:09)
+    Author   : Test User <test.user@example.com> (2001-02-03 08:05:09)
     Committer: Test User <test.user@example.com> (2001-02-03 08:05:09)
 
         (no description set)
 
     diff
-    "###);
+    "#);
     insta::assert_snapshot!(stderr.replace("exit code:", "exit status:"), @r###"
     Warning: Tool exited with exit status: 1 (run with --debug to see the exact invocation)
     "###);
@@ -2178,12 +2176,14 @@ fn test_diff_external_file_by_file_tool() {
     .unwrap();
 
     // Enabled by default, looks up the merge-tools table
-    let config = "--config-toml=ui.diff.tool='fake-diff-editor'\nmerge-tools.fake-diff-editor.\
-                  diff-invocation-mode='file-by-file'";
+    let configs: &[_] = &[
+        "--config=ui.diff.tool=fake-diff-editor",
+        "--config=merge-tools.fake-diff-editor.diff-invocation-mode=file-by-file",
+    ];
 
     // diff without file patterns
     insta::assert_snapshot!(
-        test_env.jj_cmd_success(&repo_path, &["diff", config]), @r###"
+        test_env.jj_cmd_success(&repo_path, &[&["diff"], configs].concat()), @r###"
     ==
     file2
     --
@@ -2200,7 +2200,7 @@ fn test_diff_external_file_by_file_tool() {
 
     // diff with file patterns
     insta::assert_snapshot!(
-        test_env.jj_cmd_success(&repo_path, &["diff", config, "file1"]), @r###"
+        test_env.jj_cmd_success(&repo_path, &[&["diff", "file1"], configs].concat()), @r###"
     ==
     file1
     --
@@ -2208,7 +2208,7 @@ fn test_diff_external_file_by_file_tool() {
     "###);
 
     insta::assert_snapshot!(
-        test_env.jj_cmd_success(&repo_path, &["log", "-p", config]), @r###"
+        test_env.jj_cmd_success(&repo_path, &[&["log", "-p"], configs].concat()), @r###"
     @  rlvkpnrz test.user@example.com 2001-02-03 08:05:09 7b01704a
     │  (no description set)
     │  ==
@@ -2237,10 +2237,10 @@ fn test_diff_external_file_by_file_tool() {
     "###);
 
     insta::assert_snapshot!(
-        test_env.jj_cmd_success(&repo_path, &["show", config]), @r###"
+        test_env.jj_cmd_success(&repo_path, &[&["show"], configs].concat()), @r#"
     Commit ID: 7b01704a670bc77d11ed117d362855cff1d4513b
     Change ID: rlvkpnrzqnoowoytxnquwvuryrwnrmlp
-    Author: Test User <test.user@example.com> (2001-02-03 08:05:09)
+    Author   : Test User <test.user@example.com> (2001-02-03 08:05:09)
     Committer: Test User <test.user@example.com> (2001-02-03 08:05:09)
 
         (no description set)
@@ -2257,7 +2257,7 @@ fn test_diff_external_file_by_file_tool() {
     file1
     --
     file4
-    "###);
+    "#);
 }
 
 #[cfg(unix)]

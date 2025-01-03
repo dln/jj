@@ -14,6 +14,7 @@
 
 use std::any::Any;
 use std::cmp::max;
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::io;
 use std::rc::Rc;
@@ -427,6 +428,27 @@ impl<'repo> IntoTemplateProperty<'repo> for CommitTemplatePropertyKind<'repo> {
             (CommitTemplatePropertyKind::TreeDiff(_), _) => None,
         }
     }
+
+    fn try_into_cmp(
+        self,
+        other: Self,
+    ) -> Option<Box<dyn TemplateProperty<Output = Ordering> + 'repo>> {
+        match (self, other) {
+            (CommitTemplatePropertyKind::Core(lhs), CommitTemplatePropertyKind::Core(rhs)) => {
+                lhs.try_into_cmp(rhs)
+            }
+            (CommitTemplatePropertyKind::Core(_), _) => None,
+            (CommitTemplatePropertyKind::Commit(_), _) => None,
+            (CommitTemplatePropertyKind::CommitOpt(_), _) => None,
+            (CommitTemplatePropertyKind::CommitList(_), _) => None,
+            (CommitTemplatePropertyKind::RefName(_), _) => None,
+            (CommitTemplatePropertyKind::RefNameOpt(_), _) => None,
+            (CommitTemplatePropertyKind::RefNameList(_), _) => None,
+            (CommitTemplatePropertyKind::CommitOrChangeId(_), _) => None,
+            (CommitTemplatePropertyKind::ShortestIdPrefix(_), _) => None,
+            (CommitTemplatePropertyKind::TreeDiff(_), _) => None,
+        }
+    }
 }
 
 /// Table of functions that translate method call node of self type `T`.
@@ -809,7 +831,7 @@ fn builtin_commit_methods<'repo>() -> CommitTemplateBuildMethodFnMap<'repo, Comm
                 expect_fileset_literal(diagnostics, node, language.path_converter)?
             } else {
                 // TODO: defaults to CLI path arguments?
-                // https://github.com/martinvonz/jj/issues/2933#issuecomment-1925870731
+                // https://github.com/jj-vcs/jj/issues/2933#issuecomment-1925870731
                 FilesetExpression::all()
             };
             let repo = language.repo;

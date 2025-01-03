@@ -60,12 +60,18 @@ use crate::ui::Ui;
 #[derive(clap::Args, Clone, Debug)]
 pub(crate) struct SquashArgs {
     /// Revision to squash into its parent (default: @)
-    #[arg(long, short, add = ArgValueCandidates::new(complete::mutable_revisions))]
+    #[arg(
+        long,
+        short,
+        value_name = "REVSET",
+        add = ArgValueCandidates::new(complete::mutable_revisions)
+    )]
     revision: Option<RevisionArg>,
     /// Revision(s) to squash from (default: @)
     #[arg(
         long, short,
         conflicts_with = "revision",
+        value_name = "REVSETS",
         add = ArgValueCandidates::new(complete::mutable_revisions),
     )]
     from: Vec<RevisionArg>,
@@ -74,6 +80,7 @@ pub(crate) struct SquashArgs {
         long, short = 't',
         conflicts_with = "revision",
         visible_alias = "to",
+        value_name = "REVSET",
         add = ArgValueCandidates::new(complete::mutable_revisions),
     )]
     into: Option<RevisionArg>,
@@ -93,6 +100,7 @@ pub(crate) struct SquashArgs {
     /// Move only changes to these paths (instead of all paths)
     #[arg(
         conflicts_with_all = ["interactive", "tool"],
+        value_name = "FILESETS",
         value_hint = clap::ValueHint::AnyPath,
         add = ArgValueCompleter::new(complete::squash_revision_files),
     )]
@@ -245,7 +253,6 @@ from the source will be moved into the destination.
 
     let repo_path = tx.base_workspace_helper().repo_path().to_owned();
     match rewrite::squash_commits(
-        settings,
         tx.repo_mut(),
         &source_commits,
         destination,

@@ -44,7 +44,7 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y --no-install-recommends xz-utils liblz4-tool musl-tools
     - name: Install Rust
-      uses: dtolnay/rust-toolchain@1482605bfc5719782e1267fd0c0cc350fe7646b8
+      uses: dtolnay/rust-toolchain@a54c7afa936fefeb4456b2dd8068152669aa8203
       with:
         toolchain: stable
         target: ${{ matrix.target }}
@@ -101,7 +101,7 @@ jobs:
         with:
           python-version: 3.11
       - name: Install uv
-        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a
+        uses: astral-sh/setup-uv@887a942a15af3a7626099df99e897a18d9e5ab3a
         with:
           version: "0.5.1"
       - name: Compile docs and zip them up
@@ -132,7 +132,7 @@ jobs:
         with:
           python-version: 3.11
       - name: Install uv
-        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a
+        uses: astral-sh/setup-uv@887a942a15af3a7626099df99e897a18d9e5ab3a
         with:
           version: "0.5.1"
       - name: Install dependencies, compile and deploy docs to the "latest release" section of the website
@@ -141,6 +141,6 @@ jobs:
           git config user.email 'jj-docs[bot]@users.noreply.github.io'
           # Using the 'latest' tag below makes the website default
           # to this version.
-          .github/scripts/docs-build-deploy 'https://martinvonz.github.io/jj' "${{ github.event.release.tag_name }}" latest --update-aliases --push
+          .github/scripts/docs-build-deploy 'https://jj-vcs.github.io/jj' "${{ github.event.release.tag_name }}" latest --update-aliases --push
       - name: "Show `git diff --stat`"
         run: git diff --stat gh-pages^ gh-pages || echo "(No diffs)"

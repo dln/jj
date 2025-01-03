@@ -107,7 +107,7 @@ pub fn cmd_op_diff(
     } else {
         to_op = workspace_command.resolve_single_op(args.operation.as_deref().unwrap_or("@"))?;
         let to_op_parents: Vec<_> = to_op.parents().try_collect()?;
-        from_op = repo_loader.merge_operations(command.settings(), to_op_parents, None)?;
+        from_op = repo_loader.merge_operations(to_op_parents, None)?;
     }
     let graph_style = GraphStyle::from_settings(command.settings())?;
     let with_content_format = LogContentFormat::new(ui, command.settings())?;
@@ -116,7 +116,7 @@ pub fn cmd_op_diff(
     let to_repo = repo_loader.load_at(&to_op)?;
 
     // Create a new transaction starting from `to_repo`.
-    let mut tx = to_repo.start_transaction(command.settings());
+    let mut tx = to_repo.start_transaction();
     // Merge index from `from_repo` to `to_repo`, so commits in `from_repo` are
     // accessible.
     tx.repo_mut().merge_index(&from_repo);

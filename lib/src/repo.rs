@@ -86,7 +86,6 @@ use crate::rewrite::rebase_commit_with_options;
 use crate::rewrite::CommitRewriter;
 use crate::rewrite::RebaseOptions;
 use crate::rewrite::RebasedCommit;
-use crate::settings::RepoSettings;
 use crate::settings::UserSettings;
 use crate::signing::SignInitError;
 use crate::signing::Signer;
@@ -177,7 +176,7 @@ impl ReadonlyRepo {
 
     #[allow(clippy::too_many_arguments)]
     pub fn init(
-        user_settings: &UserSettings,
+        settings: &UserSettings,
         repo_path: &Path,
         backend_initializer: &BackendInitializer,
         signer: Signer,
@@ -186,29 +185,28 @@ impl ReadonlyRepo {
         index_store_initializer: &IndexStoreInitializer,
         submodule_store_initializer: &SubmoduleStoreInitializer,
     ) -> Result<Arc<ReadonlyRepo>, RepoInitError> {
-        let repo_path = repo_path.canonicalize().context(repo_path)?;
+        let repo_path = dunce::canonicalize(repo_path).context(repo_path)?;
 
         let store_path = repo_path.join("store");
         fs::create_dir(&store_path).context(&store_path)?;
-        let backend = backend_initializer(user_settings, &store_path)?;
+        let backend = backend_initializer(settings, &store_path)?;
         let backend_path = store_path.join("type");
         fs::write(&backend_path, backend.name()).context(&backend_path)?;
         let store = Store::new(backend, signer);
-        let repo_settings = user_settings.with_repo(&repo_path).unwrap();
 
         let op_store_path = repo_path.join("op_store");
         fs::create_dir(&op_store_path).context(&op_store_path)?;
         let root_op_data = RootOperationData {
             root_commit_id: store.root_commit_id().clone(),
         };
-        let op_store = op_store_initializer(user_settings, &op_store_path, root_op_data);
+        let op_store = op_store_initializer(settings, &op_store_path, root_op_data);
         let op_store_type_path = op_store_path.join("type");
         fs::write(&op_store_type_path, op_store.name()).context(&op_store_type_path)?;
         let op_store: Arc<dyn OpStore> = Arc::from(op_store);
 
         let op_heads_path = repo_path.join("op_heads");
         fs::create_dir(&op_heads_path).context(&op_heads_path)?;
-        let op_heads_store = op_heads_store_initializer(user_settings, &op_heads_path);
+        let op_heads_store = op_heads_store_initializer(settings, &op_heads_path);
         let op_heads_type_path = op_heads_path.join("type");
         fs::write(&op_heads_type_path, op_heads_store.name()).context(&op_heads_type_path)?;
         op_heads_store.update_op_heads(&[], op_store.root_operation_id())?;
@@ -216,21 +214,21 @@ impl ReadonlyRepo {
 
         let index_path = repo_path.join("index");
         fs::create_dir(&index_path).context(&index_path)?;
-        let index_store = index_store_initializer(user_settings, &index_path)?;
+        let index_store = index_store_initializer(settings, &index_path)?;
         let index_type_path = index_path.join("type");
         fs::write(&index_type_path, index_store.name()).context(&index_type_path)?;
         let index_store: Arc<dyn IndexStore> = Arc::from(index_store);
 
         let submodule_store_path = repo_path.join("submodule_store");
         fs::create_dir(&submodule_store_path).context(&submodule_store_path)?;
-        let submodule_store = submodule_store_initializer(user_settings, &submodule_store_path);
+        let submodule_store = submodule_store_initializer(settings, &submodule_store_path);
         let submodule_store_type_path = submodule_store_path.join("type");
         fs::write(&submodule_store_type_path, submodule_store.name())
             .context(&submodule_store_type_path)?;
         let submodule_store = Arc::from(submodule_store);
 
         let loader = RepoLoader {
-            repo_settings,
+            settings: settings.clone(),
             store,
             op_store,
             op_heads_store,
@@ -293,23 +291,17 @@ impl ReadonlyRepo {
         self.loader.index_store()
     }
 
-    pub fn settings(&self) -> &RepoSettings {
+    pub fn settings(&self) -> &UserSettings {
         self.loader.settings()
     }
 
-    pub fn start_transaction(
-        self: &Arc<ReadonlyRepo>,
-        user_settings: &UserSettings,
-    ) -> Transaction {
+    pub fn start_transaction(self: &Arc<ReadonlyRepo>) -> Transaction {
         let mut_repo = MutableRepo::new(self.clone(), self.readonly_index(), &self.view);
-        Transaction::new(mut_repo, user_settings)
+        Transaction::new(mut_repo, self.settings())
     }
 
-    pub fn reload_at_head(
-        &self,
-        user_settings: &UserSettings,
-    ) -> Result<Arc<ReadonlyRepo>, RepoLoaderError> {
-        self.loader().load_at_head(user_settings)
+    pub fn reload_at_head(&self) -> Result<Arc<ReadonlyRepo>, RepoLoaderError> {
+        self.loader().load_at_head()
     }
 
     #[instrument]
@@ -628,7 +620,7 @@ pub enum RepoLoaderError {
 /// a given operation.
 #[derive(Clone)]
 pub struct RepoLoader {
-    repo_settings: RepoSettings,
+    settings: UserSettings,
     store: Arc<Store>,
     op_store: Arc<dyn OpStore>,
     op_heads_store: Arc<dyn OpHeadsStore>,
@@ -638,7 +630,7 @@ pub struct RepoLoader {
 
 impl RepoLoader {
     pub fn new(
-        repo_settings: RepoSettings,
+        settings: UserSettings,
         store: Arc<Store>,
         op_store: Arc<dyn OpStore>,
         op_heads_store: Arc<dyn OpHeadsStore>,
@@ -646,7 +638,7 @@ impl RepoLoader {
         submodule_store: Arc<dyn SubmoduleStore>,
     ) -> Self {
         Self {
-            repo_settings,
+            settings,
             store,
             op_store,
             op_heads_store,
@@ -659,34 +651,31 @@ impl RepoLoader {
     /// various `.jj/repo/<backend>/type` files and loading the right
     /// backends from `store_factories`.
     pub fn init_from_file_system(
-        user_settings: &UserSettings,
+        settings: &UserSettings,
         repo_path: &Path,
         store_factories: &StoreFactories,
     ) -> Result<Self, StoreLoadError> {
         let store = Store::new(
-            store_factories.load_backend(user_settings, &repo_path.join("store"))?,
-            Signer::from_settings(user_settings)?,
+            store_factories.load_backend(settings, &repo_path.join("store"))?,
+            Signer::from_settings(settings)?,
         );
-        let repo_settings = user_settings.with_repo(repo_path).unwrap();
         let root_op_data = RootOperationData {
             root_commit_id: store.root_commit_id().clone(),
         };
         let op_store = Arc::from(store_factories.load_op_store(
-            user_settings,
+            settings,
             &repo_path.join("op_store"),
             root_op_data,
         )?);
-        let op_heads_store = Arc::from(
-            store_factories.load_op_heads_store(user_settings, &repo_path.join("op_heads"))?,
-        );
+        let op_heads_store =
+            Arc::from(store_factories.load_op_heads_store(settings, &repo_path.join("op_heads"))?);
         let index_store =
-            Arc::from(store_factories.load_index_store(user_settings, &repo_path.join("index"))?);
+            Arc::from(store_factories.load_index_store(settings, &repo_path.join("index"))?);
         let submodule_store = Arc::from(
-            store_factories
-                .load_submodule_store(user_settings, &repo_path.join("submodule_store"))?,
+            store_factories.load_submodule_store(settings, &repo_path.join("submodule_store"))?,
         );
         Ok(Self {
-            repo_settings,
+            settings: settings.clone(),
             store,
             op_store,
             op_heads_store,
@@ -695,8 +684,8 @@ impl RepoLoader {
         })
     }
 
-    pub fn settings(&self) -> &RepoSettings {
-        &self.repo_settings
+    pub fn settings(&self) -> &UserSettings {
+        &self.settings
     }
 
     pub fn store(&self) -> &Arc<Store> {
@@ -719,14 +708,11 @@ impl RepoLoader {
         &self.submodule_store
     }
 
-    pub fn load_at_head(
-        &self,
-        user_settings: &UserSettings,
-    ) -> Result<Arc<ReadonlyRepo>, RepoLoaderError> {
+    pub fn load_at_head(&self) -> Result<Arc<ReadonlyRepo>, RepoLoaderError> {
         let op = op_heads_store::resolve_op_heads(
             self.op_heads_store.as_ref(),
             &self.op_store,
-            |op_heads| self._resolve_op_heads(op_heads, user_settings),
+            |op_heads| self._resolve_op_heads(op_heads),
         )?;
         let view = op.view()?;
         self._finish_load(op, view)
@@ -773,7 +759,6 @@ impl RepoLoader {
     /// operation if the `operations` is empty.
     pub fn merge_operations(
         &self,
-        settings: &UserSettings,
         operations: Vec<Operation>,
         tx_description: Option<&str>,
     ) -> Result<Operation, RepoLoaderError> {
@@ -784,10 +769,10 @@ impl RepoLoader {
         };
         let final_op = if num_operations > 1 {
             let base_repo = self.load_at(&base_op)?;
-            let mut tx = base_repo.start_transaction(settings);
+            let mut tx = base_repo.start_transaction();
             for other_op in operations {
                 tx.merge_operation(other_op)?;
-                tx.repo_mut().rebase_descendants(settings)?;
+                tx.repo_mut().rebase_descendants()?;
             }
             let tx_description = tx_description.map_or_else(
                 || format!("merge {num_operations} operations"),
@@ -802,17 +787,9 @@ impl RepoLoader {
         Ok(final_op)
     }
 
-    fn _resolve_op_heads(
-        &self,
-        op_heads: Vec<Operation>,
-        user_settings: &UserSettings,
-    ) -> Result<Operation, RepoLoaderError> {
+    fn _resolve_op_heads(&self, op_heads: Vec<Operation>) -> Result<Operation, RepoLoaderError> {
         assert!(!op_heads.is_empty());
-        self.merge_operations(
-            user_settings,
-            op_heads,
-            Some("reconcile divergent operations"),
-        )
+        self.merge_operations(op_heads, Some("reconcile divergent operations"))
     }
 
     fn _finish_load(
@@ -908,21 +885,14 @@ impl MutableRepo {
     }
 
     /// Returns a [`CommitBuilder`] to write new commit to the repo.
-    pub fn new_commit(
-        &mut self,
-        settings: &UserSettings,
-        parents: Vec<CommitId>,
-        tree_id: MergedTreeId,
-    ) -> CommitBuilder {
+    pub fn new_commit(&mut self, parents: Vec<CommitId>, tree_id: MergedTreeId) -> CommitBuilder {
+        let settings = self.base_repo.settings();
         DetachedCommitBuilder::for_new_commit(self, settings, parents, tree_id).attach(self)
     }
 
     /// Returns a [`CommitBuilder`] to rewrite an existing commit in the repo.
-    pub fn rewrite_commit(
-        &mut self,
-        settings: &UserSettings,
-        predecessor: &Commit,
-    ) -> CommitBuilder {
+    pub fn rewrite_commit(&mut self, predecessor: &Commit) -> CommitBuilder {
+        let settings = self.base_repo.settings();
         DetachedCommitBuilder::for_rewrite_from(self, settings, predecessor).attach(self)
         // CommitBuilder::write will record the rewrite in
         // `self.rewritten_commits`
@@ -1082,16 +1052,16 @@ impl MutableRepo {
 
     /// Updates bookmarks, working copies, and anonymous heads after rewriting
     /// and/or abandoning commits.
-    pub fn update_rewritten_references(&mut self, settings: &UserSettings) -> BackendResult<()> {
-        self.update_all_references(settings)?;
+    pub fn update_rewritten_references(&mut self) -> BackendResult<()> {
+        self.update_all_references()?;
         self.update_heads();
         Ok(())
     }
 
-    fn update_all_references(&mut self, settings: &UserSettings) -> BackendResult<()> {
+    fn update_all_references(&mut self) -> BackendResult<()> {
         let rewrite_mapping = self.resolve_rewrite_mapping_with(|_| true);
         self.update_local_bookmarks(&rewrite_mapping);
-        self.update_wc_commits(settings, &rewrite_mapping)?;
+        self.update_wc_commits(&rewrite_mapping)?;
         Ok(())
     }
 
@@ -1122,7 +1092,6 @@ impl MutableRepo {
 
     fn update_wc_commits(
         &mut self,
-        settings: &UserSettings,
         rewrite_mapping: &HashMap<CommitId, Vec<CommitId>>,
     ) -> BackendResult<()> {
         let changed_wc_commits = self
@@ -1152,11 +1121,7 @@ impl MutableRepo {
                     .try_collect()?;
                 let merged_parents_tree = merge_commit_trees(self, &new_commits)?;
                 let commit = self
-                    .new_commit(
-                        settings,
-                        new_commit_ids.clone(),
-                        merged_parents_tree.id().clone(),
-                    )
+                    .new_commit(new_commit_ids.clone(), merged_parents_tree.id().clone())
                     .write()?;
                 recreated_wc_commits.insert(old_commit_id, commit.clone());
                 commit
@@ -1253,7 +1218,6 @@ impl MutableRepo {
     /// will not be called for descendants of those commits.
     pub fn transform_descendants(
         &mut self,
-        settings: &UserSettings,
         roots: Vec<CommitId>,
         mut callback: impl FnMut(CommitRewriter) -> BackendResult<()>,
     ) -> BackendResult<()> {
@@ -1263,7 +1227,7 @@ impl MutableRepo {
             let rewriter = CommitRewriter::new(self, old_commit, new_parent_ids);
             callback(rewriter)?;
         }
-        self.update_rewritten_references(settings)?;
+        self.update_rewritten_references()?;
         // Since we didn't necessarily visit all descendants of rewritten commits (e.g.
         // if they were rewritten in the callback), there can still be commits left to
         // rebase, so we don't clear `parent_mapping` here.
@@ -1296,16 +1260,14 @@ impl MutableRepo {
     /// bookmarks of the abandoned commit.
     pub fn rebase_descendants_with_options_return_map(
         &mut self,
-        settings: &UserSettings,
         options: RebaseOptions,
     ) -> BackendResult<HashMap<CommitId, CommitId>> {
         let mut rebased: HashMap<CommitId, CommitId> = HashMap::new();
         let roots = self.parent_mapping.keys().cloned().collect_vec();
-        self.transform_descendants(settings, roots, |rewriter| {
+        self.transform_descendants(roots, |rewriter| {
             if rewriter.parents_changed() {
                 let old_commit_id = rewriter.old_commit().id().clone();
-                let rebased_commit: RebasedCommit =
-                    rebase_commit_with_options(settings, rewriter, &options)?;
+                let rebased_commit: RebasedCommit = rebase_commit_with_options(rewriter, &options)?;
                 let new_commit_id = match rebased_commit {
                     RebasedCommit::Rewritten(new_commit) => new_commit.id().clone(),
                     RebasedCommit::Abandoned { parent_id } => parent_id,
@@ -1328,12 +1290,12 @@ impl MutableRepo {
     /// emptied following the rebase operation. To customize the rebase
     /// behavior, use
     /// [`MutableRepo::rebase_descendants_with_options_return_map`].
-    pub fn rebase_descendants(&mut self, settings: &UserSettings) -> BackendResult<usize> {
+    pub fn rebase_descendants(&mut self) -> BackendResult<usize> {
         let roots = self.parent_mapping.keys().cloned().collect_vec();
         let mut num_rebased = 0;
-        self.transform_descendants(settings, roots, |rewriter| {
+        self.transform_descendants(roots, |rewriter| {
             if rewriter.parents_changed() {
-                let builder = rewriter.rebase(settings)?;
+                let builder = rewriter.rebase()?;
                 builder.write()?;
                 num_rebased += 1;
             }
@@ -1349,12 +1311,12 @@ impl MutableRepo {
     /// be recursively reparented onto the new version of their parents.
     /// The content of those descendants will remain untouched.
     /// Returns the number of reparented descendants.
-    pub fn reparent_descendants(&mut self, settings: &UserSettings) -> BackendResult<usize> {
+    pub fn reparent_descendants(&mut self) -> BackendResult<usize> {
         let roots = self.parent_mapping.keys().cloned().collect_vec();
         let mut num_reparented = 0;
-        self.transform_descendants(settings, roots, |rewriter| {
+        self.transform_descendants(roots, |rewriter| {
             if rewriter.parents_changed() {
-                let builder = rewriter.reparent(settings)?;
+                let builder = rewriter.reparent();
                 builder.write()?;
                 num_reparented += 1;
             }
@@ -1394,15 +1356,10 @@ impl MutableRepo {
     pub fn check_out(
         &mut self,
         workspace_id: WorkspaceId,
-        settings: &UserSettings,
         commit: &Commit,
     ) -> Result<Commit, CheckOutCommitError> {
         let wc_commit = self
-            .new_commit(
-                settings,
-                vec![commit.id().clone()],
-                commit.tree_id().clone(),
-            )
+            .new_commit(vec![commit.id().clone()], commit.tree_id().clone())
             .write()?;
         self.edit(workspace_id, &wc_commit)?;
         Ok(wc_commit)

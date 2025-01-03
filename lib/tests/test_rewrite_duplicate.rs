@@ -23,7 +23,6 @@ use testutils::TestRepo;
 
 #[test]
 fn test_duplicate_linear_contents() {
-    let settings = testutils::user_settings();
     let test_repo = TestRepo::init();
     let repo = &test_repo.repo;
 
@@ -39,11 +38,10 @@ fn test_duplicate_linear_contents() {
     // C [=file1, +file2]
     // B [+file1]
     // A []
-    let mut tx = repo.start_transaction(&settings);
+    let mut tx = repo.start_transaction();
     let commit_a = tx
         .repo_mut()
         .new_commit(
-            &settings,
             vec![repo.store().root_commit_id().clone()],
             empty_tree_id.clone(),
         )
@@ -51,22 +49,22 @@ fn test_duplicate_linear_contents() {
         .unwrap();
     let commit_b = tx
         .repo_mut()
-        .new_commit(&settings, vec![commit_a.id().clone()], tree_1.id())
+        .new_commit(vec![commit_a.id().clone()], tree_1.id())
         .write()
         .unwrap();
     let commit_c = tx
         .repo_mut()
-        .new_commit(&settings, vec![commit_b.id().clone()], tree_1_2.id())
+        .new_commit(vec![commit_b.id().clone()], tree_1_2.id())
         .write()
         .unwrap();
     let commit_d = tx
         .repo_mut()
-        .new_commit(&settings, vec![commit_c.id().clone()], tree_2.id())
+        .new_commit(vec![commit_c.id().clone()], tree_2.id())
         .write()
         .unwrap();
     let commit_e = tx
         .repo_mut()
-        .new_commit(&settings, vec![commit_d.id().clone()], tree_2.id())
+        .new_commit(vec![commit_d.id().clone()], tree_2.id())
         .write()
         .unwrap();
     let repo = tx.commit("test").unwrap();
@@ -76,7 +74,6 @@ fn test_duplicate_linear_contents() {
                                 parent_commit_ids: &[&CommitId],
                                 children_commit_ids: &[&CommitId]| {
         duplicate_commits(
-            &settings,
             tx.repo_mut(),
             &target_commits.iter().copied().cloned().collect_vec(),
             &parent_commit_ids.iter().copied().cloned().collect_vec(),
@@ -90,7 +87,7 @@ fn test_duplicate_linear_contents() {
         };
 
     // Duplicate empty commit onto empty ancestor tree
-    let mut tx = repo.start_transaction(&settings);
+    let mut tx = repo.start_transaction();
     let stats = duplicate_onto(&mut tx, &[commit_e.id()], &[commit_a.id()]);
     assert_eq!(
         stats.duplicated_commits[commit_e.id()].tree_id(),
@@ -98,7 +95,7 @@ fn test_duplicate_linear_contents() {
     );
 
     // Duplicate empty commit onto non-empty ancestor tree
-    let mut tx = repo.start_transaction(&settings);
+    let mut tx = repo.start_transaction();
     let stats = duplicate_onto(&mut tx, &[commit_e.id()], &[commit_b.id()]);
     assert_eq!(
         stats.duplicated_commits[commit_e.id()].tree_id(),
@@ -106,7 +103,7 @@ fn test_duplicate_linear_contents() {
     );
 
     // Duplicate non-empty commit onto empty ancestor tree
-    let mut tx = repo.start_transaction(&settings);
+    let mut tx = repo.start_transaction();
     let stats = duplicate_onto(&mut tx, &[commit_c.id()], &[commit_a.id()]);
     assert_eq!(
         stats.duplicated_commits[commit_c.id()].tree_id(),
@@ -114,7 +111,7 @@ fn test_duplicate_linear_contents() {
     );
 
     // Duplicate non-empty commit onto non-empty ancestor tree
-    let mut tx = repo.start_transaction(&settings);
+    let mut tx = repo.start_transaction();
     let stats = duplicate_onto(&mut tx, &[commit_d.id()], &[commit_b.id()]);
     assert_eq!(
         stats.duplicated_commits[commit_d.id()].tree_id(),
@@ -122,7 +119,7 @@ fn test_duplicate_linear_contents() {
     );
 
     // Duplicate non-empty commit onto non-empty descendant tree
-    let mut tx = repo.start_transaction(&settings);
+    let mut tx = repo.start_transaction();
     let stats = duplicate_onto(&mut tx, &[commit_b.id()], &[commit_d.id()]);
     assert_eq!(
         stats.duplicated_commits[commit_b.id()].tree_id(),
@@ -130,7 +127,7 @@ fn test_duplicate_linear_contents() {
     );
 
     // Duplicate multiple contiguous commits
-    let mut tx = repo.start_transaction(&settings);
+    let mut tx = repo.start_transaction();
     let stats = duplicate_onto(&mut tx, &[commit_e.id(), commit_d.id()], &[commit_b.id()]);
     assert_eq!(
         stats.duplicated_commits[commit_d.id()].tree_id(),
@@ -142,7 +139,7 @@ fn test_duplicate_linear_contents() {
     );
 
     // Duplicate multiple non-contiguous commits
-    let mut tx = repo.start_transaction(&settings);
+    let mut tx = repo.start_transaction();
     let stats = duplicate_onto(&mut tx, &[commit_e.id(), commit_c.id()], &[commit_a.id()]);
     assert_eq!(
         stats.duplicated_commits[commit_c.id()].tree_id(),
@@ -154,7 +151,7 @@ fn test_duplicate_linear_contents() {
     );
 
     // Duplicate onto multiple parents
-    let mut tx = repo.start_transaction(&settings);
+    let mut tx = repo.start_transaction();
     let stats = duplicate_onto(&mut tx, &[commit_d.id()], &[commit_c.id(), commit_b.id()]);
     assert_eq!(
         stats.duplicated_commits[commit_d.id()].tree_id(),
@@ -162,7 +159,7 @@ fn test_duplicate_linear_contents() {
     );
 
     // Insert duplicated commit
-    let mut tx = repo.start_transaction(&settings);
+    let mut tx = repo.start_transaction();
     let stats = duplicate_in_between(
         &mut tx,
         &[commit_b.id()],

@@ -21,6 +21,8 @@ mod unset;
 
 use std::path::Path;
 
+use itertools::Itertools as _;
+use jj_lib::config::ConfigFile;
 use jj_lib::config::ConfigSource;
 use tracing::instrument;
 
@@ -65,20 +67,46 @@ impl ConfigLevelArgs {
         }
     }
 
-    fn new_config_file_path<'a>(
-        &self,
-        config_env: &'a ConfigEnv,
-    ) -> Result<&'a Path, CommandError> {
+    fn config_path<'a>(&self, config_env: &'a ConfigEnv) -> Result<&'a Path, CommandError> {
         if self.user {
-            // TODO(#531): Special-case for editors that can't handle viewing
-            // directories?
             config_env
-                .new_user_config_path()?
-                .ok_or_else(|| user_error("No user config path found to edit"))
+                .user_config_path()
+                .ok_or_else(|| user_error("No user config path found"))
         } else if self.repo {
             config_env
-                .new_repo_config_path()
-                .ok_or_else(|| user_error("No repo config path found to edit"))
+                .repo_config_path()
+                .ok_or_else(|| user_error("No repo config path found"))
+        } else {
+            panic!("No config_level provided")
+        }
+    }
+
+    fn edit_config_file(&self, command: &CommandHelper) -> Result<ConfigFile, CommandError> {
+        let config_env = command.config_env();
+        let config = command.raw_config();
+        let pick_one = |mut files: Vec<ConfigFile>, not_found_error: &str| {
+            if files.len() > 1 {
+                // TODO: prompt or pick the last?
+                return Err(user_error(format!(
+                    "Cannot determine config file to edit:\n{}",
+                    files
+                        .iter()
+                        .map(|file| format!("  {}", file.path().display()))
+                        .join("\n")
+                )));
+            }
+            files.pop().ok_or_else(|| user_error(not_found_error))
+        };
+        if self.user {
+            pick_one(
+                config_env.user_config_files(config)?,
+                "No user config path found to edit",
+            )
+        } else if self.repo {
+            pick_one(
+                config_env.repo_config_files(config)?,
+                "No repo config path found to edit",
+            )
         } else {
             panic!("No config_level provided")
         }
@@ -91,7 +119,7 @@ impl ConfigLevelArgs {
 /// environment variables.
 ///
 /// For file locations, supported config options, and other details about jj
-/// config, see https://martinvonz.github.io/jj/latest/config/.
+/// config, see https://jj-vcs.github.io/jj/latest/config/.
 #[derive(clap::Subcommand, Clone, Debug)]
 pub(crate) enum ConfigCommand {
     #[command(visible_alias("e"))]

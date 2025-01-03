@@ -192,8 +192,8 @@ fn test_mine_is_true_when_author_is_user() {
     test_env.jj_cmd_ok(
         &repo_path,
         &[
-            "--config-toml=user.email='johndoe@example.com'",
-            "--config-toml=user.name='John Doe'",
+            "--config=user.email=johndoe@example.com",
+            "--config=user.name=John Doe",
             "new",
         ],
     );
@@ -280,11 +280,7 @@ fn test_log_builtin_templates() {
 
     test_env.jj_cmd_ok(
         &repo_path,
-        &[
-            "--config-toml=user.email=''",
-            "--config-toml=user.name=''",
-            "new",
-        ],
+        &["--config=user.email=''", "--config=user.name=''", "new"],
     );
     test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", "my-bookmark"]);
 
@@ -316,31 +312,31 @@ fn test_log_builtin_templates() {
     [EOF]
     "###);
 
-    insta::assert_snapshot!(render(r#"builtin_log_detailed"#), @r###"
+    insta::assert_snapshot!(render(r#"builtin_log_detailed"#), @r#"
     Commit ID: dc31539712c7294d1d712cec63cef4504b94ca74
     Change ID: rlvkpnrzqnoowoytxnquwvuryrwnrmlp
     Bookmarks: my-bookmark
-    Author: (no name set) <(no email set)> (2001-02-03 08:05:08)
+    Author   : (no name set) <(no email set)> (2001-02-03 08:05:08)
     Committer: (no name set) <(no email set)> (2001-02-03 08:05:08)
 
         (no description set)
 
     Commit ID: 230dd059e1b059aefc0da06a2e5a7dbf22362f22
     Change ID: qpvuntsmwlqtpsluzzsnyyzlmlwvmlnu
-    Author: Test User <test.user@example.com> (2001-02-03 08:05:07)
+    Author   : Test User <test.user@example.com> (2001-02-03 08:05:07)
     Committer: Test User <test.user@example.com> (2001-02-03 08:05:07)
 
         (no description set)
 
     Commit ID: 0000000000000000000000000000000000000000
     Change ID: zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
-    Author: (no name set) <(no email set)> (1970-01-01 11:00:00)
+    Author   : (no name set) <(no email set)> (1970-01-01 11:00:00)
     Committer: (no name set) <(no email set)> (1970-01-01 11:00:00)
 
         (no description set)
 
     [EOF]
-    "###);
+    "#);
 }
 
 #[test]
@@ -353,11 +349,7 @@ fn test_log_builtin_templates_colored() {
 
     test_env.jj_cmd_ok(
         &repo_path,
-        &[
-            "--config-toml=user.email=''",
-            "--config-toml=user.name=''",
-            "new",
-        ],
+        &["--config=user.email=''", "--config=user.name=''", "new"],
     );
     test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", "my-bookmark"]);
 
@@ -386,30 +378,29 @@ fn test_log_builtin_templates_colored() {
 
     "#);
 
-    insta::assert_snapshot!(render(r#"builtin_log_detailed"#), @r###"
+    insta::assert_snapshot!(render(r#"builtin_log_detailed"#), @r#"
     [1m[38;5;2m@[0m  Commit ID: [38;5;4mdc31539712c7294d1d712cec63cef4504b94ca74[39m
     │  Change ID: [38;5;5mrlvkpnrzqnoowoytxnquwvuryrwnrmlp[39m
     │  Bookmarks: [38;5;5mmy-bookmark[39m
-    │  Author: [38;5;1m(no name set)[39m <[38;5;1m(no email set)[39m> ([38;5;6m2001-02-03 08:05:08[39m)
+    │  Author   : [38;5;1m(no name set)[39m <[38;5;1m(no email set)[39m> ([38;5;6m2001-02-03 08:05:08[39m)
     │  Committer: [38;5;1m(no name set)[39m <[38;5;1m(no email set)[39m> ([38;5;6m2001-02-03 08:05:08[39m)
     │
     │  [38;5;2m    (no description set)[39m
     │
     ○  Commit ID: [38;5;4m230dd059e1b059aefc0da06a2e5a7dbf22362f22[39m
     │  Change ID: [38;5;5mqpvuntsmwlqtpsluzzsnyyzlmlwvmlnu[39m
-    │  Author: [38;5;3mTest User[39m <[38;5;3mtest.user@example.com[39m> ([38;5;6m2001-02-03 08:05:07[39m)
+    │  Author   : [38;5;3mTest User[39m <[38;5;3mtest.user@example.com[39m> ([38;5;6m2001-02-03 08:05:07[39m)
     │  Committer: [38;5;3mTest User[39m <[38;5;3mtest.user@example.com[39m> ([38;5;6m2001-02-03 08:05:07[39m)
     │
     │  [38;5;2m    (no description set)[39m
     │
     [1m[38;5;14m◆[0m  Commit ID: [38;5;4m0000000000000000000000000000000000000000[39m
        Change ID: [38;5;5mzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz[39m
-       Author: [38;5;1m(no name set)[39m <[38;5;1m(no email set)[39m> ([38;5;6m1970-01-01 11:00:00[39m)
+       Author   : [38;5;1m(no name set)[39m <[38;5;1m(no email set)[39m> ([38;5;6m1970-01-01 11:00:00[39m)
        Committer: [38;5;1m(no name set)[39m <[38;5;1m(no email set)[39m> ([38;5;6m1970-01-01 11:00:00[39m)
 
        [38;5;2m    (no description set)[39m
-
-    "###);
+    "#);
 }
 
 #[test]
@@ -422,24 +413,20 @@ fn test_log_builtin_templates_colored_debug() {
 
     test_env.jj_cmd_ok(
         &repo_path,
-        &[
-            "--config-toml=user.email=''",
-            "--config-toml=user.name=''",
-            "new",
-        ],
+        &["--config=user.email=''", "--config=user.name=''", "new"],
     );
     test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", "my-bookmark"]);
 
     insta::assert_snapshot!(render(r#"builtin_log_oneline"#), @r#"
     [1m[38;5;2m<<node working_copy::@>>[0m  [1m[38;5;13m<<log working_copy change_id shortest prefix::r>>[38;5;8m<<log working_copy change_id shortest rest::lvkpnrz>>[39m<<log working_copy:: >>[38;5;9m<<log working_copy email placeholder::(no email set)>>[39m<<log working_copy:: >>[38;5;14m<<log working_copy committer timestamp local format::2001-02-03 08:05:08>>[39m<<log working_copy:: >>[38;5;13m<<log working_copy bookmarks name::my-bookmark>>[39m<<log working_copy:: >>[38;5;12m<<log working_copy commit_id shortest prefix::d>>[38;5;8m<<log working_copy commit_id shortest rest::c315397>>[39m<<log working_copy:: >>[38;5;10m<<log working_copy empty::(empty)>>[39m<<log working_copy:: >>[38;5;10m<<log working_copy empty description placeholder::(no description set)>>[39m<<log working_copy::>>[0m
-    <<node::○>>  [1m[38;5;5m<<log change_id shortest prefix::q>>[0m[38;5;8m<<log change_id shortest rest::pvuntsm>>[39m<<log:: >>[38;5;3m<<log author username::test.user>>[39m<<log:: >>[38;5;6m<<log committer timestamp local format::2001-02-03 08:05:07>>[39m<<log:: >>[1m[38;5;4m<<log commit_id shortest prefix::2>>[0m[38;5;8m<<log commit_id shortest rest::30dd059>>[39m<<log:: >>[38;5;2m<<log empty::(empty)>>[39m<<log:: >>[38;5;2m<<log empty description placeholder::(no description set)>>[39m<<log::>>
+    <<node::○>>  [1m[38;5;5m<<log change_id shortest prefix::q>>[0m[38;5;8m<<log change_id shortest rest::pvuntsm>>[39m<<log:: >>[38;5;3m<<log author email local::test.user>>[39m<<log:: >>[38;5;6m<<log committer timestamp local format::2001-02-03 08:05:07>>[39m<<log:: >>[1m[38;5;4m<<log commit_id shortest prefix::2>>[0m[38;5;8m<<log commit_id shortest rest::30dd059>>[39m<<log:: >>[38;5;2m<<log empty::(empty)>>[39m<<log:: >>[38;5;2m<<log empty description placeholder::(no description set)>>[39m<<log::>>
     [1m[38;5;14m<<node immutable::◆>>[0m  [1m[38;5;5m<<log change_id shortest prefix::z>>[0m[38;5;8m<<log change_id shortest rest::zzzzzzz>>[39m<<log:: >>[38;5;2m<<log root::root()>>[39m<<log:: >>[1m[38;5;4m<<log commit_id shortest prefix::0>>[0m[38;5;8m<<log commit_id shortest rest::0000000>>[39m<<log::>>
     "#);
 
     insta::assert_snapshot!(render(r#"builtin_log_compact"#), @r#"
     [1m[38;5;2m<<node working_copy::@>>[0m  [1m[38;5;13m<<log working_copy change_id shortest prefix::r>>[38;5;8m<<log working_copy change_id shortest rest::lvkpnrz>>[39m<<log working_copy:: >>[38;5;9m<<log working_copy email placeholder::(no email set)>>[39m<<log working_copy:: >>[38;5;14m<<log working_copy committer timestamp local format::2001-02-03 08:05:08>>[39m<<log working_copy:: >>[38;5;13m<<log working_copy bookmarks name::my-bookmark>>[39m<<log working_copy:: >>[38;5;12m<<log working_copy commit_id shortest prefix::d>>[38;5;8m<<log working_copy commit_id shortest rest::c315397>>[39m<<log working_copy::>>[0m
     │  [1m[38;5;10m<<log working_copy empty::(empty)>>[39m<<log working_copy:: >>[38;5;10m<<log working_copy empty description placeholder::(no description set)>>[39m<<log working_copy::>>[0m
-    <<node::○>>  [1m[38;5;5m<<log change_id shortest prefix::q>>[0m[38;5;8m<<log change_id shortest rest::pvuntsm>>[39m<<log:: >>[38;5;3m<<log author email::test.user@example.com>>[39m<<log:: >>[38;5;6m<<log committer timestamp local format::2001-02-03 08:05:07>>[39m<<log:: >>[1m[38;5;4m<<log commit_id shortest prefix::2>>[0m[38;5;8m<<log commit_id shortest rest::30dd059>>[39m<<log::>>
+    <<node::○>>  [1m[38;5;5m<<log change_id shortest prefix::q>>[0m[38;5;8m<<log change_id shortest rest::pvuntsm>>[39m<<log:: >>[38;5;3m<<log author email local::test.user>><<log author email::@>><<log author email domain::example.com>>[39m<<log:: >>[38;5;6m<<log committer timestamp local format::2001-02-03 08:05:07>>[39m<<log:: >>[1m[38;5;4m<<log commit_id shortest prefix::2>>[0m[38;5;8m<<log commit_id shortest rest::30dd059>>[39m<<log::>>
     │  [38;5;2m<<log empty::(empty)>>[39m<<log:: >>[38;5;2m<<log empty description placeholder::(no description set)>>[39m<<log::>>
     [1m[38;5;14m<<node immutable::◆>>[0m  [1m[38;5;5m<<log change_id shortest prefix::z>>[0m[38;5;8m<<log change_id shortest rest::zzzzzzz>>[39m<<log:: >>[38;5;2m<<log root::root()>>[39m<<log:: >>[1m[38;5;4m<<log commit_id shortest prefix::0>>[0m[38;5;8m<<log commit_id shortest rest::0000000>>[39m<<log::>>
     "#);
@@ -448,37 +435,37 @@ fn test_log_builtin_templates_colored_debug() {
     [1m[38;5;2m<<node working_copy::@>>[0m  [1m[38;5;13m<<log working_copy change_id shortest prefix::r>>[38;5;8m<<log working_copy change_id shortest rest::lvkpnrz>>[39m<<log working_copy:: >>[38;5;9m<<log working_copy email placeholder::(no email set)>>[39m<<log working_copy:: >>[38;5;14m<<log working_copy committer timestamp local format::2001-02-03 08:05:08>>[39m<<log working_copy:: >>[38;5;13m<<log working_copy bookmarks name::my-bookmark>>[39m<<log working_copy:: >>[38;5;12m<<log working_copy commit_id shortest prefix::d>>[38;5;8m<<log working_copy commit_id shortest rest::c315397>>[39m<<log working_copy::>>[0m
     │  [1m[38;5;10m<<log working_copy empty::(empty)>>[39m<<log working_copy:: >>[38;5;10m<<log working_copy empty description placeholder::(no description set)>>[39m<<log working_copy::>>[0m
     │  <<log::>>
-    <<node::○>>  [1m[38;5;5m<<log change_id shortest prefix::q>>[0m[38;5;8m<<log change_id shortest rest::pvuntsm>>[39m<<log:: >>[38;5;3m<<log author email::test.user@example.com>>[39m<<log:: >>[38;5;6m<<log committer timestamp local format::2001-02-03 08:05:07>>[39m<<log:: >>[1m[38;5;4m<<log commit_id shortest prefix::2>>[0m[38;5;8m<<log commit_id shortest rest::30dd059>>[39m<<log::>>
+    <<node::○>>  [1m[38;5;5m<<log change_id shortest prefix::q>>[0m[38;5;8m<<log change_id shortest rest::pvuntsm>>[39m<<log:: >>[38;5;3m<<log author email local::test.user>><<log author email::@>><<log author email domain::example.com>>[39m<<log:: >>[38;5;6m<<log committer timestamp local format::2001-02-03 08:05:07>>[39m<<log:: >>[1m[38;5;4m<<log commit_id shortest prefix::2>>[0m[38;5;8m<<log commit_id shortest rest::30dd059>>[39m<<log::>>
     │  [38;5;2m<<log empty::(empty)>>[39m<<log:: >>[38;5;2m<<log empty description placeholder::(no description set)>>[39m<<log::>>
     │  <<log::>>
     [1m[38;5;14m<<node immutable::◆>>[0m  [1m[38;5;5m<<log change_id shortest prefix::z>>[0m[38;5;8m<<log change_id shortest rest::zzzzzzz>>[39m<<log:: >>[38;5;2m<<log root::root()>>[39m<<log:: >>[1m[38;5;4m<<log commit_id shortest prefix::0>>[0m[38;5;8m<<log commit_id shortest rest::0000000>>[39m<<log::>>
        <<log::>>
     "#);
 
-    insta::assert_snapshot!(render(r#"builtin_log_detailed"#), @r###"
+    insta::assert_snapshot!(render(r#"builtin_log_detailed"#), @r#"
     [1m[38;5;2m<<node working_copy::@>>[0m  <<log::Commit ID: >>[38;5;4m<<log commit_id::dc31539712c7294d1d712cec63cef4504b94ca74>>[39m<<log::>>
     │  <<log::Change ID: >>[38;5;5m<<log change_id::rlvkpnrzqnoowoytxnquwvuryrwnrmlp>>[39m<<log::>>
     │  <<log::Bookmarks: >>[38;5;5m<<log local_bookmarks name::my-bookmark>>[39m<<log::>>
-    │  <<log::Author: >>[38;5;1m<<log name placeholder::(no name set)>>[39m<<log:: <>>[38;5;1m<<log email placeholder::(no email set)>>[39m<<log::> (>>[38;5;6m<<log author timestamp local format::2001-02-03 08:05:08>>[39m<<log::)>>
+    │  <<log::Author   : >>[38;5;1m<<log name placeholder::(no name set)>>[39m<<log:: <>>[38;5;1m<<log email placeholder::(no email set)>>[39m<<log::> (>>[38;5;6m<<log author timestamp local format::2001-02-03 08:05:08>>[39m<<log::)>>
     │  <<log::Committer: >>[38;5;1m<<log name placeholder::(no name set)>>[39m<<log:: <>>[38;5;1m<<log email placeholder::(no email set)>>[39m<<log::> (>>[38;5;6m<<log committer timestamp local format::2001-02-03 08:05:08>>[39m<<log::)>>
     │  <<log::>>
     │  [38;5;2m<<log empty description placeholder::    (no description set)>>[39m<<log::>>
     │  <<log::>>
     <<node::○>>  <<log::Commit ID: >>[38;5;4m<<log commit_id::230dd059e1b059aefc0da06a2e5a7dbf22362f22>>[39m<<log::>>
     │  <<log::Change ID: >>[38;5;5m<<log change_id::qpvuntsmwlqtpsluzzsnyyzlmlwvmlnu>>[39m<<log::>>
-    │  <<log::Author: >>[38;5;3m<<log author name::Test User>>[39m<<log:: <>>[38;5;3m<<log author email::test.user@example.com>>[39m<<log::> (>>[38;5;6m<<log author timestamp local format::2001-02-03 08:05:07>>[39m<<log::)>>
-    │  <<log::Committer: >>[38;5;3m<<log committer name::Test User>>[39m<<log:: <>>[38;5;3m<<log committer email::test.user@example.com>>[39m<<log::> (>>[38;5;6m<<log committer timestamp local format::2001-02-03 08:05:07>>[39m<<log::)>>
+    │  <<log::Author   : >>[38;5;3m<<log author name::Test User>>[39m<<log:: <>>[38;5;3m<<log author email local::test.user>><<log author email::@>><<log author email domain::example.com>>[39m<<log::> (>>[38;5;6m<<log author timestamp local format::2001-02-03 08:05:07>>[39m<<log::)>>
+    │  <<log::Committer: >>[38;5;3m<<log committer name::Test User>>[39m<<log:: <>>[38;5;3m<<log committer email local::test.user>><<log committer email::@>><<log committer email domain::example.com>>[39m<<log::> (>>[38;5;6m<<log committer timestamp local format::2001-02-03 08:05:07>>[39m<<log::)>>
     │  <<log::>>
     │  [38;5;2m<<log empty description placeholder::    (no description set)>>[39m<<log::>>
     │  <<log::>>
     [1m[38;5;14m<<node immutable::◆>>[0m  <<log::Commit ID: >>[38;5;4m<<log commit_id::0000000000000000000000000000000000000000>>[39m<<log::>>
        <<log::Change ID: >>[38;5;5m<<log change_id::zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz>>[39m<<log::>>
-       <<log::Author: >>[38;5;1m<<log name placeholder::(no name set)>>[39m<<log:: <>>[38;5;1m<<log email placeholder::(no email set)>>[39m<<log::> (>>[38;5;6m<<log author timestamp local format::1970-01-01 11:00:00>>[39m<<log::)>>
+       <<log::Author   : >>[38;5;1m<<log name placeholder::(no name set)>>[39m<<log:: <>>[38;5;1m<<log email placeholder::(no email set)>>[39m<<log::> (>>[38;5;6m<<log author timestamp local format::1970-01-01 11:00:00>>[39m<<log::)>>
        <<log::Committer: >>[38;5;1m<<log name placeholder::(no name set)>>[39m<<log:: <>>[38;5;1m<<log email placeholder::(no email set)>>[39m<<log::> (>>[38;5;6m<<log committer timestamp local format::1970-01-01 11:00:00>>[39m<<log::)>>
        <<log::>>
        [38;5;2m<<log empty description placeholder::    (no description set)>>[39m<<log::>>
        <<log::>>
-    "###);
+    "#);
 }
 
 #[test]
@@ -752,7 +739,7 @@ fn test_log_customize_short_id() {
         &repo_path,
         &[
             "log",
-            "--config-toml",
+            "--config",
             &format!(r#"{decl}='id.shortest(5).prefix().upper() ++ "_" ++ id.shortest(5).rest()'"#),
         ],
     );
@@ -767,11 +754,7 @@ fn test_log_customize_short_id() {
         &repo_path,
         &[
             "log",
-            "--config-toml",
-            r#"
-                [template-aliases]
-                'format_short_change_id(id)'='format_short_id(id).upper()'
-            "#,
+            "--config=template-aliases.'format_short_change_id(id)'='format_short_id(id).upper()'",
         ],
     );
     insta::assert_snapshot!(stdout, @r###"
@@ -824,7 +807,7 @@ fn test_log_immutable() {
       | ^--------^
       |
       = Function "unknown_fn" doesn't exist
-    For help, see https://martinvonz.github.io/jj/latest/config/.
+    For help, see https://jj-vcs.github.io/jj/latest/config/.
     "#);
 
     test_env.add_config("revset-aliases.'immutable_heads()' = 'unknown_symbol'");

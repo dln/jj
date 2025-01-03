@@ -49,7 +49,7 @@ pub struct BookmarkMoveArgs {
     #[arg(
         long,
         group = "source",
-        value_name = "REVISIONS",
+        value_name = "REVSETS",
         add = ArgValueCandidates::new(complete::all_revisions),
     )]
     from: Vec<RevisionArg>,
@@ -60,7 +60,7 @@ pub struct BookmarkMoveArgs {
     #[arg(
         long,
         default_value = "@",
-        value_name = "REVISION",
+        value_name = "REVSET",
         add = ArgValueCandidates::new(complete::all_revisions),
     )]
     to: RevisionArg,
@@ -73,7 +73,7 @@ pub struct BookmarkMoveArgs {
     ///
     /// By default, the specified name matches exactly. Use `glob:` prefix to
     /// select bookmarks by wildcard pattern. For details, see
-    /// https://martinvonz.github.io/jj/latest/revsets/#string-patterns.
+    /// https://jj-vcs.github.io/jj/latest/revsets/#string-patterns.
     #[arg(
         group = "source",
         value_parser = StringPattern::parse,

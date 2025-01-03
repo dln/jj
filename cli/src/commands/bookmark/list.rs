@@ -37,7 +37,7 @@ use crate::ui::Ui;
 /// "+".
 ///
 /// For information about bookmarks, see
-/// https://martinvonz.github.io/jj/latest/bookmarks/.
+/// https://jj-vcs.github.io/jj/latest/bookmarks/.
 #[derive(clap::Args, Clone, Debug)]
 pub struct BookmarkListArgs {
     /// Show all tracking and non-tracking remote bookmarks including the ones
@@ -53,7 +53,7 @@ pub struct BookmarkListArgs {
     ///
     /// By default, the specified remote name matches exactly. Use `glob:`
     /// prefix to select remotes by wildcard pattern. For details, see
-    /// https://martinvonz.github.io/jj/latest/revsets/#string-patterns.
+    /// https://jj-vcs.github.io/jj/latest/revsets/#string-patterns.
     #[arg(
         long = "remote",
         value_name = "REMOTE",
@@ -76,7 +76,7 @@ pub struct BookmarkListArgs {
     ///
     /// By default, the specified name matches exactly. Use `glob:` prefix to
     /// select bookmarks by wildcard pattern. For details, see
-    /// https://martinvonz.github.io/jj/latest/revsets/#string-patterns.
+    /// https://jj-vcs.github.io/jj/latest/revsets/#string-patterns.
     #[arg(value_parser = StringPattern::parse, add = ArgValueCandidates::new(complete::bookmarks))]
     names: Option<Vec<StringPattern>>,
 
@@ -84,14 +84,14 @@ pub struct BookmarkListArgs {
     ///
     /// Note that `-r deleted_bookmark` will not work since `deleted_bookmark`
     /// wouldn't have a local target.
-    #[arg(long, short)]
+    #[arg(long, short, value_name = "REVSETS")]
     revisions: Option<Vec<RevisionArg>>,
 
     /// Render each bookmark using the given template
     ///
     /// All 0-argument methods of the `RefName` type are available as keywords.
     ///
-    /// For the syntax, see https://martinvonz.github.io/jj/latest/templates/
+    /// For the syntax, see https://jj-vcs.github.io/jj/latest/templates/
     #[arg(long, short = 'T')]
     template: Option<String>,
 }

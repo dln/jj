@@ -47,27 +47,38 @@ use crate::ui::Ui;
 pub(crate) struct RestoreArgs {
     /// Restore only these paths (instead of all paths)
     #[arg(
+        value_name = "FILESETS",
         value_hint = clap::ValueHint::AnyPath,
         add = ArgValueCompleter::new(complete::modified_range_files),
     )]
     paths: Vec<String>,
     /// Revision to restore from (source)
-    #[arg(long, short, add = ArgValueCandidates::new(complete::all_revisions))]
+    #[arg(
+        long,
+        short,
+        value_name = "REVSET",
+        add = ArgValueCandidates::new(complete::all_revisions)
+    )]
     from: Option<RevisionArg>,
     /// Revision to restore into (destination)
-    #[arg(long, short, add = ArgValueCandidates::new(complete::mutable_revisions))]
+    #[arg(
+        long,
+        short,
+        value_name = "REVSETS",
+        add = ArgValueCandidates::new(complete::mutable_revisions)
+    )]
     to: Option<RevisionArg>,
     /// Undo the changes in a revision as compared to the merge of its parents.
     ///
-    /// This undoes the changes that can be seen with `jj diff -r REVISION`. If
-    /// `REVISION` only has a single parent, this option is equivalent to `jj
-    ///  restore --to REVISION --from REVISION-`.
+    /// This undoes the changes that can be seen with `jj diff -r REVSET`. If
+    /// `REVSET` only has a single parent, this option is equivalent to `jj
+    ///  restore --to REVSET --from REVSET-`.
     ///
     /// The default behavior of `jj restore` is equivalent to `jj restore
     /// --changes-in @`.
     #[arg(
         long, short,
-        value_name = "REVISION",
+        value_name = "REVSET",
         conflicts_with_all = ["to", "from"],
         add = ArgValueCandidates::new(complete::all_revisions),
     )]
@@ -125,18 +136,18 @@ pub(crate) fn cmd_restore(
         let mut tx = workspace_command.start_transaction();
         let new_commit = tx
             .repo_mut()
-            .rewrite_commit(command.settings(), &to_commit)
+            .rewrite_commit(&to_commit)
             .set_tree_id(new_tree_id)
             .write()?;
         // rebase_descendants early; otherwise `new_commit` would always have
         // a conflicted change id at this point.
         let (num_rebased, extra_msg) = if args.restore_descendants {
             (
-                tx.repo_mut().reparent_descendants(command.settings())?,
+                tx.repo_mut().reparent_descendants()?,
                 " (while preserving their content)",
             )
         } else {
-            (tx.repo_mut().rebase_descendants(command.settings())?, "")
+            (tx.repo_mut().rebase_descendants()?, "")
         };
         if let Some(mut formatter) = ui.status_formatter() {
             write!(formatter, "Created ")?;

@@ -52,7 +52,7 @@ resolutions.
 With the `jj resolve` command, you can use an external merge tool to resolve
 conflicts that have 2 sides and a base.  There is not yet a good way of
 resolving conflicts between directories, files, and symlinks
-(https://github.com/martinvonz/jj/issues/19). You can use `jj restore` to choose
+(https://github.com/jj-vcs/jj/issues/19). You can use `jj restore` to choose
 one side of the conflict, but there's no way to even see where the involved
 parts came from.
 
@@ -64,7 +64,7 @@ control. You can tell Jujutsu to not automatically track certain files by using
 `.gitignore` files (there's no such thing as `.jjignore` yet).
 See https://git-scm.com/docs/gitignore for details about the format.
 `.gitignore` files are supported in any directory in the working copy, as well
-as in `$HOME/.gitignore` and `$GIT_DIR/info/exclude`.
+as in `$XDG_CONFIG_DIR/git/ignore` and `$GIT_DIR/info/exclude`.
 
 Ignored files are never tracked automatically (regardless of the value of
 `snapshot.auto-track`), but they can still end up being tracked for a few reasons:
@@ -72,7 +72,7 @@ Ignored files are never tracked automatically (regardless of the value of
 * if they were tracked in the parent commit
 * because of an explicit `jj file track` command
 
-You can untrack such files with the jj file untrack command.
+You can untrack such files with the `jj file untrack` command.
 
 
 ## Workspaces

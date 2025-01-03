@@ -23,14 +23,24 @@ use crate::ui::Ui;
 pub(crate) struct SimplifyParentsArgs {
     /// Simplify specified revision(s) together with their trees of descendants
     /// (can be repeated)
-    #[arg(long, short, add = ArgValueCandidates::new(complete::mutable_revisions))]
+    #[arg(
+        long,
+        short,
+        value_name = "REVSETS",
+        add = ArgValueCandidates::new(complete::mutable_revisions)
+    )]
     source: Vec<RevisionArg>,
     /// Simplify specified revision(s) (can be repeated)
     ///
     /// If both `--source` and `--revisions` are not provided, this defaults to
     /// the `revsets.simplify-parents` setting, or `reachable(@, mutable())`
     /// if it is not set.
-    #[arg(long, short, add = ArgValueCandidates::new(complete::mutable_revisions))]
+    #[arg(
+        long,
+        short,
+        value_name = "REVSETS",
+        add = ArgValueCandidates::new(complete::mutable_revisions)
+    )]
     revisions: Vec<RevisionArg>,
 }
 
@@ -72,7 +82,7 @@ pub(crate) fn cmd_simplify_parents(
     let mut reparented_descendants = 0;
 
     tx.repo_mut()
-        .transform_descendants(command.settings(), commit_ids, |mut rewriter| {
+        .transform_descendants(commit_ids, |mut rewriter| {
             let num_old_heads = rewriter.new_parents().len();
             if commit_ids_set.contains(rewriter.old_commit().id()) && num_old_heads > 1 {
                 rewriter.simplify_ancestor_merge();
@@ -80,7 +90,7 @@ pub(crate) fn cmd_simplify_parents(
             let num_new_heads = rewriter.new_parents().len();
 
             if rewriter.parents_changed() {
-                rewriter.reparent(command.settings())?.write()?;
+                rewriter.reparent().write()?;
 
                 if num_new_heads < num_old_heads {
                     simplified_commits += 1;

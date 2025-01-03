@@ -33,7 +33,6 @@ use jj_lib::rewrite::EmptyBehaviour;
 use jj_lib::rewrite::MoveCommitsStats;
 use jj_lib::rewrite::MoveCommitsTarget;
 use jj_lib::rewrite::RebaseOptions;
-use jj_lib::settings::UserSettings;
 use tracing::instrument;
 
 use crate::cli_util::short_commit_hash;
@@ -142,7 +141,12 @@ pub(crate) struct RebaseArgs {
     /// -d=dst`.
     ///
     /// If none of `-b`, `-s`, or `-r` is provided, then the default is `-b @`.
-    #[arg(long, short, add = ArgValueCandidates::new(complete::mutable_revisions))]
+    #[arg(
+        long,
+        short,
+        value_name = "REVSETS",
+        add = ArgValueCandidates::new(complete::mutable_revisions)
+    )]
     branch: Vec<RevisionArg>,
 
     /// Rebase specified revision(s) together with their trees of descendants
@@ -153,7 +157,12 @@ pub(crate) struct RebaseArgs {
     /// of others.
     ///
     /// If none of `-b`, `-s`, or `-r` is provided, then the default is `-b @`.
-    #[arg(long, short, add = ArgValueCandidates::new(complete::mutable_revisions))]
+    #[arg(
+        long,
+        short,
+        value_name = "REVSETS",
+        add = ArgValueCandidates::new(complete::mutable_revisions)
+    )]
     source: Vec<RevisionArg>,
     /// Rebase the given revisions, rebasing descendants onto this revision's
     /// parent(s)
@@ -162,7 +171,12 @@ pub(crate) struct RebaseArgs {
     /// descendant of `A`.
     ///
     /// If none of `-b`, `-s`, or `-r` is provided, then the default is `-b @`.
-    #[arg(long, short, add = ArgValueCandidates::new(complete::mutable_revisions))]
+    #[arg(
+        long,
+        short,
+        value_name = "REVSETS",
+        add = ArgValueCandidates::new(complete::mutable_revisions)
+    )]
     revisions: Vec<RevisionArg>,
 
     #[command(flatten)]
@@ -185,7 +199,12 @@ pub(crate) struct RebaseArgs {
 pub struct RebaseDestinationArgs {
     /// The revision(s) to rebase onto (can be repeated to create a merge
     /// commit)
-    #[arg(long, short, add = ArgValueCandidates::new(complete::all_revisions))]
+    #[arg(
+        long,
+        short,
+        value_name = "REVSETS",
+        add = ArgValueCandidates::new(complete::all_revisions)
+    )]
     destination: Option<Vec<RevisionArg>>,
     /// The revision(s) to insert after (can be repeated to create a merge
     /// commit)
@@ -194,6 +213,7 @@ pub struct RebaseDestinationArgs {
         short = 'A',
         visible_alias = "after",
         conflicts_with = "destination",
+        value_name = "REVSETS",
         add = ArgValueCandidates::new(complete::all_revisions),
     )]
     insert_after: Option<Vec<RevisionArg>>,
@@ -204,6 +224,7 @@ pub struct RebaseDestinationArgs {
         short = 'B',
         visible_alias = "before",
         conflicts_with = "destination",
+        value_name = "REVSETS",
         add = ArgValueCandidates::new(complete::mutable_revisions),
     )]
     insert_before: Option<Vec<RevisionArg>>,
@@ -232,7 +253,6 @@ pub(crate) fn cmd_rebase(
     if !args.revisions.is_empty() {
         rebase_revisions(
             ui,
-            command.settings(),
             &mut workspace_command,
             &args.revisions,
             &args.destination,
@@ -241,7 +261,6 @@ pub(crate) fn cmd_rebase(
     } else if !args.source.is_empty() {
         rebase_source(
             ui,
-            command.settings(),
             &mut workspace_command,
             &args.source,
             &args.destination,
@@ -250,7 +269,6 @@ pub(crate) fn cmd_rebase(
     } else {
         rebase_branch(
             ui,
-            command.settings(),
             &mut workspace_command,
             &args.branch,
             &args.destination,
@@ -262,7 +280,6 @@ pub(crate) fn cmd_rebase(
 
 fn rebase_revisions(
     ui: &mut Ui,
-    settings: &UserSettings,
     workspace_command: &mut WorkspaceCommandHelper,
     revisions: &[RevisionArg],
     rebase_destination: &RebaseDestinationArgs,
@@ -288,7 +305,6 @@ fn rebase_revisions(
     }
     rebase_revisions_transaction(
         ui,
-        settings,
         workspace_command,
         &new_parents.iter().ids().cloned().collect_vec(),
         &new_children,
@@ -299,7 +315,6 @@ fn rebase_revisions(
 
 fn rebase_source(
     ui: &mut Ui,
-    settings: &UserSettings,
     workspace_command: &mut WorkspaceCommandHelper,
     source: &[RevisionArg],
     rebase_destination: &RebaseDestinationArgs,
@@ -321,7 +336,6 @@ fn rebase_source(
 
     rebase_descendants_transaction(
         ui,
-        settings,
         workspace_command,
         &new_parents.iter().ids().cloned().collect_vec(),
         &new_children,
@@ -332,7 +346,6 @@ fn rebase_source(
 
 fn rebase_branch(
     ui: &mut Ui,
-    settings: &UserSettings,
     workspace_command: &mut WorkspaceCommandHelper,
     branch: &[RevisionArg],
     rebase_destination: &RebaseDestinationArgs,
@@ -370,7 +383,6 @@ fn rebase_branch(
 
     rebase_descendants_transaction(
         ui,
-        settings,
         workspace_command,
         &new_parent_ids,
         &new_children,
@@ -381,7 +393,6 @@ fn rebase_branch(
 
 fn rebase_descendants_transaction(
     ui: &mut Ui,
-    settings: &UserSettings,
     workspace_command: &mut WorkspaceCommandHelper,
     new_parent_ids: &[CommitId],
     new_children: &[Commit],
@@ -389,6 +400,7 @@ fn rebase_descendants_transaction(
     rebase_options: &RebaseOptions,
 ) -> Result<(), CommandError> {
     if target_roots.is_empty() {
+        writeln!(ui.status(), "Nothing changed.")?;
         return Ok(());
     }
 
@@ -406,7 +418,6 @@ fn rebase_descendants_transaction(
     };
 
     let stats = move_commits(
-        settings,
         tx.repo_mut(),
         new_parent_ids,
         new_children,
@@ -488,7 +499,6 @@ fn compute_rebase_destination(
 /// Creates a transaction for rebasing revisions.
 fn rebase_revisions_transaction(
     ui: &mut Ui,
-    settings: &UserSettings,
     workspace_command: &mut WorkspaceCommandHelper,
     new_parent_ids: &[CommitId],
     new_children: &[Commit],
@@ -496,6 +506,7 @@ fn rebase_revisions_transaction(
     rebase_options: &RebaseOptions,
 ) -> Result<(), CommandError> {
     if target_commits.is_empty() {
+        writeln!(ui.status(), "Nothing changed.")?;
         return Ok(());
     }
 
@@ -511,7 +522,6 @@ fn rebase_revisions_transaction(
     };
 
     let stats = move_commits(
-        settings,
         tx.repo_mut(),
         new_parent_ids,
         new_children,
